@@ -408,13 +408,38 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
     return img;
 }
 
++ (void)drawImageAspectFill:(UIImage *)img inRect:(CGRect)rect {
+    if (!img || rect.size.width <= 0 || rect.size.height <= 0) return;
+    CGSize imgSize = img.size;
+    if (imgSize.width <= 0 || imgSize.height <= 0) {
+        [img drawInRect:rect];
+        return;
+    }
+    CGFloat scale = MAX(rect.size.width / imgSize.width, rect.size.height / imgSize.height);
+    CGFloat drawW = imgSize.width * scale;
+    CGFloat drawH = imgSize.height * scale;
+    CGRect drawRect = CGRectMake(rect.origin.x + (rect.size.width - drawW) * 0.5,
+                                 rect.origin.y + (rect.size.height - drawH) * 0.5,
+                                 drawW,
+                                 drawH);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (ctx) {
+        CGContextSaveGState(ctx);
+        CGContextClipToRect(ctx, rect);
+        [img drawInRect:drawRect];
+        CGContextRestoreGState(ctx);
+    } else {
+        [img drawInRect:drawRect];
+    }
+}
+
 + (UIImage *)avatarForURL:(nullable NSString *)urlString
              fallbackName:(NSString *)name
                  colorHex:(NSString *)colorHex
                      size:(CGFloat)size
              onCompletion:(nullable void (^)(void))completion {
     if (urlString.length > 8 && ![urlString hasSuffix:@"/default"]) {
-        NSString *circKey = [NSString stringWithFormat:@"circ_%.0f_%@", size, urlString];
+        NSString *circKey = [NSString stringWithFormat:@"circ_af_%.0f_%@", size, urlString];
         UIImage *cachedCirc = [[self sharedImageCache] objectForKey:circKey];
         if (cachedCirc) {
             return cachedCirc;
@@ -422,9 +447,10 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
         UIImage *raw = [self cachedOrDiskRawImageForURL:urlString onCompletion:completion];
         if (raw) {
             UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0.0);
-            UIBezierPath *clip = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(0, 0, size, size)];
+            CGRect fullRect = CGRectMake(0, 0, size, size);
+            UIBezierPath *clip = [UIBezierPath bezierPathWithOvalInRect:fullRect];
             [clip addClip];
-            [raw drawInRect:CGRectMake(0, 0, size, size)];
+            [self drawImageAspectFill:raw inRect:fullRect];
             UIImage *circled = UIGraphicsGetImageFromCurrentImageContext();
             UIGraphicsEndImageContext();
             if (circled) {
@@ -478,7 +504,8 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
             CGContextSaveGState(ctx);
             [[[CTDOTheme shared] bgSecondary] setFill];
             [[UIBezierPath bezierPathWithOvalInRect:CGRectInset(r, -1.0, -1.0)] fill];
-            [subImg drawInRect:r];
+            [[UIBezierPath bezierPathWithOvalInRect:r] addClip];
+            [self drawImageAspectFill:subImg inRect:r];
             CGContextRestoreGState(ctx);
         }
         UIImage *collage = UIGraphicsGetImageFromCurrentImageContext();
@@ -904,11 +931,47 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
     return img;
 }
 
++ (UIImage *)phoneSyncIconWithSize:(CGFloat)size color:(UIColor *)color {
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0.0);
+    [color setStroke];
+    [color setFill];
+    // Smartphone outline
+    UIBezierPath *phone = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.24, size * 0.10, size * 0.52, size * 0.80)
+                                                     cornerRadius:size * 0.10];
+    phone.lineWidth = 1.65;
+    [phone stroke];
+    // Top speaker notch
+    UIBezierPath *speaker = [UIBezierPath bezierPath];
+    [speaker moveToPoint:CGPointMake(size * 0.42, size * 0.18)];
+    [speaker addLineToPoint:CGPointMake(size * 0.58, size * 0.18)];
+    speaker.lineWidth = 1.4;
+    speaker.lineCapStyle = kCGLineCapRound;
+    [speaker stroke];
+    // Sync circular arrows inside phone screen
+    UIBezierPath *arc1 = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.50, size * 0.52)
+                                                        radius:size * 0.14
+                                                    startAngle:-M_PI * 0.8
+                                                      endAngle:0.0
+                                                     clockwise:YES];
+    arc1.lineWidth = 1.45;
+    [arc1 stroke];
+    UIBezierPath *arc2 = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.50, size * 0.52)
+                                                        radius:size * 0.14
+                                                    startAngle:M_PI * 0.2
+                                                      endAngle:M_PI
+                                                     clockwise:YES];
+    arc2.lineWidth = 1.45;
+    [arc2 stroke];
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return img;
+}
+
 + (UIImage *)menuRowIconNamed:(NSString *)iconKey color:(UIColor *)color size:(CGFloat)size {
     UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0.0);
     [color setStroke];
     [color setFill];
-    if ([iconKey isEqualToString:@"shield"]) {
+    if ([iconKey isEqualToString:@"shield"] || [iconKey isEqualToString:@"security"]) {
         UIBezierPath *p = [UIBezierPath bezierPath];
         [p moveToPoint:CGPointMake(size * 0.5, size * 0.12)];
         [p addLineToPoint:CGPointMake(size * 0.84, size * 0.26)];
@@ -917,58 +980,174 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
         [p addQuadCurveToPoint:CGPointMake(size * 0.16, size * 0.54) controlPoint:CGPointMake(size * 0.20, size * 0.78)];
         [p addLineToPoint:CGPointMake(size * 0.16, size * 0.26)];
         [p closePath];
-        p.lineWidth = 1.6;
+        p.lineWidth = 1.65;
+        p.lineJoinStyle = kCGLineJoinRound;
         [p stroke];
-        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.40, size * 0.40, size * 0.20, size * 0.20)] fill];
-    } else if ([iconKey isEqualToString:@"lock"]) {
-        UIBezierPath *box = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.22, size * 0.44, size * 0.56, size * 0.42) cornerRadius:3.0];
-        box.lineWidth = 1.6;
+        UIBezierPath *chk = [UIBezierPath bezierPath];
+        [chk moveToPoint:CGPointMake(size * 0.36, size * 0.50)];
+        [chk addLineToPoint:CGPointMake(size * 0.46, size * 0.60)];
+        [chk addLineToPoint:CGPointMake(size * 0.65, size * 0.40)];
+        chk.lineWidth = 1.6;
+        chk.lineCapStyle = kCGLineCapRound;
+        chk.lineJoinStyle = kCGLineJoinRound;
+        [chk stroke];
+    } else if ([iconKey isEqualToString:@"lock"] || [iconKey isEqualToString:@"privacy"]) {
+        UIBezierPath *box = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.22, size * 0.44, size * 0.56, size * 0.42) cornerRadius:3.5];
+        box.lineWidth = 1.65;
         [box stroke];
-        UIBezierPath *shackle = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.5, size * 0.36) radius:size * 0.18 startAngle:M_PI endAngle:0 clockwise:YES];
-        shackle.lineWidth = 1.6;
+        UIBezierPath *shackle = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.5, size * 0.38) radius:size * 0.17 startAngle:M_PI endAngle:0 clockwise:YES];
+        shackle.lineWidth = 1.65;
         [shackle stroke];
-    } else if ([iconKey isEqualToString:@"pie"]) {
-        UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.16, size * 0.16, size * 0.68, size * 0.68)];
-        c.lineWidth = 1.6;
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.45, size * 0.59, size * 0.10, size * 0.10)] fill];
+    } else if ([iconKey isEqualToString:@"pie"] || [iconKey isEqualToString:@"storage"]) {
+        UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.15, size * 0.15, size * 0.70, size * 0.70)];
+        c.lineWidth = 1.65;
         [c stroke];
         UIBezierPath *w = [UIBezierPath bezierPath];
-        [w moveToPoint:CGPointMake(size * 0.5, size * 0.16)];
-        [w addLineToPoint:CGPointMake(size * 0.5, size * 0.5)];
-        [w addLineToPoint:CGPointMake(size * 0.80, size * 0.36)];
-        w.lineWidth = 1.6;
+        [w moveToPoint:CGPointMake(size * 0.50, size * 0.15)];
+        [w addLineToPoint:CGPointMake(size * 0.50, size * 0.50)];
+        [w addLineToPoint:CGPointMake(size * 0.82, size * 0.38)];
+        w.lineWidth = 1.65;
+        w.lineJoinStyle = kCGLineJoinRound;
         [w stroke];
-    } else if ([iconKey isEqualToString:@"cloud"]) {
-        UIBezierPath *c = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.14, size * 0.38, size * 0.72, size * 0.36) cornerRadius:size * 0.18];
-        c.lineWidth = 1.6;
+    } else if ([iconKey isEqualToString:@"cloud"] || [iconKey isEqualToString:@"backup"]) {
+        UIBezierPath *c = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.14, size * 0.40, size * 0.72, size * 0.34) cornerRadius:size * 0.17];
+        c.lineWidth = 1.65;
         [c stroke];
-        UIBezierPath *top = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.48, size * 0.38) radius:size * 0.18 startAngle:M_PI endAngle:0 clockwise:YES];
-        top.lineWidth = 1.6;
+        UIBezierPath *top = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.48, size * 0.40) radius:size * 0.18 startAngle:M_PI endAngle:0 clockwise:YES];
+        top.lineWidth = 1.65;
         [top stroke];
-    } else if ([iconKey isEqualToString:@"folder"]) {
-        UIBezierPath *f = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.14, size * 0.26, size * 0.72, size * 0.52) cornerRadius:3.0];
-        f.lineWidth = 1.6;
+        if ([iconKey isEqualToString:@"backup"]) {
+            UIBezierPath *arr = [UIBezierPath bezierPath];
+            [arr moveToPoint:CGPointMake(size * 0.50, size * 0.66)];
+            [arr addLineToPoint:CGPointMake(size * 0.50, size * 0.44)];
+            [arr moveToPoint:CGPointMake(size * 0.41, size * 0.52)];
+            [arr addLineToPoint:CGPointMake(size * 0.50, size * 0.43)];
+            [arr addLineToPoint:CGPointMake(size * 0.59, size * 0.52)];
+            arr.lineWidth = 1.5;
+            arr.lineCapStyle = kCGLineCapRound;
+            arr.lineJoinStyle = kCGLineJoinRound;
+            [arr stroke];
+        }
+    } else if ([iconKey isEqualToString:@"sync_phone"]) {
+        UIImage *ps = [self phoneSyncIconWithSize:size color:color];
+        [ps drawInRect:CGRectMake(0, 0, size, size)];
+    } else if ([iconKey isEqualToString:@"folder"] || [iconKey isEqualToString:@"mydocs"]) {
+        UIBezierPath *f = [UIBezierPath bezierPath];
+        [f moveToPoint:CGPointMake(size * 0.14, size * 0.26)];
+        [f addLineToPoint:CGPointMake(size * 0.40, size * 0.26)];
+        [f addLineToPoint:CGPointMake(size * 0.48, size * 0.34)];
+        [f addLineToPoint:CGPointMake(size * 0.86, size * 0.34)];
+        [f addLineToPoint:CGPointMake(size * 0.86, size * 0.78)];
+        [f addLineToPoint:CGPointMake(size * 0.14, size * 0.78)];
+        [f closePath];
+        f.lineWidth = 1.65;
+        f.lineJoinStyle = kCGLineJoinRound;
         [f stroke];
-    } else if ([iconKey isEqualToString:@"bell"]) {
-        UIBezierPath *b = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.24, size * 0.18, size * 0.52, size * 0.54) cornerRadius:size * 0.24];
-        b.lineWidth = 1.6;
+    } else if ([iconKey isEqualToString:@"qr_wallet"]) {
+        UIImage *qr = [self qrScanIconWithSize:size color:color];
+        [qr drawInRect:CGRectMake(0, 0, size, size)];
+    } else if ([iconKey isEqualToString:@"bell"] || [iconKey isEqualToString:@"notif"]) {
+        UIBezierPath *b = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.24, size * 0.18, size * 0.52, size * 0.50) cornerRadius:size * 0.24];
+        b.lineWidth = 1.65;
         [b stroke];
-    } else if ([iconKey isEqualToString:@"brush"]) {
-        UIBezierPath *b = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.24, size * 0.20, size * 0.52, size * 0.32) cornerRadius:3.0];
-        b.lineWidth = 1.6;
+        UIBezierPath *base = [UIBezierPath bezierPath];
+        [base moveToPoint:CGPointMake(size * 0.16, size * 0.68)];
+        [base addLineToPoint:CGPointMake(size * 0.84, size * 0.68)];
+        base.lineWidth = 1.65;
+        base.lineCapStyle = kCGLineCapRound;
+        [base stroke];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.43, size * 0.73, size * 0.14, size * 0.12)] fill];
+    } else if ([iconKey isEqualToString:@"msg"]) {
+        UIBezierPath *bub = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.14, size * 0.18, size * 0.72, size * 0.54) cornerRadius:size * 0.22];
+        bub.lineWidth = 1.65;
+        [bub stroke];
+        UIBezierPath *ln = [UIBezierPath bezierPath];
+        [ln moveToPoint:CGPointMake(size * 0.30, size * 0.38)];
+        [ln addLineToPoint:CGPointMake(size * 0.70, size * 0.38)];
+        [ln moveToPoint:CGPointMake(size * 0.30, size * 0.52)];
+        [ln addLineToPoint:CGPointMake(size * 0.56, size * 0.52)];
+        ln.lineWidth = 1.5;
+        ln.lineCapStyle = kCGLineCapRound;
+        [ln stroke];
+    } else if ([iconKey isEqualToString:@"call"]) {
+        UIImage *ph = [self phoneCallIconWithSize:size color:color];
+        [ph drawInRect:CGRectMake(0, 0, size, size)];
+    } else if ([iconKey isEqualToString:@"journal"] || [iconKey isEqualToString:@"game"]) {
+        UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.15, size * 0.15, size * 0.70, size * 0.70)];
+        c.lineWidth = 1.65;
+        [c stroke];
+        UIBezierPath *hands = [UIBezierPath bezierPath];
+        [hands moveToPoint:CGPointMake(size * 0.50, size * 0.30)];
+        [hands addLineToPoint:CGPointMake(size * 0.50, size * 0.52)];
+        [hands addLineToPoint:CGPointMake(size * 0.66, size * 0.60)];
+        hands.lineWidth = 1.65;
+        hands.lineCapStyle = kCGLineCapRound;
+        hands.lineJoinStyle = kCGLineJoinRound;
+        [hands stroke];
+    } else if ([iconKey isEqualToString:@"video"]) {
+        UIImage *vd = [self videoCallIconWithSize:size color:color];
+        [vd drawInRect:CGRectMake(0, 0, size, size)];
+    } else if ([iconKey isEqualToString:@"contacts"]) {
+        UIBezierPath *card = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.20, size * 0.14, size * 0.60, size * 0.72) cornerRadius:3.5];
+        card.lineWidth = 1.65;
+        [card stroke];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.40, size * 0.28, size * 0.20, size * 0.20)] stroke];
+        UIBezierPath *sh = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.32, size * 0.54, size * 0.36, size * 0.18) cornerRadius:3.0];
+        sh.lineWidth = 1.5;
+        [sh stroke];
+    } else if ([iconKey isEqualToString:@"brush"] || [iconKey isEqualToString:@"theme"] || [iconKey isEqualToString:@"style"]) {
+        UIBezierPath *b = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.22, size * 0.18, size * 0.56, size * 0.32) cornerRadius:4.0];
+        b.lineWidth = 1.65;
         [b stroke];
-        UIBezierPath *h = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.42, size * 0.52, size * 0.16, size * 0.32) cornerRadius:2.0];
-        h.lineWidth = 1.6;
+        UIBezierPath *h = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.42, size * 0.50, size * 0.16, size * 0.34) cornerRadius:2.5];
+        h.lineWidth = 1.65;
         [h stroke];
-    } else if ([iconKey isEqualToString:@"switch_user"]) {
-        UIBezierPath *h = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.28, size * 0.16, size * 0.32, size * 0.32)];
-        h.lineWidth = 1.6;
+    } else if ([iconKey isEqualToString:@"info"]) {
+        UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.15, size * 0.15, size * 0.70, size * 0.70)];
+        c.lineWidth = 1.65;
+        [c stroke];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.46, size * 0.28, size * 0.08, size * 0.08)] fill];
+        UIBezierPath *st = [UIBezierPath bezierPath];
+        [st moveToPoint:CGPointMake(size * 0.50, size * 0.44)];
+        [st addLineToPoint:CGPointMake(size * 0.50, size * 0.70)];
+        st.lineWidth = 1.8;
+        st.lineCapStyle = kCGLineCapRound;
+        [st stroke];
+    } else if ([iconKey isEqualToString:@"help"]) {
+        UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.15, size * 0.15, size * 0.70, size * 0.70)];
+        c.lineWidth = 1.65;
+        [c stroke];
+        UIBezierPath *q = [UIBezierPath bezierPathWithArcCenter:CGPointMake(size * 0.50, size * 0.40)
+                                                         radius:size * 0.11
+                                                     startAngle:M_PI * 1.1
+                                                       endAngle:M_PI * 0.25
+                                                      clockwise:YES];
+        [q addLineToPoint:CGPointMake(size * 0.50, size * 0.57)];
+        q.lineWidth = 1.65;
+        q.lineCapStyle = kCGLineCapRound;
+        [q stroke];
+        [[UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.46, size * 0.66, size * 0.08, size * 0.08)] fill];
+    } else if ([iconKey isEqualToString:@"switch_user"] || [iconKey isEqualToString:@"switch_acc"]) {
+        UIBezierPath *h = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.26, size * 0.16, size * 0.30, size * 0.30)];
+        h.lineWidth = 1.65;
         [h stroke];
-        UIBezierPath *s = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.16, size * 0.54, size * 0.56, size * 0.26) cornerRadius:size * 0.12];
-        s.lineWidth = 1.6;
+        UIBezierPath *s = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(size * 0.14, size * 0.52, size * 0.54, size * 0.26) cornerRadius:size * 0.12];
+        s.lineWidth = 1.65;
         [s stroke];
+        UIBezierPath *arr = [UIBezierPath bezierPath];
+        [arr moveToPoint:CGPointMake(size * 0.66, size * 0.34)];
+        [arr addLineToPoint:CGPointMake(size * 0.88, size * 0.34)];
+        [arr moveToPoint:CGPointMake(size * 0.80, size * 0.26)];
+        [arr addLineToPoint:CGPointMake(size * 0.88, size * 0.34)];
+        [arr addLineToPoint:CGPointMake(size * 0.80, size * 0.42)];
+        arr.lineWidth = 1.5;
+        arr.lineCapStyle = kCGLineCapRound;
+        arr.lineJoinStyle = kCGLineJoinRound;
+        [arr stroke];
     } else {
         UIBezierPath *c = [UIBezierPath bezierPathWithOvalInRect:CGRectMake(size * 0.16, size * 0.16, size * 0.68, size * 0.68)];
-        c.lineWidth = 1.6;
+        c.lineWidth = 1.65;
         [c stroke];
     }
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
@@ -1852,6 +2031,14 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
     NSString *waitCfirm = [qrData[@"chk_wait_cfirm"] isKindOfClass:[NSString class]] ? qrData[@"chk_wait_cfirm"] : @"";
     NSInteger qrTimeout = [qrData[@"qr_timeout"] integerValue] ?: 180;
 
+    if (b64Qr.length == 0 && qrCnt.length > 0) {
+        UIImage *genQr = [CTDOIconRenderer qrCodeImageForString:qrCnt size:420.0];
+        NSData *pngData = genQr ? UIImagePNGRepresentation(genQr) : nil;
+        if (pngData.length > 0) {
+            b64Qr = [pngData base64EncodedStringWithOptions:0] ?: @"";
+        }
+    }
+
     @synchronized (rt) {
         if (rt.qrGeneration != gen) return;
         rt.qrPayload = qrCnt;
@@ -1860,8 +2047,11 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
         rt.chkWaitScan = waitScan;
         rt.chkWaitCfirm = waitCfirm;
         rt.status = @"qr_waiting_scan";
-        rt.statusMessage = [NSString stringWithFormat:@"Mở Zalo trên điện thoại → Quét mã QR này để đăng nhập (Hiệu lực %lds)", (long)qrTimeout];
+        rt.statusMessage = [NSString stringWithFormat:@"Mở Zalo trên điện thoại → Quét mã QR này để đăng nhập & đồng bộ (Hiệu lực %lds)", (long)qrTimeout];
     }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"CTDOAuthDidUpdateNotification" object:@(rt.slotIndex)];
+    });
 
     if (waitScan.length == 0) {
         return;
@@ -2920,6 +3110,175 @@ static NSString * const kZaloUserAgent = @"Mozilla/5.0 (Windows NT 10.0; Win64; 
         });
     }
     return [self authStateForSlot:slot];
+}
+
+- (void)requestPhoneMessageSyncForSlot:(NSInteger)slot
+                            completion:(nullable void (^)(NSInteger syncedCount, NSString *statusText))completion {
+    CTDOSlotRuntime *rt = [self runtimeForSlot:slot];
+    if (![rt.status isEqualToString:@"authenticated"] || !rt.secretKeyData) {
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(0, @"Chưa đăng nhập tài khoản Zalo. Hãy quét mã QR để bắt đầu đồng bộ.");
+            });
+        }
+        return;
+    }
+
+    void (^emitProgress)(double, NSString *) = ^(double pct, NSString *txt) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"CTDOSyncProgressNotification"
+                                                                object:nil
+                                                              userInfo:@{
+                                                                  @"slot": @(slot),
+                                                                  @"progress": @(pct),
+                                                                  @"text": txt ?: @""
+                                                              }];
+        });
+    };
+
+    emitProgress(0.15, @"📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại & Zalo Cloud...");
+
+    dispatch_async(self.netQueue, ^{
+        // 1. Send active sync signal via lp_chat multi-batch drain (resetLastActionId / more == 1)
+        for (NSInteger batch = 0; batch < 3; batch++) {
+            NSString *qJson = [NSString stringWithFormat:@"{\"1\":{\"lastId\":\"%@\",\"ids\":[]},\"2\":{\"lastId\":\"%@\",\"ids\":[]},\"3\":{\"lastId\":\"%@\",\"ids\":[]}}",
+                               rt.lastActionId ?: @"0", rt.lastActionId ?: @"0", rt.lastActionId ?: @"0"];
+            NSString *b64 = [[qJson dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+            NSString *tail = [CTDOCoreBridge urlEncode:[NSString stringWithFormat:@"%@,1", b64]];
+            int64_t ts = (int64_t)[[NSDate date] timeIntervalSince1970];
+            NSString *lpUrl = [NSString stringWithFormat:@"%@/?zpw_ver=%@&zpw_type=%@&params=%@,%@,%@&ts=%lld",
+                               rt.hostLpChat, kZaloZpwVer, kZaloZpwType, rt.lastActionId ?: @"0", rt.lastActionIdOther ?: @"0", tail, ts];
+            NSDictionary *lpResp = [self sendSyncHTTPForSlot:rt method:@"GET" url:lpUrl formBody:nil timeout:10.0];
+            id lpDec = [self decryptZaloEnvelope:lpResp[@"json"] withKeyData:rt.secretKeyData];
+            if ([lpDec isKindOfClass:[NSDictionary class]] && [lpDec[@"error_code"] integerValue] == 0) {
+                NSDictionary *dn = [lpDec[@"data"] isKindOfClass:[NSDictionary class]] ? lpDec[@"data"] : lpDec;
+                id lai = dn[@"lastActionId"] ?: dn[@"resetLastActionId"];
+                if (lai && lai != [NSNull null]) {
+                    NSString *laiStr = [NSString stringWithFormat:@"%@", lai];
+                    if (laiStr.length > 0 && ![laiStr isEqualToString:@"0"]) {
+                        rt.lastActionId = laiStr;
+                    }
+                }
+                [self ingestZaloMessagesEnvelope:lpDec forSlot:rt];
+                if ([dn[@"more"] integerValue] != 1 && dn[@"resetLastActionId"] == nil) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        emitProgress(0.42, @"🔄 Đang đồng bộ danh bạ, nhóm & hộp thư (/api/preloadconvers/get-last-msgs)...");
+
+        // 2. Refresh profile, friends, and groups
+        [self syncMyProfileForSlot:rt];
+        [self syncRealThreadsAndMessagesForSlot:rt];
+
+        // 3. Batch-query /api/preloadconvers/get-last-msgs in 25-thread chunks (<id>_0 for 1-1, <id>_1 for groups)
+        NSMutableArray<NSDictionary *> *snapThreads = [NSMutableArray array];
+        @synchronized (rt) {
+            for (NSDictionary *t in rt.threads) {
+                [snapThreads addObject:[t copy]];
+            }
+        }
+        NSUInteger chunkSize = 25;
+        for (NSUInteger offset = 0; offset < MIN((NSUInteger)75, snapThreads.count); offset += chunkSize) {
+            NSMutableDictionary *mapObj = [NSMutableDictionary dictionary];
+            NSUInteger endIdx = MIN(offset + chunkSize, snapThreads.count);
+            for (NSUInteger i = offset; i < endIdx; i++) {
+                NSDictionary *t = snapThreads[i];
+                NSString *tid = t[@"id"] ?: @"";
+                if (tid.length == 0) continue;
+                BOOL isG = [t[@"is_group"] boolValue];
+                NSString *clean = [tid hasPrefix:@"g"] ? [tid substringFromIndex:1] : tid;
+                NSString *key = [NSString stringWithFormat:@"%@_%d", clean, isG ? 1 : 0];
+                mapObj[key] = @"1";
+            }
+            if (mapObj.count > 0) {
+                NSData *md = [NSJSONSerialization dataWithJSONObject:mapObj options:0 error:nil];
+                NSString *mJson = [[NSString alloc] initWithData:md encoding:NSUTF8StringEncoding] ?: @"{}";
+                NSString *enc = [self encodeAuthenticatedParams:@{@"threadIdLocalMsgId": mJson, @"imei": rt.imei} forSlot:rt];
+                if (enc) {
+                    NSString *u = [NSString stringWithFormat:@"%@/api/preloadconvers/get-last-msgs?zpw_ver=%@&zpw_type=%@&params=%@",
+                                   rt.hostConvers, kZaloZpwVer, kZaloZpwType, enc];
+                    NSDictionary *r = [self sendSyncHTTPForSlot:rt method:@"GET" url:u formBody:nil timeout:10.0];
+                    id dec = [self decryptZaloEnvelope:r[@"json"] withKeyData:rt.secretKeyData];
+                    if ([dec isKindOfClass:[NSDictionary class]] && [dec[@"error_code"] integerValue] == 0) {
+                        [self ingestZaloMessagesEnvelope:dec forSlot:rt];
+                    }
+                }
+            }
+        }
+
+        emitProgress(0.75, @"☁️ Đang tải lịch sử tin nhắn nhiều trang (/api/cm/getrecentv2 & getoldv2)...");
+
+        // 4. Multi-page cloud message sync (getrecentv2 + getoldv2 walking lastMsgId backwards)
+        NSMutableArray<NSString *> *targets = [NSMutableArray array];
+        if (rt.send2meId.length > 0) {
+            [targets addObject:rt.send2meId];
+        }
+        for (NSDictionary *t in snapThreads) {
+            if ([t[@"is_group"] boolValue]) {
+                [targets addObject:t[@"id"]];
+                if (targets.count >= 16) break;
+            }
+        }
+        for (NSString *tid in targets) {
+            NSString *cleanId = [tid hasPrefix:@"g"] ? [tid substringFromIndex:1] : tid;
+            BOOL isSend2Me = (rt.send2meId.length > 0 && [cleanId isEqualToString:rt.send2meId]);
+            NSString *cursorMsgId = @"9223372036854775808";
+            for (NSInteger page = 0; page < 3; page++) {
+                NSString *ep = (page == 0) ? @"/api/cm/getrecentv2" : @"/api/cm/getoldv2";
+                NSMutableDictionary *cmBody = [NSMutableDictionary dictionaryWithDictionary:@{
+                    @"groupId": cleanId,
+                    @"globalMsgId": cursorMsgId,
+                    @"count": @(30),
+                    @"msgIds": @[],
+                    @"imei": rt.imei,
+                    @"src": @(1)
+                }];
+                if (isSend2Me) cmBody[@"isOA"] = @(1);
+                NSString *cmEnc = [self encodeAuthenticatedParams:cmBody forSlot:rt];
+                if (!cmEnc) break;
+                NSString *cmUrl = [NSString stringWithFormat:@"%@%@?zpw_ver=%@&zpw_type=%@&params=%@&nretry=0",
+                                   rt.hostCloudMsg, ep, kZaloZpwVer, kZaloZpwType, cmEnc];
+                NSDictionary *cmResp = [self sendSyncHTTPForSlot:rt method:@"GET" url:cmUrl formBody:nil timeout:10.0];
+                id cmDec = [self decryptZaloEnvelope:cmResp[@"json"] withKeyData:rt.secretKeyData];
+                [self ingestZaloMessagesEnvelope:cmDec forSlot:rt forcedThreadId:(isSend2Me ? rt.send2meId : tid)];
+                NSDictionary *dn = [cmDec isKindOfClass:[NSDictionary class]] ? (cmDec[@"data"] ?: cmDec) : nil;
+                id nextCursor = [dn isKindOfClass:[NSDictionary class]] ? (dn[@"lastMsgId"] ?: dn[@"data"][@"lastMsgId"]) : nil;
+                NSInteger moreFlag = [dn isKindOfClass:[NSDictionary class]] ? [dn[@"more"] integerValue] : 0;
+                if (nextCursor && nextCursor != [NSNull null]) {
+                    NSString *nextStr = [NSString stringWithFormat:@"%@", nextCursor];
+                    if (nextStr.length > 0 && ![nextStr isEqualToString:@"0"] && ![nextStr isEqualToString:cursorMsgId] && moreFlag == 1) {
+                        cursorMsgId = nextStr;
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+
+        [self saveSlotSession:rt];
+
+        NSInteger totalThreads = 0;
+        NSInteger totalMessages = 0;
+        @synchronized (rt) {
+            totalThreads = rt.threads.count;
+            for (NSString *k in rt.messagesByThread) {
+                totalMessages += [rt.messagesByThread[k] count];
+            }
+        }
+        NSString *doneMsg = [NSString stringWithFormat:@"✓ Đã đồng bộ %ld tin nhắn trên %ld hội thoại với điện thoại",
+                             (long)totalMessages, (long)totalThreads];
+        emitProgress(1.0, doneMsg);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"CTDOThreadsDidUpdateNotification" object:nil];
+            if (completion) {
+                completion(totalMessages, doneMsg);
+            }
+        });
+    });
 }
 
 // ============================================================================

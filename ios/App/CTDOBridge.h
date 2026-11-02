@@ -40,6 +40,7 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
 @end
 
 @interface CTDOIconRenderer : NSObject
++ (void)drawImageAspectFill:(UIImage *)img inRect:(CGRect)rect;
 + (UIImage *)avatarWithInitials:(NSString *)initials
                        colorHex:(NSString *)colorHex
                            size:(CGFloat)size
@@ -66,6 +67,7 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
 + (UIImage *)phoneCallIconWithSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)videoCallIconWithSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)addFriendIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)phoneSyncIconWithSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)groupPrefixIconWithSize:(CGFloat)size;
 + (UIImage *)pinIconWithSize:(CGFloat)size color:(UIColor *)color;
 + (UIImage *)mutedBellIconWithSize:(CGFloat)size color:(UIColor *)color;
@@ -90,6 +92,8 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
                               password:(NSString *)password;
 - (NSDictionary *)logoutSlot:(NSInteger)slot;
 - (NSDictionary *)refreshThreadsForSlot:(NSInteger)slot;
+- (void)requestPhoneMessageSyncForSlot:(NSInteger)slot
+                            completion:(nullable void (^)(NSInteger syncedCount, NSString *statusText))completion;
 
 /// Account, Thread & Contact Operations.
 - (NSDictionary *)switchAccount:(NSInteger)slot;

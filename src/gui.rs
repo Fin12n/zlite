@@ -41,6 +41,14 @@ fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
 }
 
 pub enum GuiEvent {
+    /// Terminal response for a Settings authorization action.
+    NotificationAuthorization {
+        request_id: u64,
+        result: Result<
+            crate::native_notifications::AuthorizationStatus,
+            crate::native_notifications::NotificationError,
+        >,
+    },
     QrReady {
         qr_login: QrLogin,
         qr_image: egui::ColorImage,
@@ -493,6 +501,7 @@ pub struct ZaloGuiApp {
     allow_quit: bool,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
+    notification_authorization: crate::native_notifications::AuthorizationState,
     settings: AppSettings,
     settings_blur_tex: Option<TextureHandle>,
     settings_blur_req_at: Option<std::time::Instant>,
@@ -698,6 +707,7 @@ impl ZaloGuiApp {
             allow_quit: false,
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
+            notification_authorization: Default::default(),
             settings: loaded_settings,
             settings_blur_tex: None,
             settings_blur_req_at: None,
@@ -825,6 +835,9 @@ impl ZaloGuiApp {
     fn check_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
+                GuiEvent::NotificationAuthorization { request_id, result } => {
+                    self.notification_authorization.finish(request_id, result);
+                }
                 GuiEvent::QrReady { qr_image, .. } => {
                     self.qr_texture = Some(ctx.load_texture(
                         "qr_code_tex",

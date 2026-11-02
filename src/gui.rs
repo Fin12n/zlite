@@ -263,6 +263,14 @@ enum FeedModalTab {
     Avatars,
     Packet50001,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContactsSubTab {
+    Friends,
+    Groups,
+    FriendRequests,
+    GroupInvites,
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
@@ -327,6 +335,7 @@ struct AppSettings {
     // 10. Proxy & Đa tài khoản (#64)
     proxy_url: String,
     multi_profile_name: String,
+    info_drawer_open: bool,
 }
 
 impl Default for AppSettings {
@@ -379,6 +388,7 @@ impl Default for AppSettings {
             skipped_update_version: String::new(),
             proxy_url: String::new(),
             multi_profile_name: "acc2".into(),
+            info_drawer_open: false,
         }
     }
 }
@@ -560,6 +570,9 @@ pub struct ZaloGuiApp {
     feed_pkt_tab: u32,
     feed_pkt_page: u32,
     feed_pkt_count: u32,
+    contacts_view_open: bool,
+    contacts_sub_tab: ContactsSubTab,
+    contacts_search_query: String,
     schedule_modal_open: bool,
     schedule_custom_input: String,
     schedule_editing_id: Option<i64>,
@@ -697,7 +710,7 @@ impl ZaloGuiApp {
             active_call: None,
             image_viewer: None,
             status_msg: "Trực tuyến · Sẵn sàng".into(),
-            info_drawer_open: true,
+            info_drawer_open: loaded_settings.info_drawer_open,
             profile_menu_open: false,
             wipe_confirm_open: false,
             toast_notice: None,
@@ -787,6 +800,9 @@ impl ZaloGuiApp {
             feed_pkt_tab: 0,
             feed_pkt_page: 1,
             feed_pkt_count: 20,
+            contacts_view_open: false,
+            contacts_sub_tab: ContactsSubTab::Friends,
+            contacts_search_query: String::new(),
             schedule_modal_open: false,
             schedule_custom_input: String::new(),
             schedule_editing_id: None,

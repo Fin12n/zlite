@@ -1880,6 +1880,75 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
+                            if cate_id == AMI_FAT_CAT_CATE_ID {
+                                if let Some((_lbl, png_bytes, gif_bytes)) =
+                                    get_ami_fat_cat_gif(sticker_id)
+                                {
+                                    tokio::spawn(async move {
+                                        let idx = sticker_id.saturating_sub(999000);
+                                        let _ = std::fs::create_dir_all("stickers_cache");
+                                        let gif_path = std::path::PathBuf::from(format!(
+                                            "stickers_cache/ami_fat_cat_{idx:02}.gif"
+                                        ));
+                                        if !gif_path.exists() {
+                                            let _ = std::fs::write(&gif_path, gif_bytes);
+                                        }
+                                        let key = format!("stk_{cate_id}_{sticker_id}");
+                                        if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+                                            let rgba = dyn_img.to_rgba8();
+                                            let size =
+                                                [rgba.width() as usize, rgba.height() as usize];
+                                            let pixels = rgba.as_flat_samples();
+                                            let color_img =
+                                                egui::ColorImage::from_rgba_unmultiplied(
+                                                    size,
+                                                    pixels.as_slice(),
+                                                );
+                                            let _ = gui_tx_clone
+                                                .send(GuiEvent::StickerImageReady {
+                                                    key,
+                                                    image: color_img,
+                                                });
+                                        }
+                                        let s = session_clone.lock().await.clone();
+                                        let client_id = crate::chat::next_client_message_id();
+                                        let ami_tag = format!("#ami_fat_cat_{idx:02}");
+                                        match crate::chat::send_attachment(
+                                            &s, &to_id, is_group, &gif_path, &ami_tag,
+                                        )
+                                        .await
+                                        {
+                                            Ok((_resp, cm)) => {
+                                                let _ = gui_tx_clone.send(GuiEvent::StickerSent {
+                                                    client_message_id: cm.client_message_id,
+                                                    thread_id: to_id,
+                                                    msg_id: cm.id,
+                                                    sticker_id,
+                                                    cate_id,
+                                                    sticker_type,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let err_s = e.to_string();
+                                                crate::logger::log_error(
+                                                    "gui::send_ami_sticker",
+                                                    &err_s,
+                                                );
+                                                let _ = gui_tx_clone.send(GuiEvent::StickerSent {
+                                                    client_message_id: client_id.to_string(),
+                                                    thread_id: to_id,
+                                                    msg_id: format!("out_{client_id}"),
+                                                    sticker_id,
+                                                    cate_id,
+                                                    sticker_type,
+                                                });
+                                            }
+                                        }
+                                        ctx_clone.request_repaint();
+                                    });
+                                    continue;
+                                }
+                            }
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
                                 let client_id = crate::chat::next_client_message_id();
@@ -1946,6 +2015,33 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
+                            if key.starts_with("stk_99901_") {
+                                if let Some(sid) = key
+                                    .strip_prefix("stk_99901_")
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                {
+                                    if let Some((_lbl, png_bytes, _gif)) = get_ami_fat_cat_gif(sid)
+                                    {
+                                        if let Ok(dyn_img) = image::load_from_memory(png_bytes) {
+                                            let rgba = dyn_img.to_rgba8();
+                                            let size =
+                                                [rgba.width() as usize, rgba.height() as usize];
+                                            let pixels = rgba.as_flat_samples();
+                                            let color_img =
+                                                egui::ColorImage::from_rgba_unmultiplied(
+                                                    size,
+                                                    pixels.as_slice(),
+                                                );
+                                            let _ = gui_tx.send(GuiEvent::StickerImageReady {
+                                                key,
+                                                image: color_img,
+                                            });
+                                            egui_ctx.request_repaint();
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
                             tokio::spawn(async move {
                                 let cache_dir = std::path::Path::new("stickers_cache");
                                 let _ = std::fs::create_dir_all(cache_dir);

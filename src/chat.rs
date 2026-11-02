@@ -1327,6 +1327,168 @@ pub(crate) fn next_client_message_id() -> u64 {
     now.max(previous.saturating_add(1))
 }
 
+/// Convert inline Markdown (`**bold**`, `__underline__`, `~~strikethrough~~`, `*italic*`) and
+/// line-prefix styles (`## `, `- `, `1. `) into Zalo PC's native `(clean_text, Option<textProperties>)`
+/// format (`{"styles":[{"start":N,"len":M,"st":"b,i,u,s,f_18,lst_1,lst_2"}],"ver":0}` in `compact-app-pc.js`).
+pub fn extract_zalo_rtf_text_properties(raw: &str) -> (String, Option<String>) {
+    let mut out_text = String::with_capacity(raw.len());
+    let mut styles: Vec<Value> = Vec::new();
+
+    let lines: Vec<&str> = raw.split('\n').collect();
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        if line_idx > 0 {
+            out_text.push('\n');
+        }
+        let mut line = *raw_line;
+        let mut line_tags: Vec<&'static str> = Vec::new();
+        if let Some(rest) = line.strip_prefix("### ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_16");
+        } else if let Some(rest) = line.strip_prefix("## ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_18");
+        } else if let Some(rest) = line.strip_prefix("# ") {
+            line = rest;
+            line_tags.push("b");
+            line_tags.push("f_18");
+        } else if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            line = rest;
+            line_tags.push("lst_1");
+        } else if let Some(rest) = line.strip_prefix("1. ") {
+            line = rest;
+            line_tags.push("lst_2");
+        }
+
+        let line_start_u16 = out_text.encode_utf16().count();
+        let mut rest = line;
+        while !rest.is_empty() {
+            let mut matched_span = false;
+            for (delim, st_tag) in [("`", ""), ("**", "b"), ("__", "u"), ("~~", "s"), ("*", "i")] {
+                if rest.starts_with(delim) {
+                    let dlen = delim.len();
+                    let after = &rest[dlen..];
+                    if let Some(end_pos) = after.find(delim) {
+                        let inner = &after[..end_pos];
+                        if !inner.is_empty() && !inner.contains('\n') {
+                            let span_start = out_text.encode_utf16().count();
+                            let span_len = inner.encode_utf16().count();
+                            out_text.push_str(inner);
+                            if !st_tag.is_empty() && span_len > 0 {
+                                styles.push(json!({
+                                    "start": span_start,
+                                    "len": span_len,
+                                    "st": st_tag,
+                                }));
+                            }
+                            rest = &after[end_pos + dlen..];
+                            matched_span = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if matched_span {
+                continue;
+            }
+            let mut chars = rest.chars();
+            if let Some(ch) = chars.next() {
+                out_text.push(ch);
+                rest = chars.as_str();
+            } else {
+                break;
+            }
+        }
+        let line_len_u16 = out_text.encode_utf16().count().saturating_sub(line_start_u16);
+        if !line_tags.is_empty() && line_len_u16 > 0 {
+            styles.push(json!({
+                "start": line_start_u16,
+                "len": line_len_u16,
+                "st": line_tags.join(","),
+            }));
+        }
+    }
+
+    if styles.is_empty() {
+        (raw.to_string(), None)
+    } else {
+        let prop_str = json!({
+            "styles": styles,
+            "ver": 0,
+        })
+        .to_string();
+        (out_text, Some(prop_str))
+    }
+}
+
+/// Reconstruct Markdown markers from Zalo's incoming `rtf` object (`{"action":"rtf","title":...,"params":"{\"styles\":[...]}"}`)
+/// so incoming rich-text messages sent from official Zalo PC / Mobile render with bold, underline, strikethrough, and lists.
+fn format_incoming_zalo_rtf(title: &str, params_str: &str) -> String {
+    let Ok(p_val) = serde_json::from_str::<Value>(params_str.trim()) else {
+        return title.to_string();
+    };
+    let Some(styles) = p_val.get("styles").and_then(Value::as_array) else {
+        return title.to_string();
+    };
+    if styles.is_empty() {
+        return title.to_string();
+    }
+    let u16_units: Vec<u16> = title.encode_utf16().collect();
+    let mut spans: Vec<(usize, usize, String)> = styles
+        .iter()
+        .filter_map(|s| {
+            let start = s.get("start")?.as_u64()? as usize;
+            let len = s.get("len")?.as_u64()? as usize;
+            let st = s.get("st")?.as_str()?.to_string();
+            if len > 0 && start + len <= u16_units.len() {
+                Some((start, start + len, st))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if spans.is_empty() {
+        return title.to_string();
+    }
+    spans.sort_by_key(|x| x.0);
+    let mut out = String::with_capacity(title.len() + spans.len() * 4);
+    let mut cursor = 0usize;
+    for (s, e, st) in spans {
+        if s < cursor {
+            continue;
+        }
+        if s > cursor {
+            out.push_str(&String::from_utf16_lossy(&u16_units[cursor..s]));
+        }
+        let seg = String::from_utf16_lossy(&u16_units[s..e]);
+        let tags: Vec<&str> = st.split(',').collect();
+        let is_bold = tags.contains(&"b") || tags.iter().any(|t| t.starts_with("f_"));
+        let is_italic = tags.contains(&"i");
+        let is_under = tags.contains(&"u");
+        let is_strike = tags.contains(&"s");
+        let mut wrapped = seg;
+        if is_italic && !is_bold {
+            wrapped = format!("*{wrapped}*");
+        }
+        if is_bold {
+            wrapped = format!("**{wrapped}**");
+        }
+        if is_under {
+            wrapped = format!("__{wrapped}__");
+        }
+        if is_strike {
+            wrapped = format!("~~{wrapped}~~");
+        }
+        out.push_str(&wrapped);
+        cursor = e;
+    }
+    if cursor < u16_units.len() {
+        out.push_str(&String::from_utf16_lossy(&u16_units[cursor..]));
+    }
+    out
+}
+
 /// Send a 1-1 text message: `POST {domains.chat}/api/message/sms?{common}`
 pub async fn send_message(s: &Session, to_id: &str, text: &str) -> Result<Value> {
     send_message_with_client_id(s, to_id, text, next_client_message_id()).await
@@ -1342,12 +1504,16 @@ pub(crate) async fn send_message_with_client_id(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let body = obj(&[
+    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+    let mut body = obj(&[
         ("toid", json!(to_id)),
-        ("message", json!(text)),
+        ("message", json!(clean_text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
     ]);
+    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+        map.insert("textProperties".into(), json!(tp));
+    }
     let params = s.encoded_params(&body)?;
 
     let host = if s.domains.chat.contains("-msg-chat.")
@@ -1394,13 +1560,17 @@ pub(crate) async fn send_group_message_with_client_id(
         .trim_start_matches("group_")
         .trim_start_matches('g')
         .trim_start_matches('G');
-    let body = obj(&[
+    let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+    let mut body = obj(&[
         ("grid", json!(clean_grid)),
-        ("message", json!(text)),
+        ("message", json!(clean_text)),
         ("clientId", json!(now)),
         ("imei", json!(s.imei)),
         ("visibility", json!(0)),
     ]);
+    if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+        map.insert("textProperties".into(), json!(tp));
+    }
     let params = s.encoded_params(&body)?;
     let url = format!(
         "{}/api/group/sendmsg?{}",
@@ -3045,9 +3215,10 @@ pub(crate) async fn send_quote_message_with_client_id(
                 .trim_start_matches("group_")
                 .trim_start_matches('g')
                 .trim_start_matches('G');
-            let body = obj(&[
+            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+            let mut body = obj(&[
                 ("grid", json!(clean_grid)),
-                ("message", json!(text)),
+                ("message", json!(clean_text)),
                 ("clientId", json!(now)),
                 ("language", json!("vi")),
                 ("qmsgOwner", json!(qmsg_owner)),
@@ -3061,6 +3232,9 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("imei", json!(s.imei)),
                 ("zsource", json!(101)),
             ]);
+            if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+                map.insert("textProperties".into(), json!(tp));
+            }
             let params = s.encoded_params(&body)?;
             let url = format!("{}/api/group/quote?{}", s.domains.group, s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
@@ -3080,9 +3254,10 @@ pub(crate) async fn send_quote_message_with_client_id(
             } else {
                 &s.domains.chat
             };
-            let body = obj(&[
+            let (clean_text, text_props_opt) = extract_zalo_rtf_text_properties(text);
+            let mut body = obj(&[
                 ("toid", json!(to_id)),
-                ("message", json!(text)),
+                ("message", json!(clean_text)),
                 ("clientId", json!(now)),
                 ("qmsgOwner", json!(qmsg_owner)),
                 ("qmsgId", json!(qmsg_id_num)),
@@ -3094,6 +3269,9 @@ pub(crate) async fn send_quote_message_with_client_id(
                 ("ttl", json!(0)),
                 ("zsource", json!(101)),
             ]);
+            if let (Some(tp), Some(map)) = (text_props_opt, body.as_object_mut()) {
+                map.insert("textProperties".into(), json!(tp));
+            }
             let params = s.encoded_params(&body)?;
             let url = format!("{host}/api/message/quote?{}", s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
@@ -4391,6 +4569,14 @@ fn extract_content_text(v: &Value) -> Option<String> {
                 .filter(|h| {
                     !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://"))
                 });
+            if o.get("action").and_then(Value::as_str) == Some("rtf") {
+                if let Some(title) = o.get("title").and_then(Value::as_str) {
+                    if let Some(params_s) = o.get("params").and_then(Value::as_str) {
+                        return Some(format_incoming_zalo_rtf(title, params_s));
+                    }
+                    return Some(title.to_string());
+                }
+            }
             for k in ["description", "caption", "text", "msg", "title"] {
                 if let Some(Value::String(s)) = o.get(k) {
                     let t = s.trim();
@@ -4600,6 +4786,26 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         sticker_meta = None;
     } else if sticker_meta.is_some() && (content.is_empty() || content.starts_with('{')) {
         content = "[Nhãn dán]".to_string();
+    }
+    if sticker_meta.is_none() {
+        let parse_ami = |s: &str| -> Option<(u64, u64, u32)> {
+            let pos = s.find("ami_fat_cat_")?;
+            let num_str = s.get(pos + 12..pos + 14)?;
+            let idx = num_str.parse::<u64>().ok()?;
+            if (1..=15).contains(&idx) {
+                Some((999000 + idx, 99901, 7))
+            } else {
+                None
+            }
+        };
+        if let Some(m) = parse_ami(&content)
+            .or_else(|| link_desc.as_deref().and_then(parse_ami))
+            .or_else(|| link_title.as_deref().and_then(parse_ami))
+            .or_else(|| link_url.as_deref().and_then(parse_ami))
+        {
+            sticker_meta = Some(m);
+            content = "[Nhãn dán]".to_string();
+        }
     }
 
     if content.is_empty() {

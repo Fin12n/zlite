@@ -1600,4 +1600,32 @@ mod tests {
         assert!(out_json.contains("\"has_update\":true"));
         assert!(out_json.contains("Sửa lỗi trùng tên Zalo (#63)"));
     }
+
+    #[test]
+    fn websocket_aes_256_gcm_frame_roundtrip_issue_19_16() {
+        let key = [0x42u8; 32];
+        let nonce_bytes = [0x24u8; 12];
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let plain = b"{\"cmd\":501,\"thread_id\":\"uid_10001_an_kythuat\",\"msg\":\"Realtime WS frame\"}";
+        let ct = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plain.as_ref())
+            .unwrap();
+        let dec = zcrypto_decrypt_ws_gcm(&key, &nonce_bytes, &ct).expect("gcm decrypt ok");
+        assert_eq!(dec, plain);
+    }
+
+    #[test]
+    fn multi_host_failover_and_dual_account_isolation() {
+        let chat_hosts = service_failover_hosts("chat");
+        assert!(chat_hosts.len() >= 3);
+        let group_hosts = service_failover_hosts("group");
+        assert!(group_hosts.len() >= 2);
+
+        let state = default_seed_state();
+        let s0 = state.slots.get(&0).unwrap();
+        let s1 = state.slots.get(&1).unwrap();
+        assert_ne!(s0.profile.uid, s1.profile.uid);
+        assert!(s1.threads.iter().any(|t| t.id == "uid_90001_khachhang_vip"));
+        assert!(!s0.threads.iter().any(|t| t.id == "uid_90001_khachhang_vip"));
+    }
 }

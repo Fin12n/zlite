@@ -4,8 +4,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, CTDOThemeMode) {
-    CTDOThemeModeZaloDark = 0,
-    CTDOThemeModeZaloLight = 1,
+    CTDOThemeModeZaloLight = 0,
+    CTDOThemeModeZaloDark = 1,
     CTDOThemeModeOLEDMidnight = 2
 };
 
@@ -21,6 +21,7 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
 @property (nonatomic, strong, readonly) UIColor *bgSecondary;
 @property (nonatomic, strong, readonly) UIColor *bgElevated;
 @property (nonatomic, strong, readonly) UIColor *bgHeader;
+@property (nonatomic, strong, readonly) UIColor *bgChatCanvas;
 @property (nonatomic, strong, readonly) UIColor *textPrimary;
 @property (nonatomic, strong, readonly) UIColor *textSecondary;
 @property (nonatomic, strong, readonly) UIColor *accentPrimary;
@@ -43,9 +44,33 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
                        colorHex:(NSString *)colorHex
                            size:(CGFloat)size
                        isOnline:(BOOL)isOnline;
++ (UIImage *)avatarForThread:(NSDictionary *)thread
+                        size:(CGFloat)size
+                onCompletion:(nullable void (^)(void))completion;
++ (UIImage *)avatarForURL:(nullable NSString *)urlString
+             fallbackName:(NSString *)name
+                 colorHex:(NSString *)colorHex
+                     size:(CGFloat)size
+             onCompletion:(nullable void (^)(void))completion;
++ (UIImage *)myDocumentsAvatarWithSize:(CGFloat)size;
 + (UIImage *)qrCodeImageForString:(NSString *)content size:(CGFloat)size;
 + (nullable UIImage *)imageFromBase64String:(NSString *)base64String;
 + (UIImage *)appLogoWithSize:(CGFloat)size;
+
+/// Crisp CoreGraphics vector icons matching official Zalo iOS UI
++ (UIImage *)searchIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)qrScanIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)plusIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)gearIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)backChevronIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)phoneCallIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)videoCallIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)addFriendIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)groupPrefixIconWithSize:(CGFloat)size;
++ (UIImage *)pinIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)mutedBellIconWithSize:(CGFloat)size color:(UIColor *)color;
++ (UIImage *)tabIconForIndex:(NSInteger)tabIndex selected:(BOOL)selected;
++ (UIImage *)menuRowIconNamed:(NSString *)iconKey color:(UIColor *)color size:(CGFloat)size;
 @end
 
 @interface CTDOCoreBridge : NSObject
@@ -66,11 +91,14 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
 - (NSDictionary *)logoutSlot:(NSInteger)slot;
 - (NSDictionary *)refreshThreadsForSlot:(NSInteger)slot;
 
-/// Account & Thread Operations.
+/// Account, Thread & Contact Operations.
 - (NSDictionary *)switchAccount:(NSInteger)slot;
 - (NSArray<NSDictionary *> *)listThreadsForSlot:(NSInteger)slot
                                      filterMode:(NSInteger)filterMode
                                     searchQuery:(nullable NSString *)query;
+- (NSArray<NSDictionary *> *)listContactsForSlot:(NSInteger)slot
+                                      filterType:(NSInteger)filterType
+                                     searchQuery:(nullable NSString *)query;
 - (NSArray<NSDictionary *> *)getMessagesForSlot:(NSInteger)slot
                                        threadId:(NSString *)threadId;
 - (NSArray<NSDictionary *> *)sendMessageForSlot:(NSInteger)slot
@@ -116,6 +144,9 @@ typedef NS_ENUM(NSInteger, CTDODeviceClass) {
 + (nullable NSData *)aesCBCDecryptBase64:(NSString *)base64Cipher keyData:(NSData *)keyData;
 + (NSString *)md5Hex:(NSString *)input;
 + (NSString *)zaloSignKeyForTag:(NSString *)tag params:(NSDictionary<NSString *, id> *)params;
++ (NSString *)relativeTimeLabelFromTimestampMs:(int64_t)tsMs;
++ (NSString *)initialsForName:(NSString *)name;
++ (NSString *)colorHexForThreadId:(NSString *)threadId;
 @end
 
 NS_ASSUME_NONNULL_END

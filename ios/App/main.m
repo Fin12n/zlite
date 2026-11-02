@@ -132,13 +132,13 @@ static int runHeadlessSelfTest(void) {
         }
         printf("  [3/6] Kiểm tra Zero Fake Data (Không chứa danh bạ/tin nhắn giả lập) -> OK\n");
 
-        // Test 4: Live Zalo QR Ticket Fetch from wpa.zaloapp.com/api/login/reqqr
-        [core startQRLoginForSlot:0];
+        // Test 4: Live Zalo QR Ticket Fetch from wpa.zaloapp.com/api/login/reqqr (on slot 1 so slot 0 session is untouched)
+        [core startQRLoginForSlot:1];
         NSString *qrPayload = @"";
         NSString *qrToken = @"";
         for (int i = 0; i < 30; i++) {
             [NSThread sleepForTimeInterval:0.25];
-            NSDictionary *st = [core authStateForSlot:0];
+            NSDictionary *st = [core authStateForSlot:1];
             qrPayload = st[@"qr_payload"] ?: @"";
             qrToken = st[@"qr_token_id"] ?: @"";
             if (qrPayload.length > 0 || [st[@"qr_image_b64"] length] > 0) {

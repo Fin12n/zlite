@@ -1,17 +1,21 @@
 #import "CTDOMainViewController.h"
+#import <QuartzCore/QuartzCore.h>
 
 // ============================================================================
-// Custom Reusable Thread TableView Cell (60/120fps, zero Nib overhead, iOS 12+)
+// 1. Official Zalo Conversation Cell (ref1.png & ref2.png — 74pt height, 2 lines)
 // ============================================================================
 @interface CTDOThreadCell : UITableViewCell
 @property (nonatomic, strong) UIImageView *avatarView;
+@property (nonatomic, strong) UIImageView *groupBadgeView;
 @property (nonatomic, strong) UILabel *nameLabel;
-@property (nonatomic, strong) UILabel *tagBadgeLabel;
-@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UIImageView *statusIconView; // Pin or Muted Bell next to time
 @property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *unreadBadge;
+@property (nonatomic, strong) UIView *redDotView;
 @property (nonatomic, strong) UIView *separatorLine;
-- (void)configureWithThread:(NSDictionary *)thread isSelected:(BOOL)isSelected;
+@property (nonatomic, copy) NSString *representedThreadId;
+- (void)configureWithThread:(NSDictionary *)thread isSelected:(BOOL)isSelected onAvatarLoaded:(void (^)(void))onAvatarLoaded;
 @end
 
 @implementation CTDOThreadCell
@@ -20,36 +24,51 @@
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
         self.selectionStyle = UITableViewCellSelectionStyleNone;
-        _avatarView = [[UIImageView alloc] initWithFrame:CGRectMake(12, 12, 46, 46)];
+
+        _avatarView = [[UIImageView alloc] initWithFrame:CGRectMake(14, 11, 52, 52)];
         _avatarView.contentMode = UIViewContentModeScaleAspectFit;
         [self.contentView addSubview:_avatarView];
 
+        _groupBadgeView = [[UIImageView alloc] initWithFrame:CGRectMake(78, 15, 18, 18)];
+        _groupBadgeView.image = [CTDOIconRenderer groupPrefixIconWithSize:18.0];
+        _groupBadgeView.hidden = YES;
+        [self.contentView addSubview:_groupBadgeView];
+
         _nameLabel = [[UILabel alloc] init];
-        _nameLabel.font = [UIFont boldSystemFontOfSize:15.0];
+        _nameLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightRegular];
+        _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         [self.contentView addSubview:_nameLabel];
 
-        _tagBadgeLabel = [[UILabel alloc] init];
-        _tagBadgeLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightMedium];
-        [self.contentView addSubview:_tagBadgeLabel];
-
-        _subtitleLabel = [[UILabel alloc] init];
-        _subtitleLabel.font = [UIFont systemFontOfSize:13.0];
-        _subtitleLabel.numberOfLines = 1;
-        [self.contentView addSubview:_subtitleLabel];
+        _statusIconView = [[UIImageView alloc] init];
+        _statusIconView.contentMode = UIViewContentModeScaleAspectFit;
+        _statusIconView.hidden = YES;
+        [self.contentView addSubview:_statusIconView];
 
         _timeLabel = [[UILabel alloc] init];
-        _timeLabel.font = [UIFont systemFontOfSize:11.5];
+        _timeLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
         _timeLabel.textAlignment = NSTextAlignmentRight;
         [self.contentView addSubview:_timeLabel];
 
+        _subtitleLabel = [[UILabel alloc] init];
+        _subtitleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightRegular];
+        _subtitleLabel.numberOfLines = 1;
+        _subtitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [self.contentView addSubview:_subtitleLabel];
+
         _unreadBadge = [[UILabel alloc] init];
-        _unreadBadge.font = [UIFont boldSystemFontOfSize:11.0];
+        _unreadBadge.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
         _unreadBadge.textColor = [UIColor whiteColor];
-        _unreadBadge.backgroundColor = [UIColor colorWithRed:0.94 green:0.27 blue:0.27 alpha:1.0];
         _unreadBadge.textAlignment = NSTextAlignmentCenter;
-        _unreadBadge.layer.cornerRadius = 9.0;
+        _unreadBadge.layer.cornerRadius = 9.5;
         _unreadBadge.layer.masksToBounds = YES;
+        _unreadBadge.hidden = YES;
         [self.contentView addSubview:_unreadBadge];
+
+        _redDotView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 9, 9)];
+        _redDotView.backgroundColor = [UIColor colorWithRed:0.937 green:0.267 blue:0.267 alpha:1.0];
+        _redDotView.layer.cornerRadius = 4.5;
+        _redDotView.hidden = YES;
+        [self.contentView addSubview:_redDotView];
 
         _separatorLine = [[UIView alloc] init];
         [self.contentView addSubview:_separatorLine];
@@ -61,56 +80,282 @@
     [super layoutSubviews];
     CGFloat w = self.contentView.bounds.size.width;
     CGFloat h = self.contentView.bounds.size.height;
-    _avatarView.frame = CGRectMake(12, (h - 46) * 0.5, 46, 46);
-    _timeLabel.frame = CGRectMake(w - 76, 10, 66, 16);
-    _nameLabel.frame = CGRectMake(68, 9, MAX(80, w - 150), 19);
-    _tagBadgeLabel.frame = CGRectMake(68, 29, MAX(80, w - 115), 15);
-    _subtitleLabel.frame = CGRectMake(68, 45, MAX(80, w - 110), 18);
-    _unreadBadge.frame = CGRectMake(w - 34, 42, 22, 18);
-    _separatorLine.frame = CGRectMake(68, h - 0.5, w - 68, 0.5);
+
+    _avatarView.frame = CGRectMake(14.0, (h - 52.0) * 0.5, 52.0, 52.0);
+
+    CGSize timeSize = [_timeLabel.text ?: @"" sizeWithAttributes:@{NSFontAttributeName: _timeLabel.font}];
+    CGFloat timeW = MIN(72.0, ceil(timeSize.width) + 4.0);
+    _timeLabel.frame = CGRectMake(w - 14.0 - timeW, 14.0, timeW, 18.0);
+
+    CGFloat rightEdgeForName = _timeLabel.frame.origin.x - 6.0;
+    if (!_statusIconView.hidden) {
+        _statusIconView.frame = CGRectMake(_timeLabel.frame.origin.x - 18.0, 16.0, 14.0, 14.0);
+        rightEdgeForName = _statusIconView.frame.origin.x - 6.0;
+    }
+
+    CGFloat nameX = 78.0;
+    if (!_groupBadgeView.hidden) {
+        _groupBadgeView.frame = CGRectMake(78.0, 15.0, 19.0, 18.0);
+        nameX = 102.0;
+    }
+    _nameLabel.frame = CGRectMake(nameX, 13.0, MAX(60.0, rightEdgeForName - nameX), 21.0);
+
+    CGFloat badgeRightW = 0.0;
+    if (!_unreadBadge.hidden) {
+        CGSize bs = [_unreadBadge.text ?: @"1" sizeWithAttributes:@{NSFontAttributeName: _unreadBadge.font}];
+        CGFloat bw = MAX(19.0, ceil(bs.width) + 11.0);
+        _unreadBadge.frame = CGRectMake(w - 14.0 - bw, 41.0, bw, 19.0);
+        badgeRightW = bw + 8.0;
+    } else if (!_redDotView.hidden) {
+        _redDotView.frame = CGRectMake(w - 23.0, 46.0, 9.0, 9.0);
+        badgeRightW = 18.0;
+    }
+
+    _subtitleLabel.frame = CGRectMake(78.0, 40.0, MAX(60.0, w - 78.0 - 14.0 - badgeRightW), 20.0);
+    _separatorLine.frame = CGRectMake(78.0, h - 0.5, w - 78.0, 0.5);
 }
 
-- (void)configureWithThread:(NSDictionary *)thread isSelected:(BOOL)isSelected {
+- (void)configureWithThread:(NSDictionary *)thread isSelected:(BOOL)isSelected onAvatarLoaded:(void (^)(void))onAvatarLoaded {
     CTDOTheme *theme = [CTDOTheme shared];
+    self.representedThreadId = thread[@"id"] ?: @"";
     self.contentView.backgroundColor = isSelected ? theme.bgElevated : theme.bgSecondary;
     _separatorLine.backgroundColor = theme.borderSubtle;
 
+    BOOL isGroup = [thread[@"is_group"] boolValue];
+    BOOL isPinned = [thread[@"is_pinned"] boolValue];
+    BOOL isMuted = [thread[@"is_muted"] boolValue];
+    NSInteger unread = [thread[@"unread_count"] integerValue];
+
+    _groupBadgeView.hidden = !isGroup;
+
     NSString *name = thread[@"name"] ?: @"Hội thoại";
-    BOOL pinned = [thread[@"is_pinned"] boolValue];
-    BOOL muted = [thread[@"is_muted"] boolValue];
-    NSMutableString *titleStr = [NSMutableString stringWithString:name];
-    if (pinned) [titleStr appendString:@" 📌"];
-    if (muted) [titleStr appendString:@" 🔕"];
-    _nameLabel.text = titleStr;
+    _nameLabel.text = name;
     _nameLabel.textColor = theme.textPrimary;
+    _nameLabel.font = (unread > 0)
+        ? [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold]
+        : [UIFont systemFontOfSize:16.5 weight:UIFontWeightRegular];
 
-    _tagBadgeLabel.text = thread[@"subtitle_tag"] ?: @"";
-    _tagBadgeLabel.textColor = theme.accentPrimary;
-
-    _subtitleLabel.text = thread[@"last_message"] ?: @"";
-    _subtitleLabel.textColor = theme.textSecondary;
+    NSString *lastMsg = thread[@"last_message"] ?: @"";
+    if ([lastMsg isEqualToString:@"Chưa có tin nhắn"]) {
+        lastMsg = @"";
+    }
+    if (lastMsg.length == 0) {
+        NSInteger totMem = [thread[@"total_members"] integerValue];
+        if (isGroup && totMem > 0) {
+            lastMsg = [NSString stringWithFormat:@"Nhóm · %ld thành viên", (long)totMem];
+        } else if (isGroup) {
+            lastMsg = @"Nhóm trò chuyện";
+        } else {
+            lastMsg = @"[Tin nhắn thoại]";
+        }
+    }
+    _subtitleLabel.text = lastMsg;
+    _subtitleLabel.textColor = (unread > 0 && !isMuted) ? theme.textPrimary : theme.textSecondary;
+    _subtitleLabel.font = (unread > 0 && !isMuted)
+        ? [UIFont systemFontOfSize:14.5 weight:UIFontWeightMedium]
+        : [UIFont systemFontOfSize:14.5 weight:UIFontWeightRegular];
 
     _timeLabel.text = thread[@"last_time_label"] ?: @"";
     _timeLabel.textColor = theme.textSecondary;
 
-    NSInteger unread = [thread[@"unread_count"] integerValue];
-    if (unread > 0) {
-        _unreadBadge.hidden = NO;
-        _unreadBadge.text = unread > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)unread];
+    UIColor *iconGray = [UIColor colorWithRed:0.62 green:0.65 blue:0.70 alpha:1.0];
+    if (isPinned) {
+        _statusIconView.hidden = NO;
+        _statusIconView.image = [CTDOIconRenderer pinIconWithSize:14.0 color:iconGray];
+    } else if (isMuted) {
+        _statusIconView.hidden = NO;
+        _statusIconView.image = [CTDOIconRenderer mutedBellIconWithSize:14.0 color:iconGray];
     } else {
-        _unreadBadge.hidden = YES;
+        _statusIconView.hidden = YES;
     }
 
-    NSString *initials = thread[@"avatar_initials"] ?: @"Z";
-    NSString *hex = thread[@"avatar_color_hex"] ?: @"#0068FF";
-    BOOL online = [thread[@"is_online"] boolValue];
-    _avatarView.image = [CTDOIconRenderer avatarWithInitials:initials colorHex:hex size:46.0 isOnline:online];
+    _unreadBadge.hidden = YES;
+    _redDotView.hidden = YES;
+    if (unread > 0) {
+        _unreadBadge.hidden = NO;
+        _unreadBadge.text = (unread > 5) ? @"5+" : [NSString stringWithFormat:@"%ld", (long)unread];
+        if (isMuted) {
+            _unreadBadge.backgroundColor = [UIColor colorWithRed:0.76 green:0.79 blue:0.84 alpha:1.0];
+        } else {
+            _unreadBadge.backgroundColor = theme.dangerColor;
+        }
+    }
+
+    _avatarView.image = [CTDOIconRenderer avatarForThread:thread size:52.0 onCompletion:onAvatarLoaded];
 }
 
 @end
 
 // ============================================================================
-// Custom Reusable Chat Bubble Cell (Supports Quote Reply, Reactions, Metadata)
+// 2. Official Zalo Contact Cell (ref3.png — 68pt height with 📞 and 📹 buttons)
+// ============================================================================
+@interface CTDOContactCell : UITableViewCell
+@property (nonatomic, strong) UIImageView *avatarView;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *businessBadge;
+@property (nonatomic, strong) UIButton *callButton;
+@property (nonatomic, strong) UIButton *videoButton;
+@property (nonatomic, copy) void (^onTapCall)(BOOL isVideo);
+- (void)configureWithContact:(NSDictionary *)contact onAvatarLoaded:(void (^)(void))onAvatarLoaded;
+@end
+
+@implementation CTDOContactCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        _avatarView = [[UIImageView alloc] initWithFrame:CGRectMake(16, 10, 48, 48)];
+        _avatarView.contentMode = UIViewContentModeScaleAspectFit;
+        [self.contentView addSubview:_avatarView];
+
+        _nameLabel = [[UILabel alloc] init];
+        _nameLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightRegular];
+        [self.contentView addSubview:_nameLabel];
+
+        _businessBadge = [[UILabel alloc] init];
+        _businessBadge.text = @"Business";
+        _businessBadge.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightMedium];
+        _businessBadge.textColor = [UIColor colorWithRed:0.09 green:0.40 blue:0.75 alpha:1.0];
+        _businessBadge.backgroundColor = [UIColor colorWithRed:0.90 green:0.95 blue:1.00 alpha:1.0];
+        _businessBadge.textAlignment = NSTextAlignmentCenter;
+        _businessBadge.layer.cornerRadius = 4.0;
+        _businessBadge.layer.masksToBounds = YES;
+        _businessBadge.hidden = YES;
+        [self.contentView addSubview:_businessBadge];
+
+        UIColor *iconColor = [UIColor colorWithRed:0.15 green:0.18 blue:0.22 alpha:1.0];
+        _callButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        [_callButton setImage:[CTDOIconRenderer phoneCallIconWithSize:22.0 color:iconColor] forState:UIControlStateNormal];
+        [_callButton addTarget:self action:@selector(handleAudioCall) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:_callButton];
+
+        _videoButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        [_videoButton setImage:[CTDOIconRenderer videoCallIconWithSize:22.0 color:iconColor] forState:UIControlStateNormal];
+        [_videoButton addTarget:self action:@selector(handleVideoCall) forControlEvents:UIControlEventTouchUpInside];
+        [self.contentView addSubview:_videoButton];
+    }
+    return self;
+}
+
+- (void)handleAudioCall {
+    if (self.onTapCall) self.onTapCall(NO);
+}
+
+- (void)handleVideoCall {
+    if (self.onTapCall) self.onTapCall(YES);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.contentView.bounds.size.width;
+    CGFloat h = self.contentView.bounds.size.height;
+    _avatarView.frame = CGRectMake(16.0, (h - 48.0) * 0.5, 48.0, 48.0);
+    _videoButton.frame = CGRectMake(w - 58.0, (h - 36.0) * 0.5, 36.0, 36.0);
+    _callButton.frame = CGRectMake(w - 104.0, (h - 36.0) * 0.5, 36.0, 36.0);
+
+    if (!_businessBadge.hidden) {
+        _nameLabel.frame = CGRectMake(78.0, 12.0, MAX(80.0, w - 190.0), 21.0);
+        _businessBadge.frame = CGRectMake(78.0, 36.0, 62.0, 18.0);
+    } else {
+        _nameLabel.frame = CGRectMake(78.0, (h - 22.0) * 0.5, MAX(80.0, w - 190.0), 22.0);
+    }
+}
+
+- (void)configureWithContact:(NSDictionary *)contact onAvatarLoaded:(void (^)(void))onAvatarLoaded {
+    CTDOTheme *theme = [CTDOTheme shared];
+    self.contentView.backgroundColor = theme.bgSecondary;
+    _nameLabel.text = contact[@"name"] ?: @"Liên hệ";
+    _nameLabel.textColor = theme.textPrimary;
+    _businessBadge.hidden = ![contact[@"is_business"] boolValue];
+    _avatarView.image = [CTDOIconRenderer avatarForThread:contact size:48.0 onCompletion:onAvatarLoaded];
+}
+
+@end
+
+// ============================================================================
+// 3. Official Zalo Menu / Settings Cell (ref4.png & ref5.png)
+// ============================================================================
+@interface CTDOMenuCell : UITableViewCell
+@property (nonatomic, strong) UIImageView *leftIconView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitleLabel;
+@property (nonatomic, strong) UILabel *chevronLabel;
+@property (nonatomic, strong) UIView *separatorLine;
+- (void)configureWithIcon:(NSString *)iconKey
+                    title:(NSString *)title
+                 subtitle:(nullable NSString *)subtitle
+              showChevron:(BOOL)showChevron;
+@end
+
+@implementation CTDOMenuCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        _leftIconView = [[UIImageView alloc] initWithFrame:CGRectMake(18, 18, 24, 24)];
+        _leftIconView.contentMode = UIViewContentModeScaleAspectFit;
+        [self.contentView addSubview:_leftIconView];
+
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightRegular];
+        [self.contentView addSubview:_titleLabel];
+
+        _subtitleLabel = [[UILabel alloc] init];
+        _subtitleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+        [self.contentView addSubview:_subtitleLabel];
+
+        _chevronLabel = [[UILabel alloc] init];
+        _chevronLabel.text = @"›";
+        _chevronLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightRegular];
+        _chevronLabel.textAlignment = NSTextAlignmentRight;
+        [self.contentView addSubview:_chevronLabel];
+
+        _separatorLine = [[UIView alloc] init];
+        [self.contentView addSubview:_separatorLine];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.contentView.bounds.size.width;
+    CGFloat h = self.contentView.bounds.size.height;
+    _leftIconView.frame = CGRectMake(18.0, (h - 24.0) * 0.5, 24.0, 24.0);
+    _chevronLabel.frame = CGRectMake(w - 34.0, (h - 24.0) * 0.5, 18.0, 24.0);
+
+    if (_subtitleLabel.text.length > 0) {
+        _titleLabel.frame = CGRectMake(56.0, 12.0, w - 96.0, 21.0);
+        _subtitleLabel.frame = CGRectMake(56.0, 35.0, w - 96.0, 18.0);
+    } else {
+        _titleLabel.frame = CGRectMake(56.0, (h - 22.0) * 0.5, w - 96.0, 22.0);
+        _subtitleLabel.frame = CGRectZero;
+    }
+    _separatorLine.frame = CGRectMake(56.0, h - 0.5, w - 56.0, 0.5);
+}
+
+- (void)configureWithIcon:(NSString *)iconKey
+                    title:(NSString *)title
+                 subtitle:(nullable NSString *)subtitle
+              showChevron:(BOOL)showChevron {
+    CTDOTheme *theme = [CTDOTheme shared];
+    self.contentView.backgroundColor = theme.bgSecondary;
+    _leftIconView.image = [CTDOIconRenderer menuRowIconNamed:iconKey color:theme.accentPrimary size:24.0];
+    _titleLabel.text = title;
+    _titleLabel.textColor = theme.textPrimary;
+    _subtitleLabel.text = subtitle ?: @"";
+    _subtitleLabel.textColor = theme.textSecondary;
+    _chevronLabel.hidden = !showChevron;
+    _chevronLabel.textColor = [UIColor colorWithRed:0.65 green:0.68 blue:0.73 alpha:1.0];
+    _separatorLine.backgroundColor = theme.borderSubtle;
+}
+
+@end
+
+// ============================================================================
+// 4. Official Zalo Chat Bubble Cell (Light Blue #D5F1FF Outgoing, White Incoming)
 // ============================================================================
 @interface CTDOMessageCell : UITableViewCell
 @property (nonatomic, strong) UIView *bubbleView;
@@ -132,23 +377,23 @@
         self.contentView.backgroundColor = [UIColor clearColor];
 
         _bubbleView = [[UIView alloc] init];
-        _bubbleView.layer.cornerRadius = 14.0;
+        _bubbleView.layer.cornerRadius = 12.0;
         _bubbleView.layer.borderWidth = 0.5;
         [self.contentView addSubview:_bubbleView];
 
         _senderLabel = [[UILabel alloc] init];
-        _senderLabel.font = [UIFont boldSystemFontOfSize:11.5];
+        _senderLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
         [_bubbleView addSubview:_senderLabel];
 
         _quoteLabel = [[UILabel alloc] init];
-        _quoteLabel.font = [UIFont italicSystemFontOfSize:11.5];
+        _quoteLabel.font = [UIFont italicSystemFontOfSize:12.0];
         _quoteLabel.numberOfLines = 2;
         _quoteLabel.layer.cornerRadius = 6.0;
         _quoteLabel.layer.masksToBounds = YES;
         [_bubbleView addSubview:_quoteLabel];
 
         _bodyLabel = [[UILabel alloc] init];
-        _bodyLabel.font = [UIFont systemFontOfSize:14.5];
+        _bodyLabel.font = [UIFont systemFontOfSize:15.5];
         _bodyLabel.numberOfLines = 0;
         [_bubbleView addSubview:_bodyLabel];
 
@@ -163,16 +408,17 @@
     CGFloat bubbleMaxW = MIN(maxWidth * 0.78, 460.0);
     CGFloat textMaxW = MAX(120.0, bubbleMaxW - 24.0);
     NSString *content = msg[@"content"] ?: @"";
+    BOOL isSelf = [msg[@"is_self"] boolValue];
     CGRect bodyRect = [content boundingRectWithSize:CGSizeMake(textMaxW, 2000.0)
                                             options:NSStringDrawingUsesLineFragmentOrigin
-                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14.5]}
+                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:15.5]}
                                             context:nil];
-    CGFloat h = ceil(bodyRect.size.height) + 46.0;
+    CGFloat h = ceil(bodyRect.size.height) + (isSelf ? 32.0 : 48.0);
     NSString *quote = msg[@"reply_preview"];
     if ([quote isKindOfClass:[NSString class]] && quote.length > 0) {
         h += 28.0;
     }
-    return MAX(64.0, h + 10.0);
+    return MAX(54.0, h + 8.0);
 }
 
 - (void)configureWithMessage:(NSDictionary *)msg maxWidth:(CGFloat)maxWidth {
@@ -188,32 +434,38 @@
     CGFloat textMaxW = MAX(120.0, bubbleMaxW - 24.0);
     CGRect bodyRect = [content boundingRectWithSize:CGSizeMake(textMaxW, 2000.0)
                                             options:NSStringDrawingUsesLineFragmentOrigin
-                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14.5]}
+                                         attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:15.5]}
                                             context:nil];
 
     NSString *reactStr = reactions.count > 0 ? [NSString stringWithFormat:@"  %@", [reactions componentsJoinedByString:@" "]] : @"";
     NSString *metaText = [NSString stringWithFormat:@"%@%@", timeLbl, reactStr];
 
-    CGFloat contentW = MAX(ceil(bodyRect.size.width), 130.0);
+    CGFloat contentW = MAX(ceil(bodyRect.size.width), 96.0);
+    if (!isSelf) {
+        CGSize sSize = [sender sizeWithAttributes:@{NSFontAttributeName: _senderLabel.font}];
+        contentW = MAX(contentW, MIN(textMaxW, ceil(sSize.width)));
+    }
     if (quote && quote.length > 0) {
         contentW = MAX(contentW, MIN(textMaxW, 220.0));
     }
     CGFloat bubbleW = MIN(bubbleMaxW, contentW + 24.0);
 
-    CGFloat yCursor = 8.0;
-    _senderLabel.text = sender;
-    _senderLabel.textColor = isSelf ? [UIColor colorWithRed:0.55 green:0.82 blue:1.0 alpha:1.0] : theme.accentOnline;
-    if (theme.mode == CTDOThemeModeZaloLight && isSelf) {
-        _senderLabel.textColor = theme.accentPrimary;
+    CGFloat yCursor = 9.0;
+    if (!isSelf) {
+        _senderLabel.hidden = NO;
+        _senderLabel.text = sender;
+        _senderLabel.textColor = [UIColor colorWithRed:0.35 green:0.42 blue:0.52 alpha:1.0];
+        _senderLabel.frame = CGRectMake(12.0, yCursor, bubbleW - 24.0, 15.0);
+        yCursor += 17.0;
+    } else {
+        _senderLabel.hidden = YES;
     }
-    _senderLabel.frame = CGRectMake(12.0, yCursor, bubbleW - 24.0, 15.0);
-    yCursor += 17.0;
 
     if (quote && quote.length > 0) {
         _quoteLabel.hidden = NO;
-        _quoteLabel.text = [NSString stringWithFormat:@" ❝ %@", quote];
+        _quoteLabel.text = [NSString stringWithFormat:@" ▍ %@", quote];
         _quoteLabel.textColor = theme.textSecondary;
-        _quoteLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.15];
+        _quoteLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.06];
         _quoteLabel.frame = CGRectMake(12.0, yCursor, bubbleW - 24.0, 22.0);
         yCursor += 26.0;
     } else {
@@ -221,119 +473,142 @@
     }
 
     _bodyLabel.text = content;
-    _bodyLabel.textColor = (theme.mode == CTDOThemeModeZaloLight) ? theme.textPrimary : [UIColor whiteColor];
+    _bodyLabel.textColor = theme.textPrimary;
     CGFloat bodyH = ceil(bodyRect.size.height) + 2.0;
     _bodyLabel.frame = CGRectMake(12.0, yCursor, bubbleW - 24.0, bodyH);
-    yCursor += bodyH + 4.0;
+    yCursor += bodyH + 3.0;
 
     _metaLabel.text = metaText;
     _metaLabel.textColor = theme.textSecondary;
     _metaLabel.frame = CGRectMake(12.0, yCursor, bubbleW - 24.0, 14.0);
-    yCursor += 18.0;
+    yCursor += 17.0;
 
     CGFloat bubbleX = isSelf ? (maxWidth - bubbleW - 12.0) : 12.0;
     _bubbleView.frame = CGRectMake(bubbleX, 4.0, bubbleW, yCursor);
     _bubbleView.backgroundColor = isSelf ? theme.bubbleSelf : theme.bubblePartner;
-    _bubbleView.layer.borderColor = theme.borderSubtle.CGColor;
+    if (theme.mode == CTDOThemeModeZaloLight) {
+        _bubbleView.layer.borderColor = isSelf
+            ? [UIColor colorWithRed:0.70 green:0.86 blue:0.98 alpha:1.0].CGColor
+            : [UIColor colorWithRed:0.86 green:0.88 blue:0.91 alpha:1.0].CGColor;
+    } else {
+        _bubbleView.layer.borderColor = theme.borderSubtle.CGColor;
+    }
 }
 
 @end
 
-// ============================================================================
-// Main View Controller Implementation — Pure Native UIKit + Real Zalo QR Login
-// ============================================================================
+
+#pragma mark - CTDOMainViewController Implementation
+
 @interface CTDOMainViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 
-@property (nonatomic, assign) NSInteger activeSlot; // 0 = Primary Account, 1 = Secondary Account (Duo #2)
-@property (nonatomic, assign) NSInteger secondarySlot;
-@property (nonatomic, assign) NSInteger filterMode;
-@property (nonatomic, copy) NSString *searchQuery;
-@property (nonatomic, copy) NSString *selectedThreadIdPrimary;
-@property (nonatomic, copy) NSString *selectedThreadIdSecondary;
-@property (nonatomic, copy, nullable) NSString *replyToMsgIdPrimary;
-@property (nonatomic, copy, nullable) NSString *replyPreviewTextPrimary;
+@property (nonatomic, assign) NSInteger activeSlot;
+@property (nonatomic, assign) NSInteger activeBottomTab; // 0: Tin nhắn, 1: Danh bạ, 2: Khám phá, 3: Tường nhà, 4: Cá nhân
+@property (nonatomic, assign) NSInteger activeFilterMode; // 0: Ưu tiên, 1: Khác
+@property (nonatomic, assign) NSInteger contactFilterType; // 0: Bạn bè, 1: Nhóm, 2: OA
+@property (nonatomic, assign) BOOL showingSettingsSubscreen; // ref5.png
 @property (nonatomic, assign) BOOL compactShowingChatDetail;
-@property (nonatomic, copy) NSString *lastRenderedQrPayload;
+@property (nonatomic, assign) BOOL dualChatEnabled;
+@property (nonatomic, assign) CTDODeviceClass currentDeviceClass;
 
-@property (nonatomic, strong) NSArray<NSDictionary *> *threadsPrimary;
-@property (nonatomic, strong) NSArray<NSDictionary *> *messagesPrimary;
-@property (nonatomic, strong) NSArray<NSDictionary *> *messagesSecondary;
-@property (nonatomic, strong, nullable) NSDictionary *githubReleaseInfo;
-@property (nonatomic, assign) BOOL updateBannerDismissed;
+@property (nonatomic, copy) NSString *primaryThreadId;
+@property (nonatomic, copy) NSString *secondaryThreadId;
+@property (nonatomic, copy, nullable) NSString *replyTargetMsgId;
+@property (nonatomic, copy, nullable) NSString *replyTargetPreview;
 
-// Top Navigation & Hardware Badge (Zero fake mode-switcher buttons)
-@property (nonatomic, strong) UIView *topBar;
-@property (nonatomic, strong) UIButton *accountButton;
-@property (nonatomic, strong) UILabel *hardwareBadgeLabel;
-@property (nonatomic, strong) UIButton *qrButton;
-@property (nonatomic, strong) UIButton *scheduleButton;
-@property (nonatomic, strong) UIButton *autoReplyButton;
-@property (nonatomic, strong) UIButton *themeButton;
-@property (nonatomic, strong) UIButton *updateCheckButton;
+@property (nonatomic, strong) NSArray<NSDictionary *> *threads;
+@property (nonatomic, strong) NSArray<NSDictionary *> *contacts;
+@property (nonatomic, strong) NSDictionary<NSString *, NSArray<NSDictionary *> *> *contactSections;
+@property (nonatomic, strong) NSArray<NSString *> *contactSectionTitles;
+@property (nonatomic, strong) NSArray<NSDictionary *> *primaryMessages;
+@property (nonatomic, strong) NSArray<NSDictionary *> *secondaryMessages;
+@property (nonatomic, strong, nullable) NSDictionary *latestReleaseInfo;
+@property (nonatomic, strong, nullable) NSTimer *scheduleTimer;
+@property (nonatomic, strong, nullable) NSTimer *qrPollTimer;
 
-// GitHub Update Banner
-@property (nonatomic, strong) UIView *updateBanner;
-@property (nonatomic, strong) UILabel *updateBannerLabel;
-@property (nonatomic, strong) UIButton *updateBannerDetailBtn;
-@property (nonatomic, strong) UIButton *updateBannerCloseBtn;
+// Left / Primary Column (Zalo Main Shell)
+@property (nonatomic, strong) UIView *leftMasterContainer;
+@property (nonatomic, strong) UIView *topHeaderView;
+@property (nonatomic, strong) CAGradientLayer *topHeaderGradient;
+@property (nonatomic, strong) UIButton *headerBackBtn;
+@property (nonatomic, strong) UIImageView *headerSearchIcon;
+@property (nonatomic, strong) UITextField *headerSearchField;
+@property (nonatomic, strong) UILabel *headerTitleLabel;
+@property (nonatomic, strong) UIButton *headerRightBtn1; // QR / AddFriend / Gear / Search
+@property (nonatomic, strong) UIButton *headerRightBtn2; // Plus (+)
 
-// Workspace Containers
-@property (nonatomic, strong) UIView *leftPane;
-@property (nonatomic, strong) UIView *centerPane;
-@property (nonatomic, strong) UIView *hingeBar;
-@property (nonatomic, strong) UILabel *hingeLabel;
-@property (nonatomic, strong) UIButton *hingeToggleBtn;
-@property (nonatomic, strong) UIView *rightPane;
+// Sub-header for Tin nhắn (Ưu tiên | Khác)
+@property (nonatomic, strong) UIView *msgSubHeaderView;
+@property (nonatomic, strong) UIButton *uuTienTabBtn;
+@property (nonatomic, strong) UIButton *khacTabBtn;
+@property (nonatomic, strong) UIView *khacRedDot;
+@property (nonatomic, strong) UIView *subHeaderIndicator;
+@property (nonatomic, strong) UIView *subHeaderBottomLine;
 
-// Real Zalo QR Login Card (Rendered inside Center Pane when slot is not authenticated)
-@property (nonatomic, strong) UIView *qrAuthOverlay;
-@property (nonatomic, strong) UIView *qrCardView;
-@property (nonatomic, strong) UILabel *qrTitleLabel;
-@property (nonatomic, strong) UILabel *qrSubtitleLabel;
-@property (nonatomic, strong) UIView *qrWhiteFrame;
+// Sub-header for Danh bạ (Bạn bè | Nhóm | OA)
+@property (nonatomic, strong) UIView *contactSubHeaderView;
+@property (nonatomic, strong) UIButton *contactSubBtn0;
+@property (nonatomic, strong) UIButton *contactSubBtn1;
+@property (nonatomic, strong) UIButton *contactSubBtn2;
+@property (nonatomic, strong) UIView *contactSubIndicator;
+
+// Main TableViews inside Left Master Column
+@property (nonatomic, strong) UITableView *threadTableView;
+@property (nonatomic, strong) UIRefreshControl *threadRefreshControl;
+@property (nonatomic, strong) UITableView *contactTableView;
+@property (nonatomic, strong) UITableView *profileTableView;
+
+// Bottom 5-Tab Bar
+@property (nonatomic, strong) UIView *bottomTabBar;
+@property (nonatomic, strong) UIView *bottomTabTopLine;
+@property (nonatomic, strong) NSMutableArray<UIButton *> *bottomTabButtons;
+@property (nonatomic, strong) NSMutableArray<UIImageView *> *bottomTabIcons;
+@property (nonatomic, strong) NSMutableArray<UILabel *> *bottomTabLabels;
+@property (nonatomic, strong) UILabel *msgTabBadge;
+@property (nonatomic, strong) UIView *timelineTabDot;
+
+// Chat Detail Column (Primary)
+@property (nonatomic, strong) UIView *primaryChatContainer;
+@property (nonatomic, strong) UIView *primaryChatHeader;
+@property (nonatomic, strong) CAGradientLayer *primaryChatHeaderGradient;
+@property (nonatomic, strong) UIButton *chatBackBtn;
+@property (nonatomic, strong) UILabel *chatTitleLabel;
+@property (nonatomic, strong) UILabel *chatSubtitleLabel;
+@property (nonatomic, strong) UIButton *chatPhoneBtn;
+@property (nonatomic, strong) UIButton *chatVideoBtn;
+@property (nonatomic, strong) UIButton *chatMenuBtn;
+@property (nonatomic, strong) UITableView *primaryChatTableView;
+
+// Reply banner + Composer Bar
+@property (nonatomic, strong) UIView *replyBannerView;
+@property (nonatomic, strong) UILabel *replyBannerLabel;
+@property (nonatomic, strong) UIButton *replyBannerCloseBtn;
+@property (nonatomic, strong) UIView *composerBar;
+@property (nonatomic, strong) UIButton *composerStickerBtn;
+@property (nonatomic, strong) UITextField *composerTextField;
+@property (nonatomic, strong) UIButton *composerScheduleBtn;
+@property (nonatomic, strong) UIButton *composerSendBtn;
+
+// Secondary Dual-Chat Column (for iPhone Duo & iPad Pro)
+@property (nonatomic, strong) UIView *secondaryChatContainer;
+@property (nonatomic, strong) UIView *secondaryChatHeader;
+@property (nonatomic, strong) CAGradientLayer *secondaryChatHeaderGradient;
+@property (nonatomic, strong) UILabel *secondaryChatTitleLabel;
+@property (nonatomic, strong) UILabel *secondaryChatSubtitleLabel;
+@property (nonatomic, strong) UITableView *secondaryChatTableView;
+@property (nonatomic, strong) UIView *secondaryComposerBar;
+@property (nonatomic, strong) UITextField *secondaryComposerField;
+@property (nonatomic, strong) UIButton *secondaryComposerSendBtn;
+
+// QR Login Overlay (Shown ONLY when not authenticated)
+@property (nonatomic, strong) UIView *loginOverlay;
+@property (nonatomic, strong) UIView *loginCard;
+@property (nonatomic, strong) UIImageView *loginLogoView;
+@property (nonatomic, strong) UILabel *loginTitleLabel;
+@property (nonatomic, strong) UILabel *loginSubtitleLabel;
 @property (nonatomic, strong) UIImageView *qrImageView;
-@property (nonatomic, strong) UILabel *qrTokenLabel;
 @property (nonatomic, strong) UILabel *qrStatusLabel;
-@property (nonatomic, strong) UIButton *qrRefreshBtn;
-@property (nonatomic, strong) UIButton *qrPasswordLoginBtn;
-
-// Left Pane Views
-@property (nonatomic, strong) UITextField *searchField;
-@property (nonatomic, strong) UISegmentedControl *filterControl;
-@property (nonatomic, strong) UITableView *threadsTableView;
-@property (nonatomic, strong) UILabel *emptyThreadsLabel;
-
-// Primary Chat Views
-@property (nonatomic, strong) UIView *chatHeaderPrimary;
-@property (nonatomic, strong) UIButton *backButtonCompact;
-@property (nonatomic, strong) UILabel *chatTitlePrimary;
-@property (nonatomic, strong) UILabel *chatSubPrimary;
-@property (nonatomic, strong) UIButton *syncRefreshBtn;
-@property (nonatomic, strong) UIButton *callBtnPrimary;
-@property (nonatomic, strong) UIButton *duoSendToRightBtn;
-@property (nonatomic, strong) UITableView *messagesTablePrimary;
-@property (nonatomic, strong) UIView *replyBarPrimary;
-@property (nonatomic, strong) UILabel *replyBarLabelPrimary;
-@property (nonatomic, strong) UIButton *replyBarCancelPrimary;
-@property (nonatomic, strong) UIView *composerPrimary;
-@property (nonatomic, strong) UIButton *stickerBtnPrimary;
-@property (nonatomic, strong) UIButton *schedQuickBtnPrimary;
-@property (nonatomic, strong) UITextField *inputFieldPrimary;
-@property (nonatomic, strong) UIButton *sendBtnPrimary;
-
-// Secondary Chat Views (iPhone Duo Right Screen & iPad 3rd Column)
-@property (nonatomic, strong) UIView *chatHeaderSecondary;
-@property (nonatomic, strong) UILabel *chatTitleSecondary;
-@property (nonatomic, strong) UILabel *chatSubSecondary;
-@property (nonatomic, strong) UIButton *switchSecondaryThreadBtn;
-@property (nonatomic, strong) UIButton *switchSecondarySlotBtn;
-@property (nonatomic, strong) UITableView *messagesTableSecondary;
-@property (nonatomic, strong) UIView *composerSecondary;
-@property (nonatomic, strong) UITextField *inputFieldSecondary;
-@property (nonatomic, strong) UIButton *sendBtnSecondary;
-
-// Background Timers
-@property (nonatomic, strong, nullable) NSTimer *schedulerTimer;
+@property (nonatomic, strong) UIButton *qrReloadBtn;
 
 @end
 
@@ -341,1475 +616,1667 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.activeSlot = 0;
-    self.secondarySlot = 0;
-    self.filterMode = 0;
-    self.searchQuery = @"";
-    self.selectedThreadIdPrimary = @"";
-    self.selectedThreadIdSecondary = @"";
-    self.duoDualChatMode = NO;
-    self.lastRenderedQrPayload = @"";
+    _activeSlot = 0;
+    _activeBottomTab = 0;
+    _activeFilterMode = 0;
+    _contactFilterType = 0;
+    _showingSettingsSubscreen = NO;
+    _compactShowingChatDetail = NO;
+    _dualChatEnabled = YES;
+    _primaryThreadId = @"";
+    _secondaryThreadId = @"";
 
-    [self buildUI];
-    [self applyTheme];
-
-    // If not authenticated on Slot 0, immediately start real Zalo QR login from wpa.zaloapp.com
-    NSDictionary *auth0 = [[CTDOCoreBridge shared] authStateForSlot:0];
-    if (![auth0[@"status"] isEqualToString:@"authenticated"]) {
-        [[CTDOCoreBridge shared] startQRLoginForSlot:0];
+    NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
+    if ([args containsObject:@"--tab-contacts"]) {
+        _activeBottomTab = 1;
+    } else if ([args containsObject:@"--tab-profile"]) {
+        _activeBottomTab = 4;
+    } else if ([args containsObject:@"--tab-settings"]) {
+        _activeBottomTab = 4;
+        _showingSettingsSubscreen = YES;
+    } else if ([args containsObject:@"--open-chat"]) {
+        _compactShowingChatDetail = YES;
     }
 
-    [self refreshAllData];
+    [self setupUI];
+    [self reloadAllData];
+    [self applyTheme];
+    [self refreshAuthOverlayState];
 
-    // 1.2s timer to poll QR scan status, incoming messages, and scheduled messages
-    self.schedulerTimer = [NSTimer scheduledTimerWithTimeInterval:1.2
-                                                           target:self
-                                                         selector:@selector(onPeriodicTick)
-                                                         userInfo:nil
-                                                          repeats:YES];
+    NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:_activeSlot];
+    if ([auth[@"authenticated"] boolValue]) {
+        [self triggerBackgroundSyncForCurrentSlot];
+    }
 
-    [self triggerGitHubUpdateCheck:NO];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onThreadsDidUpdateNotification:)
+                                                 name:@"CTDOThreadsDidUpdateNotification"
+                                               object:nil];
+
+    _scheduleTimer = [NSTimer scheduledTimerWithTimeInterval:3.0
+                                                      target:self
+                                                    selector:@selector(onScheduleTimerTick)
+                                                    userInfo:nil
+                                                     repeats:YES];
+}
+
+- (void)onThreadsDidUpdateNotification:(NSNotification *)note {
+    [self reloadAllData];
+}
+
+- (void)refreshAllData {
+    [self reloadAllData];
+}
+
+- (void)triggerGitHubUpdateCheck:(BOOL)simulateOldVersion {
+    [[CTDOCoreBridge shared] checkGitHubLatestReleaseWithSimulateOldVersion:simulateOldVersion
+                                                                 completion:^(NSDictionary *releaseInfo) {
+        self.latestReleaseInfo = releaseInfo;
+    }];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_scheduleTimer invalidate];
+    [_qrPollTimer invalidate];
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {
-    return ([CTDOTheme shared].mode == CTDOThemeModeZaloLight)
-        ? UIStatusBarStyleDefault
-        : UIStatusBarStyleLightContent;
+    return UIStatusBarStyleLightContent;
 }
 
-- (void)buildUI {
-    // 1. Top Bar (Native hardware badge — NO fake UI switcher buttons)
-    _topBar = [[UIView alloc] init];
-    [self.view addSubview:_topBar];
+#pragma mark - UI Construction
 
-    _accountButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _accountButton.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
-    _accountButton.titleLabel.adjustsFontSizeToFitWidth = YES;
-    _accountButton.titleLabel.minimumScaleFactor = 0.8;
-    _accountButton.layer.cornerRadius = 8.0;
-    _accountButton.contentEdgeInsets = UIEdgeInsetsMake(4, 8, 4, 8);
-    [_accountButton addTarget:self action:@selector(onTapAccountSwitch) forControlEvents:UIControlEventTouchUpInside];
-    [_topBar addSubview:_accountButton];
+- (void)setupUI {
+    // 1. Left Master Container (Holds Header, SubHeader, Lists, Bottom TabBar)
+    _leftMasterContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    _leftMasterContainer.clipsToBounds = YES;
+    [self.view addSubview:_leftMasterContainer];
 
-    _hardwareBadgeLabel = [[UILabel alloc] init];
-    _hardwareBadgeLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
-    _hardwareBadgeLabel.textAlignment = NSTextAlignmentCenter;
-    _hardwareBadgeLabel.layer.cornerRadius = 7.0;
-    _hardwareBadgeLabel.layer.masksToBounds = YES;
-    [_topBar addSubview:_hardwareBadgeLabel];
+    // Zalo Signature Top Gradient Header (#0068FF -> #0091FF)
+    _topHeaderView = [[UIView alloc] initWithFrame:CGRectZero];
+    _topHeaderGradient = [CAGradientLayer layer];
+    _topHeaderGradient.startPoint = CGPointMake(0.0, 0.5);
+    _topHeaderGradient.endPoint = CGPointMake(1.0, 0.5);
+    _topHeaderGradient.colors = @[
+        (id)[CTDOTheme colorFromHex:@"#0068FF"].CGColor,
+        (id)[CTDOTheme colorFromHex:@"#0091FF"].CGColor
+    ];
+    [_topHeaderView.layer insertSublayer:_topHeaderGradient atIndex:0];
+    [_leftMasterContainer addSubview:_topHeaderView];
 
-    _qrButton = [self makeTopActionButton:@"📱 QR Login" action:@selector(onTapQRModal)];
-    _scheduleButton = [self makeTopActionButton:@"🕒 Hẹn giờ" action:@selector(onTapScheduleModal)];
-    _autoReplyButton = [self makeTopActionButton:@"🤖 Bot" action:@selector(onTapAutoReplyModal)];
-    _themeButton = [self makeTopActionButton:@"🎨 Giao diện" action:@selector(onTapThemeCycle)];
-    _updateCheckButton = [self makeTopActionButton:@"🚀 v0.0.5" action:@selector(onTapUpdateModal)];
+    _headerBackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_headerBackBtn setImage:[CTDOIconRenderer backChevronIconWithSize:22.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_headerBackBtn addTarget:self action:@selector(onTapHeaderBack) forControlEvents:UIControlEventTouchUpInside];
+    _headerBackBtn.hidden = YES;
+    [_topHeaderView addSubview:_headerBackBtn];
 
-    [_topBar addSubview:_qrButton];
-    [_topBar addSubview:_scheduleButton];
-    [_topBar addSubview:_autoReplyButton];
-    [_topBar addSubview:_themeButton];
-    [_topBar addSubview:_updateCheckButton];
+    _headerSearchIcon = [[UIImageView alloc] initWithImage:[CTDOIconRenderer searchIconWithSize:20.0 color:[UIColor whiteColor]]];
+    _headerSearchIcon.contentMode = UIViewContentModeScaleAspectFit;
+    [_topHeaderView addSubview:_headerSearchIcon];
 
-    // 2. GitHub Releases API Update Banner
-    _updateBanner = [[UIView alloc] init];
-    _updateBanner.hidden = YES;
-    [self.view addSubview:_updateBanner];
+    _headerSearchField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _headerSearchField.delegate = self;
+    _headerSearchField.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightRegular];
+    _headerSearchField.textColor = [UIColor whiteColor];
+    _headerSearchField.tintColor = [UIColor whiteColor];
+    _headerSearchField.returnKeyType = UIReturnKeySearch;
+    _headerSearchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    _headerSearchField.attributedPlaceholder = [[NSAttributedString alloc]
+        initWithString:@"Tìm kiếm"
+            attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.88]}];
+    [_headerSearchField addTarget:self action:@selector(onSearchFieldChanged:) forControlEvents:UIControlEventEditingChanged];
+    [_topHeaderView addSubview:_headerSearchField];
 
-    _updateBannerLabel = [[UILabel alloc] init];
-    _updateBannerLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    [_updateBanner addSubview:_updateBannerLabel];
+    _headerTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _headerTitleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightSemibold];
+    _headerTitleLabel.textColor = [UIColor whiteColor];
+    _headerTitleLabel.text = @"Cài đặt";
+    _headerTitleLabel.hidden = YES;
+    [_topHeaderView addSubview:_headerTitleLabel];
 
-    _updateBannerDetailBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_updateBannerDetailBtn setTitle:@"Chi tiết Update" forState:UIControlStateNormal];
-    _updateBannerDetailBtn.titleLabel.font = [UIFont boldSystemFontOfSize:11.5];
-    _updateBannerDetailBtn.layer.cornerRadius = 6.0;
-    [_updateBannerDetailBtn addTarget:self action:@selector(onTapUpdateModal) forControlEvents:UIControlEventTouchUpInside];
-    [_updateBanner addSubview:_updateBannerDetailBtn];
+    _headerRightBtn1 = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_headerRightBtn1 addTarget:self action:@selector(onTapHeaderRight1) forControlEvents:UIControlEventTouchUpInside];
+    [_topHeaderView addSubview:_headerRightBtn1];
 
-    _updateBannerCloseBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_updateBannerCloseBtn setTitle:@"✕" forState:UIControlStateNormal];
-    _updateBannerCloseBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    [_updateBannerCloseBtn addTarget:self action:@selector(onDismissUpdateBanner) forControlEvents:UIControlEventTouchUpInside];
-    [_updateBanner addSubview:_updateBannerCloseBtn];
+    _headerRightBtn2 = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_headerRightBtn2 setImage:[CTDOIconRenderer plusIconWithSize:22.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_headerRightBtn2 addTarget:self action:@selector(onTapHeaderRight2) forControlEvents:UIControlEventTouchUpInside];
+    [_topHeaderView addSubview:_headerRightBtn2];
 
-    // 3. Workspace Panes
-    _leftPane = [[UIView alloc] init];
-    _centerPane = [[UIView alloc] init];
-    _hingeBar = [[UIView alloc] init];
-    _rightPane = [[UIView alloc] init];
-    [self.view addSubview:_leftPane];
-    [self.view addSubview:_centerPane];
-    [self.view addSubview:_hingeBar];
-    [self.view addSubview:_rightPane];
+    // 2. Sub-Header for Tab 0 (Tin nhắn: Ưu tiên | Khác)
+    _msgSubHeaderView = [[UIView alloc] initWithFrame:CGRectZero];
+    [_leftMasterContainer addSubview:_msgSubHeaderView];
 
-    // Hinge Bar (Only visible on iPhone Duo hardware or iPad 3-column divider)
-    _hingeLabel = [[UILabel alloc] init];
-    _hingeLabel.font = [UIFont boldSystemFontOfSize:10.0];
-    _hingeLabel.textAlignment = NSTextAlignmentCenter;
-    _hingeLabel.text = @"•\nD\nU\nO\n•";
-    _hingeLabel.numberOfLines = 5;
-    [_hingeBar addSubview:_hingeLabel];
+    _uuTienTabBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_uuTienTabBtn setTitle:@"Ưu tiên" forState:UIControlStateNormal];
+    [_uuTienTabBtn addTarget:self action:@selector(onTapUuTienTab) forControlEvents:UIControlEventTouchUpInside];
+    [_msgSubHeaderView addSubview:_uuTienTabBtn];
 
-    _hingeToggleBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_hingeToggleBtn setTitle:@"⇄" forState:UIControlStateNormal];
-    _hingeToggleBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14.0];
-    _hingeToggleBtn.layer.cornerRadius = 10.0;
-    [_hingeToggleBtn addTarget:self action:@selector(onToggleDuoDualChatMode) forControlEvents:UIControlEventTouchUpInside];
-    [_hingeBar addSubview:_hingeToggleBtn];
+    _khacTabBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_khacTabBtn setTitle:@"Khác" forState:UIControlStateNormal];
+    [_khacTabBtn addTarget:self action:@selector(onTapKhacTab) forControlEvents:UIControlEventTouchUpInside];
+    [_msgSubHeaderView addSubview:_khacTabBtn];
 
-    // 4. Left Pane (Search + Filter + Threads Table + Empty State)
-    _searchField = [[UITextField alloc] init];
-    _searchField.placeholder = @"🔍 Tìm bạn bè, nhóm Zalo, UID...";
-    _searchField.font = [UIFont systemFontOfSize:13.5];
-    _searchField.layer.cornerRadius = 8.0;
-    _searchField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
-    _searchField.leftViewMode = UITextFieldViewModeAlways;
-    _searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    _searchField.returnKeyType = UIReturnKeySearch;
-    _searchField.delegate = self;
-    [_searchField addTarget:self action:@selector(onSearchTextChanged:) forControlEvents:UIControlEventEditingChanged];
-    [_leftPane addSubview:_searchField];
+    _khacRedDot = [[UIView alloc] initWithFrame:CGRectZero];
+    _khacRedDot.backgroundColor = [CTDOTheme colorFromHex:@"#EF4444"];
+    _khacRedDot.layer.cornerRadius = 3.5;
+    [_msgSubHeaderView addSubview:_khacRedDot];
 
-    _filterControl = [[UISegmentedControl alloc] initWithItems:@[@"Tất cả", @"Chưa đọc", @"Đã ghim", @"Nhóm", @"Đã ẩn"]];
-    _filterControl.selectedSegmentIndex = 0;
-    [_filterControl addTarget:self action:@selector(onFilterChanged:) forControlEvents:UIControlEventValueChanged];
-    [_leftPane addSubview:_filterControl];
+    _subHeaderBottomLine = [[UIView alloc] initWithFrame:CGRectZero];
+    [_msgSubHeaderView addSubview:_subHeaderBottomLine];
 
-    _threadsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _threadsTableView.dataSource = self;
-    _threadsTableView.delegate = self;
-    _threadsTableView.rowHeight = 72.0;
-    _threadsTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
-    [_threadsTableView registerClass:[CTDOThreadCell class] forCellReuseIdentifier:@"ThreadCell"];
-    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(onLongPressThread:)];
-    [_threadsTableView addGestureRecognizer:lp];
-    [_leftPane addSubview:_threadsTableView];
+    _subHeaderIndicator = [[UIView alloc] initWithFrame:CGRectZero];
+    _subHeaderIndicator.layer.cornerRadius = 1.25;
+    [_msgSubHeaderView addSubview:_subHeaderIndicator];
 
-    _emptyThreadsLabel = [[UILabel alloc] init];
-    _emptyThreadsLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
-    _emptyThreadsLabel.textAlignment = NSTextAlignmentCenter;
-    _emptyThreadsLabel.numberOfLines = 0;
-    _emptyThreadsLabel.text = @"Chưa đăng nhập Zalo.\nQuét mã QR Zalo thực tế để đồng bộ\ndanh bạ, nhóm và tin nhắn của bạn.";
-    [_leftPane addSubview:_emptyThreadsLabel];
+    // 3. Sub-Header for Tab 1 (Danh bạ: Bạn bè | Nhóm | OA)
+    _contactSubHeaderView = [[UIView alloc] initWithFrame:CGRectZero];
+    _contactSubHeaderView.hidden = YES;
+    [_leftMasterContainer addSubview:_contactSubHeaderView];
 
-    // 5. Primary Chat Pane
-    _chatHeaderPrimary = [[UIView alloc] init];
-    [_centerPane addSubview:_chatHeaderPrimary];
+    _contactSubBtn0 = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_contactSubBtn0 setTitle:@"Bạn bè" forState:UIControlStateNormal];
+    _contactSubBtn0.tag = 0;
+    [_contactSubBtn0 addTarget:self action:@selector(onTapContactSubTab:) forControlEvents:UIControlEventTouchUpInside];
+    [_contactSubHeaderView addSubview:_contactSubBtn0];
 
-    _backButtonCompact = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_backButtonCompact setTitle:@"‹ Danh bạ" forState:UIControlStateNormal];
-    _backButtonCompact.titleLabel.font = [UIFont boldSystemFontOfSize:14.0];
-    [_backButtonCompact addTarget:self action:@selector(onTapCompactBack) forControlEvents:UIControlEventTouchUpInside];
-    [_chatHeaderPrimary addSubview:_backButtonCompact];
+    _contactSubBtn1 = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_contactSubBtn1 setTitle:@"Nhóm" forState:UIControlStateNormal];
+    _contactSubBtn1.tag = 1;
+    [_contactSubBtn1 addTarget:self action:@selector(onTapContactSubTab:) forControlEvents:UIControlEventTouchUpInside];
+    [_contactSubHeaderView addSubview:_contactSubBtn1];
 
-    _chatTitlePrimary = [[UILabel alloc] init];
-    _chatTitlePrimary.font = [UIFont boldSystemFontOfSize:15.5];
-    [_chatHeaderPrimary addSubview:_chatTitlePrimary];
+    _contactSubBtn2 = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_contactSubBtn2 setTitle:@"OA" forState:UIControlStateNormal];
+    _contactSubBtn2.tag = 2;
+    [_contactSubBtn2 addTarget:self action:@selector(onTapContactSubTab:) forControlEvents:UIControlEventTouchUpInside];
+    [_contactSubHeaderView addSubview:_contactSubBtn2];
 
-    _chatSubPrimary = [[UILabel alloc] init];
-    _chatSubPrimary.font = [UIFont systemFontOfSize:11.5];
-    [_chatHeaderPrimary addSubview:_chatSubPrimary];
+    _contactSubIndicator = [[UIView alloc] initWithFrame:CGRectZero];
+    _contactSubIndicator.layer.cornerRadius = 1.25;
+    [_contactSubHeaderView addSubview:_contactSubIndicator];
 
-    _syncRefreshBtn = [self makeSmallHeaderButton:@"🔄 Đồng bộ" action:@selector(onTapRefreshRealZalo)];
-    _callBtnPrimary = [self makeSmallHeaderButton:@"📞 Gọi" action:@selector(onTapVoiceCall)];
-    _duoSendToRightBtn = [self makeSmallHeaderButton:@"⫸ Màn #2" action:@selector(onTapOpenInRightScreen)];
-    [_chatHeaderPrimary addSubview:_syncRefreshBtn];
-    [_chatHeaderPrimary addSubview:_callBtnPrimary];
-    [_chatHeaderPrimary addSubview:_duoSendToRightBtn];
+    // 4. TableViews (Threads, Contacts, Profile/Settings)
+    _threadTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _threadTableView.dataSource = self;
+    _threadTableView.delegate = self;
+    _threadTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _threadTableView.showsVerticalScrollIndicator = YES;
+    [_threadTableView registerClass:[CTDOThreadCell class] forCellReuseIdentifier:@"CTDOThreadCell"];
 
-    _messagesTablePrimary = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _messagesTablePrimary.dataSource = self;
-    _messagesTablePrimary.delegate = self;
-    _messagesTablePrimary.separatorStyle = UITableViewCellSeparatorStyleNone;
-    [_messagesTablePrimary registerClass:[CTDOMessageCell class] forCellReuseIdentifier:@"MsgCellPrimary"];
-    [_centerPane addSubview:_messagesTablePrimary];
+    _threadRefreshControl = [[UIRefreshControl alloc] init];
+    [_threadRefreshControl addTarget:self action:@selector(onPullToRefreshThreads) forControlEvents:UIControlEventValueChanged];
+    _threadTableView.refreshControl = _threadRefreshControl;
+    [_leftMasterContainer addSubview:_threadTableView];
 
-    _replyBarPrimary = [[UIView alloc] init];
-    _replyBarPrimary.hidden = YES;
-    [_centerPane addSubview:_replyBarPrimary];
+    _contactTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _contactTableView.dataSource = self;
+    _contactTableView.delegate = self;
+    _contactTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _contactTableView.sectionIndexColor = [UIColor colorWithRed:0.35 green:0.40 blue:0.46 alpha:1.0];
+    _contactTableView.sectionIndexBackgroundColor = [UIColor clearColor];
+    _contactTableView.hidden = YES;
+    [_contactTableView registerClass:[CTDOContactCell class] forCellReuseIdentifier:@"CTDOContactCell"];
+    [_contactTableView registerClass:[CTDOMenuCell class] forCellReuseIdentifier:@"CTDOMenuCell"];
+    [_leftMasterContainer addSubview:_contactTableView];
 
-    _replyBarLabelPrimary = [[UILabel alloc] init];
-    _replyBarLabelPrimary.font = [UIFont italicSystemFontOfSize:12.0];
-    [_replyBarPrimary addSubview:_replyBarLabelPrimary];
+    _profileTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _profileTableView.dataSource = self;
+    _profileTableView.delegate = self;
+    _profileTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _profileTableView.hidden = YES;
+    [_profileTableView registerClass:[CTDOMenuCell class] forCellReuseIdentifier:@"CTDOMenuCell"];
+    [_leftMasterContainer addSubview:_profileTableView];
 
-    _replyBarCancelPrimary = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_replyBarCancelPrimary setTitle:@"✕" forState:UIControlStateNormal];
-    [_replyBarCancelPrimary addTarget:self action:@selector(onCancelReplyPrimary) forControlEvents:UIControlEventTouchUpInside];
-    [_replyBarPrimary addSubview:_replyBarCancelPrimary];
+    // 5. Bottom 5-Tab Bar (Tin nhắn | Danh bạ | Khám phá | Tường nhà | Cá nhân)
+    _bottomTabBar = [[UIView alloc] initWithFrame:CGRectZero];
+    [_leftMasterContainer addSubview:_bottomTabBar];
 
-    _composerPrimary = [[UIView alloc] init];
-    [_centerPane addSubview:_composerPrimary];
+    _bottomTabTopLine = [[UIView alloc] initWithFrame:CGRectZero];
+    [_bottomTabBar addSubview:_bottomTabTopLine];
 
-    _stickerBtnPrimary = [self makeSmallHeaderButton:@"🎉" action:@selector(onTapStickerPicker)];
-    _schedQuickBtnPrimary = [self makeSmallHeaderButton:@"🕒" action:@selector(onTapQuickSchedulePrimary)];
-    [_composerPrimary addSubview:_stickerBtnPrimary];
-    [_composerPrimary addSubview:_schedQuickBtnPrimary];
+    NSArray<NSString *> *tabTitles = @[@"Tin nhắn", @"Danh bạ", @"Khám phá", @"Tường nhà", @"Cá nhân"];
+    _bottomTabButtons = [NSMutableArray arrayWithCapacity:5];
+    _bottomTabIcons = [NSMutableArray arrayWithCapacity:5];
+    _bottomTabLabels = [NSMutableArray arrayWithCapacity:5];
 
-    _inputFieldPrimary = [[UITextField alloc] init];
-    _inputFieldPrimary.placeholder = @"Nhập tin nhắn Zalo thực tế (Enter để gửi)...";
-    _inputFieldPrimary.font = [UIFont systemFontOfSize:14.0];
-    _inputFieldPrimary.layer.cornerRadius = 17.0;
-    _inputFieldPrimary.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 10)];
-    _inputFieldPrimary.leftViewMode = UITextFieldViewModeAlways;
-    _inputFieldPrimary.returnKeyType = UIReturnKeySend;
-    _inputFieldPrimary.delegate = self;
-    [_composerPrimary addSubview:_inputFieldPrimary];
+    for (NSInteger i = 0; i < 5; i++) {
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+        btn.tag = i;
+        [btn addTarget:self action:@selector(onTapBottomTab:) forControlEvents:UIControlEventTouchUpInside];
+        [_bottomTabBar addSubview:btn];
+        [_bottomTabButtons addObject:btn];
 
-    _sendBtnPrimary = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_sendBtnPrimary setTitle:@"Gửi" forState:UIControlStateNormal];
-    _sendBtnPrimary.titleLabel.font = [UIFont boldSystemFontOfSize:13.5];
-    _sendBtnPrimary.layer.cornerRadius = 17.0;
-    [_sendBtnPrimary addTarget:self action:@selector(onSendPrimary) forControlEvents:UIControlEventTouchUpInside];
-    [_composerPrimary addSubview:_sendBtnPrimary];
+        UIImageView *iv = [[UIImageView alloc] initWithImage:[CTDOIconRenderer tabIconForIndex:i selected:(i == 0)]];
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        iv.userInteractionEnabled = NO;
+        [btn addSubview:iv];
+        [_bottomTabIcons addObject:iv];
 
-    // 5b. Real Zalo QR Login Overlay (Shown when not authenticated — Zero Fake Data)
-    _qrAuthOverlay = [[UIView alloc] init];
-    [_centerPane addSubview:_qrAuthOverlay];
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectZero];
+        lbl.text = tabTitles[i];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.font = [UIFont systemFontOfSize:10.5 weight:(i == 0 ? UIFontWeightSemibold : UIFontWeightRegular)];
+        lbl.userInteractionEnabled = NO;
+        [btn addSubview:lbl];
+        [_bottomTabLabels addObject:lbl];
 
-    _qrCardView = [[UIView alloc] init];
-    _qrCardView.layer.cornerRadius = 16.0;
-    _qrCardView.layer.borderWidth = 1.0;
-    [_qrAuthOverlay addSubview:_qrCardView];
+        if (i == 0) {
+            _msgTabBadge = [[UILabel alloc] initWithFrame:CGRectZero];
+            _msgTabBadge.backgroundColor = [CTDOTheme colorFromHex:@"#EF4444"];
+            _msgTabBadge.textColor = [UIColor whiteColor];
+            _msgTabBadge.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold];
+            _msgTabBadge.textAlignment = NSTextAlignmentCenter;
+            _msgTabBadge.layer.cornerRadius = 8.0;
+            _msgTabBadge.layer.masksToBounds = YES;
+            _msgTabBadge.layer.borderWidth = 1.5;
+            _msgTabBadge.layer.borderColor = [UIColor whiteColor].CGColor;
+            [btn addSubview:_msgTabBadge];
+        } else if (i == 3) {
+            _timelineTabDot = [[UIView alloc] initWithFrame:CGRectZero];
+            _timelineTabDot.backgroundColor = [CTDOTheme colorFromHex:@"#EF4444"];
+            _timelineTabDot.layer.cornerRadius = 3.5;
+            [btn addSubview:_timelineTabDot];
+        }
+    }
 
-    _qrTitleLabel = [[UILabel alloc] init];
-    _qrTitleLabel.font = [UIFont boldSystemFontOfSize:17.0];
-    _qrTitleLabel.textAlignment = NSTextAlignmentCenter;
-    _qrTitleLabel.text = @"Đăng nhập Zalo bằng Mã QR";
-    [_qrCardView addSubview:_qrTitleLabel];
+    // 6. Primary Chat Detail Column
+    _primaryChatContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    _primaryChatContainer.clipsToBounds = YES;
+    [self.view addSubview:_primaryChatContainer];
 
-    _qrSubtitleLabel = [[UILabel alloc] init];
-    _qrSubtitleLabel.font = [UIFont systemFontOfSize:12.0];
-    _qrSubtitleLabel.textAlignment = NSTextAlignmentCenter;
-    _qrSubtitleLabel.numberOfLines = 2;
-    _qrSubtitleLabel.text = @"Kết nối trực tiếp tới wpa.zaloapp.com/api/login/reqqr · Không dùng dữ liệu giả";
-    [_qrCardView addSubview:_qrSubtitleLabel];
+    _primaryChatHeader = [[UIView alloc] initWithFrame:CGRectZero];
+    _primaryChatHeaderGradient = [CAGradientLayer layer];
+    _primaryChatHeaderGradient.startPoint = CGPointMake(0.0, 0.5);
+    _primaryChatHeaderGradient.endPoint = CGPointMake(1.0, 0.5);
+    _primaryChatHeaderGradient.colors = @[
+        (id)[CTDOTheme colorFromHex:@"#0068FF"].CGColor,
+        (id)[CTDOTheme colorFromHex:@"#0091FF"].CGColor
+    ];
+    [_primaryChatHeader.layer insertSublayer:_primaryChatHeaderGradient atIndex:0];
+    [_primaryChatContainer addSubview:_primaryChatHeader];
 
-    _qrWhiteFrame = [[UIView alloc] init];
-    _qrWhiteFrame.backgroundColor = [UIColor whiteColor];
-    _qrWhiteFrame.layer.cornerRadius = 12.0;
-    [_qrCardView addSubview:_qrWhiteFrame];
+    _chatBackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_chatBackBtn setImage:[CTDOIconRenderer backChevronIconWithSize:22.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_chatBackBtn addTarget:self action:@selector(onTapChatBack) forControlEvents:UIControlEventTouchUpInside];
+    [_primaryChatHeader addSubview:_chatBackBtn];
 
-    _qrImageView = [[UIImageView alloc] init];
+    _chatTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _chatTitleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold];
+    _chatTitleLabel.textColor = [UIColor whiteColor];
+    [_primaryChatHeader addSubview:_chatTitleLabel];
+
+    _chatSubtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _chatSubtitleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightRegular];
+    _chatSubtitleLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    [_primaryChatHeader addSubview:_chatSubtitleLabel];
+
+    _chatPhoneBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_chatPhoneBtn setImage:[CTDOIconRenderer phoneCallIconWithSize:20.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_chatPhoneBtn addTarget:self action:@selector(onTapVoiceCall) forControlEvents:UIControlEventTouchUpInside];
+    [_primaryChatHeader addSubview:_chatPhoneBtn];
+
+    _chatVideoBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_chatVideoBtn setImage:[CTDOIconRenderer videoCallIconWithSize:20.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    [_chatVideoBtn addTarget:self action:@selector(onTapVideoCall) forControlEvents:UIControlEventTouchUpInside];
+    [_primaryChatHeader addSubview:_chatVideoBtn];
+
+    _chatMenuBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_chatMenuBtn setTitle:@"☰" forState:UIControlStateNormal];
+    [_chatMenuBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _chatMenuBtn.titleLabel.font = [UIFont systemFontOfSize:19.0 weight:UIFontWeightBold];
+    [_chatMenuBtn addTarget:self action:@selector(onTapChatMenu) forControlEvents:UIControlEventTouchUpInside];
+    [_primaryChatHeader addSubview:_chatMenuBtn];
+
+    _primaryChatTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _primaryChatTableView.dataSource = self;
+    _primaryChatTableView.delegate = self;
+    _primaryChatTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    [_primaryChatTableView registerClass:[CTDOMessageCell class] forCellReuseIdentifier:@"CTDOMessageCell"];
+    [_primaryChatContainer addSubview:_primaryChatTableView];
+
+    // Reply Banner + Composer Bar
+    _replyBannerView = [[UIView alloc] initWithFrame:CGRectZero];
+    _replyBannerView.hidden = YES;
+    [_primaryChatContainer addSubview:_replyBannerView];
+
+    _replyBannerLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _replyBannerLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
+    [_replyBannerView addSubview:_replyBannerLabel];
+
+    _replyBannerCloseBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_replyBannerCloseBtn setTitle:@"✕" forState:UIControlStateNormal];
+    [_replyBannerCloseBtn addTarget:self action:@selector(onCancelReply) forControlEvents:UIControlEventTouchUpInside];
+    [_replyBannerView addSubview:_replyBannerCloseBtn];
+
+    _composerBar = [[UIView alloc] initWithFrame:CGRectZero];
+    [_primaryChatContainer addSubview:_composerBar];
+
+    _composerStickerBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_composerStickerBtn setTitle:@"😊" forState:UIControlStateNormal];
+    _composerStickerBtn.titleLabel.font = [UIFont systemFontOfSize:21.0];
+    [_composerBar addSubview:_composerStickerBtn];
+
+    _composerTextField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _composerTextField.delegate = self;
+    _composerTextField.font = [UIFont systemFontOfSize:15.5];
+    _composerTextField.placeholder = @"Tin nhắn";
+    _composerTextField.returnKeyType = UIReturnKeySend;
+    [_composerBar addSubview:_composerTextField];
+
+    _composerScheduleBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_composerScheduleBtn setTitle:@"⏰" forState:UIControlStateNormal];
+    _composerScheduleBtn.titleLabel.font = [UIFont systemFontOfSize:18.0];
+    [_composerScheduleBtn addTarget:self action:@selector(onTapScheduleQuickMessage) forControlEvents:UIControlEventTouchUpInside];
+    [_composerBar addSubview:_composerScheduleBtn];
+
+    _composerSendBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_composerSendBtn setTitle:@"Gửi" forState:UIControlStateNormal];
+    _composerSendBtn.titleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightBold];
+    _composerSendBtn.layer.cornerRadius = 17.0;
+    [_composerSendBtn addTarget:self action:@selector(onSendPrimaryMessage) forControlEvents:UIControlEventTouchUpInside];
+    [_composerBar addSubview:_composerSendBtn];
+
+    // 7. Secondary Dual-Chat Column (iPhone Duo / iPad Pro)
+    _secondaryChatContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    _secondaryChatContainer.clipsToBounds = YES;
+    [self.view addSubview:_secondaryChatContainer];
+
+    _secondaryChatHeader = [[UIView alloc] initWithFrame:CGRectZero];
+    _secondaryChatHeaderGradient = [CAGradientLayer layer];
+    _secondaryChatHeaderGradient.startPoint = CGPointMake(0.0, 0.5);
+    _secondaryChatHeaderGradient.endPoint = CGPointMake(1.0, 0.5);
+    _secondaryChatHeaderGradient.colors = @[
+        (id)[CTDOTheme colorFromHex:@"#0068FF"].CGColor,
+        (id)[CTDOTheme colorFromHex:@"#0091FF"].CGColor
+    ];
+    [_secondaryChatHeader.layer insertSublayer:_secondaryChatHeaderGradient atIndex:0];
+    [_secondaryChatContainer addSubview:_secondaryChatHeader];
+
+    _secondaryChatTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _secondaryChatTitleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
+    _secondaryChatTitleLabel.textColor = [UIColor whiteColor];
+    [_secondaryChatHeader addSubview:_secondaryChatTitleLabel];
+
+    _secondaryChatSubtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _secondaryChatSubtitleLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+    _secondaryChatSubtitleLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
+    [_secondaryChatHeader addSubview:_secondaryChatSubtitleLabel];
+
+    _secondaryChatTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _secondaryChatTableView.dataSource = self;
+    _secondaryChatTableView.delegate = self;
+    _secondaryChatTableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    [_secondaryChatTableView registerClass:[CTDOMessageCell class] forCellReuseIdentifier:@"CTDOMessageCell2"];
+    [_secondaryChatContainer addSubview:_secondaryChatTableView];
+
+    _secondaryComposerBar = [[UIView alloc] initWithFrame:CGRectZero];
+    [_secondaryChatContainer addSubview:_secondaryComposerBar];
+
+    _secondaryComposerField = [[UITextField alloc] initWithFrame:CGRectZero];
+    _secondaryComposerField.delegate = self;
+    _secondaryComposerField.font = [UIFont systemFontOfSize:14.5];
+    _secondaryComposerField.placeholder = @"Tin nhắn song song (Dual-Chat)...";
+    _secondaryComposerField.returnKeyType = UIReturnKeySend;
+    [_secondaryComposerBar addSubview:_secondaryComposerField];
+
+    _secondaryComposerSendBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_secondaryComposerSendBtn setTitle:@"Gửi" forState:UIControlStateNormal];
+    _secondaryComposerSendBtn.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightBold];
+    _secondaryComposerSendBtn.layer.cornerRadius = 15.0;
+    [_secondaryComposerSendBtn addTarget:self action:@selector(onSendSecondaryMessage) forControlEvents:UIControlEventTouchUpInside];
+    [_secondaryComposerBar addSubview:_secondaryComposerSendBtn];
+
+    // 8. QR Login Overlay
+    [self setupLoginOverlay];
+}
+
+- (void)setupLoginOverlay {
+    _loginOverlay = [[UIView alloc] initWithFrame:CGRectZero];
+    _loginOverlay.backgroundColor = [UIColor colorWithRed:0.02 green:0.06 blue:0.14 alpha:0.88];
+    _loginOverlay.hidden = YES;
+    [self.view addSubview:_loginOverlay];
+
+    _loginCard = [[UIView alloc] initWithFrame:CGRectZero];
+    _loginCard.backgroundColor = [UIColor whiteColor];
+    _loginCard.layer.cornerRadius = 18.0;
+    _loginCard.layer.masksToBounds = YES;
+    [_loginOverlay addSubview:_loginCard];
+
+    _loginLogoView = [[UIImageView alloc] initWithImage:[CTDOIconRenderer appLogoWithSize:56.0]];
+    _loginLogoView.contentMode = UIViewContentModeScaleAspectFit;
+    [_loginCard addSubview:_loginLogoView];
+
+    _loginTitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _loginTitleLabel.text = @"Đăng nhập Zalo qua mã QR";
+    _loginTitleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
+    _loginTitleLabel.textAlignment = NSTextAlignmentCenter;
+    _loginTitleLabel.textColor = [CTDOTheme colorFromHex:@"#141415"];
+    [_loginCard addSubview:_loginTitleLabel];
+
+    _loginSubtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _loginSubtitleLabel.text = @"Mở ứng dụng Zalo trên điện thoại và quét mã QR bên dưới để đồng bộ tài khoản thật.";
+    _loginSubtitleLabel.font = [UIFont systemFontOfSize:13.0];
+    _loginSubtitleLabel.textAlignment = NSTextAlignmentCenter;
+    _loginSubtitleLabel.numberOfLines = 2;
+    _loginSubtitleLabel.textColor = [CTDOTheme colorFromHex:@"#727A84"];
+    [_loginCard addSubview:_loginSubtitleLabel];
+
+    _qrImageView = [[UIImageView alloc] initWithFrame:CGRectZero];
+    _qrImageView.backgroundColor = [UIColor whiteColor];
     _qrImageView.contentMode = UIViewContentModeScaleAspectFit;
-    [_qrWhiteFrame addSubview:_qrImageView];
+    _qrImageView.layer.cornerRadius = 12.0;
+    _qrImageView.layer.borderWidth = 1.0;
+    _qrImageView.layer.borderColor = [CTDOTheme colorFromHex:@"#E5E7EB"].CGColor;
+    _qrImageView.layer.masksToBounds = YES;
+    [_loginCard addSubview:_qrImageView];
 
-    _qrTokenLabel = [[UILabel alloc] init];
-    _qrTokenLabel.font = [UIFont fontWithName:@"Menlo" size:10.5] ?: [UIFont systemFontOfSize:10.5];
-    _qrTokenLabel.textAlignment = NSTextAlignmentCenter;
-    _qrTokenLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    [_qrCardView addSubview:_qrTokenLabel];
-
-    _qrStatusLabel = [[UILabel alloc] init];
-    _qrStatusLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+    _qrStatusLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _qrStatusLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
     _qrStatusLabel.textAlignment = NSTextAlignmentCenter;
-    _qrStatusLabel.numberOfLines = 3;
-    [_qrCardView addSubview:_qrStatusLabel];
+    _qrStatusLabel.numberOfLines = 2;
+    _qrStatusLabel.textColor = [CTDOTheme colorFromHex:@"#0068FF"];
+    [_loginCard addSubview:_qrStatusLabel];
 
-    _qrRefreshBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_qrRefreshBtn setTitle:@"🔄 Lấy mã QR mới" forState:UIControlStateNormal];
-    _qrRefreshBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    _qrRefreshBtn.layer.cornerRadius = 10.0;
-    [_qrRefreshBtn addTarget:self action:@selector(onTapRefreshQR) forControlEvents:UIControlEventTouchUpInside];
-    [_qrCardView addSubview:_qrRefreshBtn];
-
-    _qrPasswordLoginBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_qrPasswordLoginBtn setTitle:@"🔑 Đăng nhập SĐT / MK" forState:UIControlStateNormal];
-    _qrPasswordLoginBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    _qrPasswordLoginBtn.layer.cornerRadius = 10.0;
-    [_qrPasswordLoginBtn addTarget:self action:@selector(onTapPasswordLoginModal) forControlEvents:UIControlEventTouchUpInside];
-    [_qrCardView addSubview:_qrPasswordLoginBtn];
-
-    // 6. Secondary Chat Pane (iPhone Duo Right Screen & iPad 3rd Column)
-    _chatHeaderSecondary = [[UIView alloc] init];
-    [_rightPane addSubview:_chatHeaderSecondary];
-
-    _chatTitleSecondary = [[UILabel alloc] init];
-    _chatTitleSecondary.font = [UIFont boldSystemFontOfSize:14.5];
-    [_chatHeaderSecondary addSubview:_chatTitleSecondary];
-
-    _chatSubSecondary = [[UILabel alloc] init];
-    _chatSubSecondary.font = [UIFont systemFontOfSize:11.0];
-    [_chatHeaderSecondary addSubview:_chatSubSecondary];
-
-    _switchSecondaryThreadBtn = [self makeSmallHeaderButton:@"🔄 Đổi Chat" action:@selector(onTapSwitchSecondaryThread)];
-    _switchSecondarySlotBtn = [self makeSmallHeaderButton:@"👥 TK1/2" action:@selector(onTapToggleSecondarySlot)];
-    [_chatHeaderSecondary addSubview:_switchSecondaryThreadBtn];
-    [_chatHeaderSecondary addSubview:_switchSecondarySlotBtn];
-
-    _messagesTableSecondary = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    _messagesTableSecondary.dataSource = self;
-    _messagesTableSecondary.delegate = self;
-    _messagesTableSecondary.separatorStyle = UITableViewCellSeparatorStyleNone;
-    [_messagesTableSecondary registerClass:[CTDOMessageCell class] forCellReuseIdentifier:@"MsgCellSecondary"];
-    [_rightPane addSubview:_messagesTableSecondary];
-
-    _composerSecondary = [[UIView alloc] init];
-    [_rightPane addSubview:_composerSecondary];
-
-    _inputFieldSecondary = [[UITextField alloc] init];
-    _inputFieldSecondary.placeholder = @"Nhắn ở màn hình Phải (iPhone Duo / iPad)...";
-    _inputFieldSecondary.font = [UIFont systemFontOfSize:13.5];
-    _inputFieldSecondary.layer.cornerRadius = 16.0;
-    _inputFieldSecondary.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 10)];
-    _inputFieldSecondary.leftViewMode = UITextFieldViewModeAlways;
-    _inputFieldSecondary.returnKeyType = UIReturnKeySend;
-    _inputFieldSecondary.delegate = self;
-    [_composerSecondary addSubview:_inputFieldSecondary];
-
-    _sendBtnSecondary = [UIButton buttonWithType:UIButtonTypeCustom];
-    [_sendBtnSecondary setTitle:@"Gửi #2" forState:UIControlStateNormal];
-    _sendBtnSecondary.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    _sendBtnSecondary.layer.cornerRadius = 16.0;
-    [_sendBtnSecondary addTarget:self action:@selector(onSendSecondary) forControlEvents:UIControlEventTouchUpInside];
-    [_composerSecondary addSubview:_sendBtnSecondary];
+    _qrReloadBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_qrReloadBtn setTitle:@"Lấy mã QR mới" forState:UIControlStateNormal];
+    _qrReloadBtn.titleLabel.font = [UIFont systemFontOfSize:14.5 weight:UIFontWeightSemibold];
+    _qrReloadBtn.backgroundColor = [CTDOTheme colorFromHex:@"#0068FF"];
+    [_qrReloadBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _qrReloadBtn.layer.cornerRadius = 10.0;
+    [_qrReloadBtn addTarget:self action:@selector(onTapStartQRLogin) forControlEvents:UIControlEventTouchUpInside];
+    [_loginCard addSubview:_qrReloadBtn];
 }
 
-- (UIButton *)makeTopActionButton:(NSString *)title action:(SEL)action {
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [btn setTitle:title forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
-    btn.titleLabel.adjustsFontSizeToFitWidth = YES;
-    btn.titleLabel.minimumScaleFactor = 0.75;
-    btn.layer.cornerRadius = 7.0;
-    btn.contentEdgeInsets = UIEdgeInsetsMake(4, 6, 4, 6);
-    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return btn;
-}
-
-- (UIButton *)makeSmallHeaderButton:(NSString *)title action:(SEL)action {
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [btn setTitle:title forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:11.5 weight:UIFontWeightSemibold];
-    btn.titleLabel.adjustsFontSizeToFitWidth = YES;
-    btn.titleLabel.minimumScaleFactor = 0.75;
-    btn.layer.cornerRadius = 6.0;
-    btn.contentEdgeInsets = UIEdgeInsetsMake(4, 6, 4, 6);
-    [btn addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return btn;
-}
-
-// ============================================================================
-// Hardware-Truth Responsive Layout Engine (iPhone vs iPhone Duo vs iPad)
-// ============================================================================
-- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
-    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
-    [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext>  _Nonnull context) {
-        [self.view setNeedsLayout];
-        [self.view layoutIfNeeded];
-    } completion:nil];
-}
+#pragma mark - Adaptive Layout (iPhone vs iPhone Duo vs iPad Pro)
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    CGSize winSize = self.view.bounds.size;
+    UIEdgeInsets safe = self.view.safeAreaInsets;
+    _currentDeviceClass = [[CTDOCoreBridge shared] hardwareDeviceClassForWindowSize:winSize];
 
-    UIEdgeInsets safe = UIEdgeInsetsZero;
-    if (@available(iOS 11.0, *)) {
-        safe = self.view.safeAreaInsets;
-    }
-    CGFloat fullW = self.view.bounds.size.width;
-    CGFloat fullH = self.view.bounds.size.height;
-    CGFloat topY = safe.top;
-    CGFloat bottomH = safe.bottom;
+    BOOL isCompact = (_currentDeviceClass == CTDODeviceClassiPhone);
+    BOOL isWideMultiPane = !isCompact;
 
-    CTDODeviceClass devClass = [[CTDOCoreBridge shared] hardwareDeviceClassForWindowSize:self.view.bounds.size];
-    NSString *hwName = [[CTDOCoreBridge shared] deviceHardwareName];
-    if (devClass == CTDODeviceClassiPhoneDuo) {
-        _hardwareBadgeLabel.text = [NSString stringWithFormat:@"📖 %@ · Dual-Screen", hwName];
-    } else if (devClass == CTDODeviceClassiPad) {
-        _hardwareBadgeLabel.text = [NSString stringWithFormat:@"🖥 %@ · 3-Column", hwName];
-    } else {
-        _hardwareBadgeLabel.text = [NSString stringWithFormat:@"📱 %@", hwName];
-    }
-
-    BOOL isNarrow = (fullW < 680.0);
-    CGFloat topBarH = isNarrow ? 76.0 : 46.0;
-    _topBar.frame = CGRectMake(0, topY, fullW, topBarH);
-
-    if (isNarrow) {
-        _accountButton.frame = CGRectMake(10, 6, 138, 28);
-        _hardwareBadgeLabel.frame = CGRectMake(154, 6, fullW - 164, 28);
-        CGFloat btnW = (fullW - 20 - 16) / 5.0;
-        NSArray<UIButton *> *btns = @[_qrButton, _scheduleButton, _autoReplyButton, _themeButton, _updateCheckButton];
-        for (NSUInteger i = 0; i < btns.count; i++) {
-            btns[i].frame = CGRectMake(10 + i * (btnW + 4.0), 40, btnW, 30);
-        }
-    } else {
-        _accountButton.frame = CGRectMake(12, 8, 160, 30);
-        _hardwareBadgeLabel.frame = CGRectMake(180, 8, 250, 30);
-        CGFloat rightX = fullW - 12;
-        NSArray<UIButton *> *btns = @[_updateCheckButton, _themeButton, _autoReplyButton, _scheduleButton, _qrButton];
-        for (UIButton *b in btns) {
-            CGFloat bw = [b.titleLabel.text sizeWithAttributes:@{NSFontAttributeName: b.titleLabel.font}].width + 20.0;
-            rightX -= bw;
-            b.frame = CGRectMake(rightX, 8, bw, 30);
-            rightX -= 6.0;
-        }
-    }
-
-    CGFloat contentY = topY + topBarH;
-    BOOL showBanner = (!_updateBanner.hidden && !_updateBannerDismissed);
-    if (showBanner) {
-        _updateBanner.frame = CGRectMake(0, contentY, fullW, 32.0);
-        _updateBannerCloseBtn.frame = CGRectMake(fullW - 32, 1, 26, 30);
-        _updateBannerDetailBtn.frame = CGRectMake(fullW - 150, 3, 114, 26);
-        _updateBannerLabel.frame = CGRectMake(12, 1, MAX(100, fullW - 168), 30);
-        contentY += 32.0;
-    }
-
-    CGFloat workspaceH = MAX(100.0, fullH - contentY - bottomH);
-    NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:self.activeSlot];
-    BOOL isAuthed = [auth[@"status"] isEqualToString:@"authenticated"];
-
-    if (devClass == CTDODeviceClassiPhone) {
-        _hingeBar.hidden = YES;
-        _rightPane.hidden = YES;
-        _backButtonCompact.hidden = !isAuthed;
-        _duoSendToRightBtn.hidden = YES;
-        if (!isAuthed || self.compactShowingChatDetail) {
-            _leftPane.hidden = YES;
-            _centerPane.hidden = NO;
-            _centerPane.frame = CGRectMake(0, contentY, fullW, workspaceH);
+    if (isCompact) {
+        _secondaryChatContainer.hidden = YES;
+        if (_compactShowingChatDetail) {
+            _leftMasterContainer.hidden = YES;
+            _primaryChatContainer.hidden = NO;
+            _primaryChatContainer.frame = self.view.bounds;
         } else {
-            _leftPane.hidden = NO;
-            _centerPane.hidden = YES;
-            _leftPane.frame = CGRectMake(0, contentY, fullW, workspaceH);
+            _leftMasterContainer.hidden = NO;
+            _primaryChatContainer.hidden = YES;
+            _leftMasterContainer.frame = self.view.bounds;
         }
-    } else if (devClass == CTDODeviceClassiPhoneDuo) {
-        // Native iPhone Duo (iPhone19,4) Dual-Pane Hinge-Aware Layout
-        _backButtonCompact.hidden = !self.duoDualChatMode;
-        _duoSendToRightBtn.hidden = NO;
-        _hingeBar.hidden = NO;
+    } else {
+        _leftMasterContainer.hidden = NO;
+        _primaryChatContainer.hidden = NO;
 
-        CGFloat hingeW = 16.0;
-        CGFloat leftW = floor((fullW - hingeW) * 0.42);
-        if (self.duoDualChatMode) {
-            leftW = floor((fullW - hingeW) * 0.50);
-        }
-        _hingeBar.frame = CGRectMake(leftW, contentY, hingeW, workspaceH);
-        _hingeToggleBtn.frame = CGRectMake(1, 10, hingeW - 2, 28);
-        _hingeLabel.frame = CGRectMake(0, 44, hingeW, 90);
+        CGFloat leftW = (_currentDeviceClass == CTDODeviceClassiPhoneDuo) ? 350.0 : 360.0;
+        _leftMasterContainer.frame = CGRectMake(0, 0, leftW, winSize.height);
 
-        if (self.duoDualChatMode) {
-            _leftPane.hidden = YES;
-            _centerPane.hidden = NO;
-            _rightPane.hidden = NO;
-            _centerPane.frame = CGRectMake(0, contentY, leftW, workspaceH);
-            _rightPane.frame = CGRectMake(leftW + hingeW, contentY, fullW - leftW - hingeW, workspaceH);
+        CGFloat remW = winSize.width - leftW;
+        BOOL showSecondary = _dualChatEnabled && (remW >= 620.0) && (_secondaryThreadId.length > 0);
+        if (showSecondary) {
+            CGFloat primaryW = floor(remW * 0.54);
+            _primaryChatContainer.frame = CGRectMake(leftW, 0, primaryW, winSize.height);
+            _secondaryChatContainer.hidden = NO;
+            _secondaryChatContainer.frame = CGRectMake(leftW + primaryW, 0, remW - primaryW, winSize.height);
         } else {
-            _leftPane.hidden = NO;
-            _centerPane.hidden = NO;
-            _rightPane.hidden = YES;
-            _leftPane.frame = CGRectMake(0, contentY, leftW, workspaceH);
-            _centerPane.frame = CGRectMake(leftW + hingeW, contentY, fullW - leftW - hingeW, workspaceH);
+            _primaryChatContainer.frame = CGRectMake(leftW, 0, remW, winSize.height);
+            _secondaryChatContainer.hidden = YES;
+        }
+    }
+
+    // Layout Left Master Container
+    [self layoutLeftMasterWithSafeInsets:safe];
+
+    // Layout Primary Chat Container
+    if (!_primaryChatContainer.hidden) {
+        [self layoutPrimaryChatWithSafeInsets:safe isCompact:isCompact];
+    }
+
+    // Layout Secondary Chat Container
+    if (!_secondaryChatContainer.hidden && isWideMultiPane) {
+        [self layoutSecondaryChatWithSafeInsets:safe];
+    }
+
+    // Layout QR Login Overlay
+    if (!_loginOverlay.hidden) {
+        _loginOverlay.frame = self.view.bounds;
+        CGFloat cardW = MIN(winSize.width - 36.0, 380.0);
+        CGFloat cardH = 440.0;
+        _loginCard.frame = CGRectMake((winSize.width - cardW) * 0.5, (winSize.height - cardH) * 0.5, cardW, cardH);
+        _loginLogoView.frame = CGRectMake((cardW - 52.0) * 0.5, 20.0, 52.0, 52.0);
+        _loginTitleLabel.frame = CGRectMake(16.0, 80.0, cardW - 32.0, 24.0);
+        _loginSubtitleLabel.frame = CGRectMake(20.0, 106.0, cardW - 40.0, 36.0);
+        _qrImageView.frame = CGRectMake((cardW - 200.0) * 0.5, 150.0, 200.0, 200.0);
+        _qrStatusLabel.frame = CGRectMake(16.0, 356.0, cardW - 32.0, 32.0);
+        _qrReloadBtn.frame = CGRectMake(28.0, 392.0, cardW - 56.0, 38.0);
+    }
+}
+
+- (void)layoutLeftMasterWithSafeInsets:(UIEdgeInsets)safe {
+    CGFloat w = _leftMasterContainer.bounds.size.width;
+    CGFloat h = _leftMasterContainer.bounds.size.height;
+    CGFloat topBarContentH = 46.0;
+    CGFloat topBarH = safe.top + topBarContentH;
+
+    _topHeaderView.frame = CGRectMake(0, 0, w, topBarH);
+    _topHeaderGradient.frame = _topHeaderView.bounds;
+
+    BOOL inSettings = (_activeBottomTab == 4 && _showingSettingsSubscreen);
+    if (inSettings) {
+        _headerBackBtn.hidden = NO;
+        _headerTitleLabel.hidden = NO;
+        _headerSearchIcon.hidden = YES;
+        _headerSearchField.hidden = YES;
+        _headerRightBtn2.hidden = YES;
+
+        _headerBackBtn.frame = CGRectMake(8.0, safe.top + 5.0, 36.0, 36.0);
+        _headerTitleLabel.frame = CGRectMake(48.0, safe.top + 5.0, w - 104.0, 36.0);
+        _headerRightBtn1.frame = CGRectMake(w - 44.0, safe.top + 5.0, 36.0, 36.0);
+        [_headerRightBtn1 setImage:[CTDOIconRenderer searchIconWithSize:20.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+    } else {
+        _headerBackBtn.hidden = YES;
+        _headerTitleLabel.hidden = YES;
+        _headerSearchIcon.hidden = NO;
+        _headerSearchField.hidden = NO;
+
+        _headerSearchIcon.frame = CGRectMake(16.0, safe.top + 13.0, 20.0, 20.0);
+
+        if (_activeBottomTab == 0) {
+            // Tin nhắn: [QR] and [+]
+            _headerRightBtn2.hidden = NO;
+            _headerRightBtn2.frame = CGRectMake(w - 44.0, safe.top + 5.0, 36.0, 36.0);
+            _headerRightBtn1.frame = CGRectMake(w - 86.0, safe.top + 5.0, 36.0, 36.0);
+            [_headerRightBtn1 setImage:[CTDOIconRenderer qrScanIconWithSize:21.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+            _headerSearchField.frame = CGRectMake(46.0, safe.top + 6.0, w - 140.0, 34.0);
+        } else if (_activeBottomTab == 1) {
+            // Danh bạ: [👤+]
+            _headerRightBtn2.hidden = YES;
+            _headerRightBtn1.frame = CGRectMake(w - 46.0, safe.top + 5.0, 36.0, 36.0);
+            [_headerRightBtn1 setImage:[CTDOIconRenderer addFriendIconWithSize:22.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+            _headerSearchField.frame = CGRectMake(46.0, safe.top + 6.0, w - 100.0, 34.0);
+        } else {
+            // Cá nhân / Khám phá / Tường nhà: [⚙️]
+            _headerRightBtn2.hidden = YES;
+            _headerRightBtn1.frame = CGRectMake(w - 46.0, safe.top + 5.0, 36.0, 36.0);
+            [_headerRightBtn1 setImage:[CTDOIconRenderer gearIconWithSize:21.0 color:[UIColor whiteColor]] forState:UIControlStateNormal];
+            _headerSearchField.frame = CGRectMake(46.0, safe.top + 6.0, w - 100.0, 34.0);
+        }
+    }
+
+    // Bottom TabBar (hidden when inside Cài đặt on compact iPhone, matching ref5.png)
+    CGFloat tabBarH = inSettings ? 0.0 : (54.0 + safe.bottom);
+    _bottomTabBar.hidden = inSettings;
+    _bottomTabBar.frame = CGRectMake(0, h - tabBarH, w, tabBarH);
+    _bottomTabTopLine.frame = CGRectMake(0, 0, w, 0.6);
+
+    if (!inSettings) {
+        CGFloat tabW = w / 5.0;
+        for (NSInteger i = 0; i < 5; i++) {
+            UIButton *btn = _bottomTabButtons[i];
+            btn.frame = CGRectMake(i * tabW, 0, tabW, 54.0);
+            UIImageView *iv = _bottomTabIcons[i];
+            iv.frame = CGRectMake((tabW - 24.0) * 0.5, 6.0, 24.0, 24.0);
+            UILabel *lbl = _bottomTabLabels[i];
+            lbl.frame = CGRectMake(2.0, 32.0, tabW - 4.0, 15.0);
+
+            if (i == 0 && !_msgTabBadge.hidden) {
+                _msgTabBadge.frame = CGRectMake(tabW * 0.5 + 4.0, 3.0, 24.0, 16.0);
+            }
+            if (i == 3) {
+                _timelineTabDot.frame = CGRectMake(tabW * 0.5 + 10.0, 5.0, 7.0, 7.0);
+            }
+        }
+    }
+
+    // Sub-header and Active TableView
+    CGFloat listY = topBarH;
+    if (_activeBottomTab == 0) {
+        _msgSubHeaderView.hidden = NO;
+        _contactSubHeaderView.hidden = YES;
+        _threadTableView.hidden = NO;
+        _contactTableView.hidden = YES;
+        _profileTableView.hidden = YES;
+
+        CGFloat subH = 40.0;
+        _msgSubHeaderView.frame = CGRectMake(0, topBarH, w, subH);
+        _uuTienTabBtn.frame = CGRectMake(16.0, 0, 68.0, subH);
+        _khacTabBtn.frame = CGRectMake(96.0, 0, 52.0, subH);
+        _khacRedDot.frame = CGRectMake(144.0, 10.0, 7.0, 7.0);
+        _subHeaderBottomLine.frame = CGRectMake(0, subH - 0.6, w, 0.6);
+
+        if (_activeFilterMode == 0) {
+            _subHeaderIndicator.frame = CGRectMake(18.0, subH - 2.5, 64.0, 2.5);
+        } else {
+            _subHeaderIndicator.frame = CGRectMake(98.0, subH - 2.5, 48.0, 2.5);
+        }
+        listY += subH;
+        _threadTableView.frame = CGRectMake(0, listY, w, h - listY - tabBarH);
+    } else if (_activeBottomTab == 1) {
+        _msgSubHeaderView.hidden = YES;
+        _contactSubHeaderView.hidden = NO;
+        _threadTableView.hidden = YES;
+        _contactTableView.hidden = NO;
+        _profileTableView.hidden = YES;
+
+        CGFloat subH = 42.0;
+        _contactSubHeaderView.frame = CGRectMake(0, topBarH, w, subH);
+        CGFloat colW = w / 3.0;
+        _contactSubBtn0.frame = CGRectMake(0, 0, colW, subH);
+        _contactSubBtn1.frame = CGRectMake(colW, 0, colW, subH);
+        _contactSubBtn2.frame = CGRectMake(colW * 2.0, 0, colW, subH);
+        CGFloat indW = 64.0;
+        _contactSubIndicator.frame = CGRectMake(_contactFilterType * colW + (colW - indW) * 0.5, subH - 2.5, indW, 2.5);
+
+        listY += subH;
+        _contactTableView.frame = CGRectMake(0, listY, w, h - listY - tabBarH);
+    } else {
+        _msgSubHeaderView.hidden = YES;
+        _contactSubHeaderView.hidden = YES;
+        _threadTableView.hidden = YES;
+        _contactTableView.hidden = YES;
+        _profileTableView.hidden = NO;
+        _profileTableView.frame = CGRectMake(0, listY, w, h - listY - tabBarH);
+    }
+}
+
+- (void)layoutPrimaryChatWithSafeInsets:(UIEdgeInsets)safe isCompact:(BOOL)isCompact {
+    CGFloat w = _primaryChatContainer.bounds.size.width;
+    CGFloat h = _primaryChatContainer.bounds.size.height;
+    CGFloat topBarH = safe.top + 46.0;
+
+    _primaryChatHeader.frame = CGRectMake(0, 0, w, topBarH);
+    _primaryChatHeaderGradient.frame = _primaryChatHeader.bounds;
+
+    CGFloat titleX = 14.0;
+    if (isCompact) {
+        _chatBackBtn.hidden = NO;
+        _chatBackBtn.frame = CGRectMake(6.0, safe.top + 5.0, 36.0, 36.0);
+        titleX = 44.0;
+    } else {
+        _chatBackBtn.hidden = YES;
+    }
+
+    _chatMenuBtn.frame = CGRectMake(w - 42.0, safe.top + 5.0, 34.0, 36.0);
+    _chatVideoBtn.frame = CGRectMake(w - 82.0, safe.top + 5.0, 34.0, 36.0);
+    _chatPhoneBtn.frame = CGRectMake(w - 122.0, safe.top + 5.0, 34.0, 36.0);
+
+    CGFloat maxTitleW = MAX(80.0, w - titleX - 130.0);
+    _chatTitleLabel.frame = CGRectMake(titleX, safe.top + 5.0, maxTitleW, 20.0);
+    _chatSubtitleLabel.frame = CGRectMake(titleX, safe.top + 25.0, maxTitleW, 15.0);
+
+    CGFloat compH = 52.0 + safe.bottom;
+    _composerBar.frame = CGRectMake(0, h - compH, w, compH);
+    _composerStickerBtn.frame = CGRectMake(8.0, 7.0, 36.0, 36.0);
+    _composerSendBtn.frame = CGRectMake(w - 64.0, 8.0, 54.0, 34.0);
+    _composerScheduleBtn.frame = CGRectMake(w - 104.0, 8.0, 34.0, 34.0);
+    _composerTextField.frame = CGRectMake(48.0, 8.0, w - 158.0, 34.0);
+
+    CGFloat replyH = _replyBannerView.hidden ? 0.0 : 32.0;
+    if (!_replyBannerView.hidden) {
+        _replyBannerView.frame = CGRectMake(0, h - compH - replyH, w, replyH);
+        _replyBannerLabel.frame = CGRectMake(14.0, 4.0, w - 52.0, 24.0);
+        _replyBannerCloseBtn.frame = CGRectMake(w - 36.0, 2.0, 28.0, 28.0);
+    }
+
+    _primaryChatTableView.frame = CGRectMake(0, topBarH, w, h - topBarH - compH - replyH);
+}
+
+- (void)layoutSecondaryChatWithSafeInsets:(UIEdgeInsets)safe {
+    CGFloat w = _secondaryChatContainer.bounds.size.width;
+    CGFloat h = _secondaryChatContainer.bounds.size.height;
+    CGFloat topBarH = safe.top + 46.0;
+
+    _secondaryChatHeader.frame = CGRectMake(0, 0, w, topBarH);
+    _secondaryChatHeaderGradient.frame = _secondaryChatHeader.bounds;
+    _secondaryChatTitleLabel.frame = CGRectMake(14.0, safe.top + 5.0, w - 28.0, 20.0);
+    _secondaryChatSubtitleLabel.frame = CGRectMake(14.0, safe.top + 25.0, w - 28.0, 15.0);
+
+    CGFloat compH = 52.0 + safe.bottom;
+    _secondaryComposerBar.frame = CGRectMake(0, h - compH, w, compH);
+    _secondaryComposerSendBtn.frame = CGRectMake(w - 62.0, 8.0, 52.0, 34.0);
+    _secondaryComposerField.frame = CGRectMake(12.0, 8.0, w - 82.0, 34.0);
+
+    _secondaryChatTableView.frame = CGRectMake(0, topBarH, w, h - topBarH - compH);
+}
+
+#pragma mark - Data Loading & Sync
+
+- (void)reloadAllData {
+    NSString *query = _headerSearchField.text;
+    _threads = [[CTDOCoreBridge shared] listThreadsForSlot:_activeSlot
+                                                filterMode:_activeFilterMode
+                                               searchQuery:query];
+
+    // Update unread badge on Tin nhắn tab
+    NSArray<NSDictionary *> *allThreads = [[CTDOCoreBridge shared] listThreadsForSlot:_activeSlot
+                                                                           filterMode:0
+                                                                          searchQuery:nil];
+    NSInteger totalUnread = 0;
+    for (NSDictionary *t in allThreads) {
+        totalUnread += [t[@"unread_count"] integerValue];
+    }
+    if (totalUnread > 0) {
+        _msgTabBadge.hidden = NO;
+        _msgTabBadge.text = (totalUnread > 5) ? @"5+" : [NSString stringWithFormat:@"%ld", (long)totalUnread];
+    } else {
+        _msgTabBadge.hidden = YES;
+    }
+
+    if (_primaryThreadId.length == 0 && _threads.count > 0) {
+        _primaryThreadId = _threads[0][@"id"] ?: @"";
+    }
+    if (_secondaryThreadId.length == 0 && _threads.count > 1) {
+        _secondaryThreadId = _threads[1][@"id"] ?: @"";
+    } else if (_secondaryThreadId.length == 0 && _threads.count == 1) {
+        _secondaryThreadId = _threads[0][@"id"] ?: @"";
+    }
+
+    // Contacts & Alphabetical grouping for Danh bạ
+    _contacts = [[CTDOCoreBridge shared] listContactsForSlot:_activeSlot
+                                                  filterType:_contactFilterType
+                                                 searchQuery:query];
+    NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *grouped = [NSMutableDictionary dictionary];
+    for (NSDictionary *c in _contacts) {
+        NSString *letter = c[@"section_letter"] ?: @"#";
+        if (!grouped[letter]) {
+            grouped[letter] = [NSMutableArray array];
+        }
+        [grouped[letter] addObject:c];
+    }
+    _contactSections = grouped;
+    _contactSectionTitles = [[grouped allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+
+    // Primary & Secondary Chat Messages
+    if (_primaryThreadId.length > 0) {
+        _primaryMessages = [[CTDOCoreBridge shared] getMessagesForSlot:_activeSlot threadId:_primaryThreadId];
+        NSDictionary *t = [self threadById:_primaryThreadId];
+        _chatTitleLabel.text = t[@"name"] ?: @"Trò chuyện";
+        BOOL isGroup = [t[@"is_group"] boolValue];
+        NSInteger mCount = [t[@"total_members"] integerValue];
+        if (isGroup && mCount > 0) {
+            _chatSubtitleLabel.text = [NSString stringWithFormat:@"%ld thành viên", (long)mCount];
+        } else if ([t[@"is_cloud"] boolValue] || [t[@"name"] isEqualToString:@"My Documents"]) {
+            _chatSubtitleLabel.text = @"Lưu trữ các tin nhắn quan trọng";
+        } else {
+            _chatSubtitleLabel.text = @"Truy cập vừa xong";
         }
     } else {
-        // Native iPad 3-Column Split-View Layout
-        _backButtonCompact.hidden = YES;
-        _duoSendToRightBtn.hidden = NO;
-        _leftPane.hidden = NO;
-        _centerPane.hidden = NO;
-        _hingeBar.hidden = NO;
-        _rightPane.hidden = NO;
-
-        CGFloat leftW = 265.0;
-        CGFloat hingeW = 12.0;
-        CGFloat rightW = MIN(310.0, floor(fullW * 0.29));
-        CGFloat centerW = MAX(300.0, fullW - leftW - hingeW - rightW);
-
-        _leftPane.frame = CGRectMake(0, contentY, leftW, workspaceH);
-        _centerPane.frame = CGRectMake(leftW, contentY, centerW, workspaceH);
-        _hingeBar.frame = CGRectMake(leftW + centerW, contentY, hingeW, workspaceH);
-        _hingeToggleBtn.frame = CGRectMake(0, 10, hingeW, 28);
-        _hingeLabel.frame = CGRectMake(0, 44, hingeW, 90);
-        _rightPane.frame = CGRectMake(leftW + centerW + hingeW, contentY, rightW, workspaceH);
+        _primaryMessages = @[];
+        _chatTitleLabel.text = @"Zalo";
+        _chatSubtitleLabel.text = @"Chọn cuộc trò chuyện để bắt đầu";
     }
 
-    [self layoutLeftPane];
-    [self layoutPrimaryChatPane];
-    [self layoutSecondaryChatPane];
-}
-
-- (void)layoutLeftPane {
-    if (_leftPane.hidden) return;
-    CGFloat w = _leftPane.bounds.size.width;
-    CGFloat h = _leftPane.bounds.size.height;
-    _searchField.frame = CGRectMake(8, 8, w - 16, 34);
-    _filterControl.frame = CGRectMake(8, 48, w - 16, 28);
-    _threadsTableView.frame = CGRectMake(0, 82, w, MAX(40, h - 82));
-    _emptyThreadsLabel.frame = CGRectMake(14, 120, MAX(80, w - 28), 110);
-}
-
-- (void)layoutPrimaryChatPane {
-    if (_centerPane.hidden) return;
-    CGFloat w = _centerPane.bounds.size.width;
-    CGFloat h = _centerPane.bounds.size.height;
-
-    _chatHeaderPrimary.frame = CGRectMake(0, 0, w, 54);
-    CGFloat titleX = 12.0;
-    if (!_backButtonCompact.hidden) {
-        _backButtonCompact.frame = CGRectMake(8, 12, 82, 30);
-        titleX = 94.0;
-    }
-
-    CGFloat btnRight = w - 8.0;
-    if (!_duoSendToRightBtn.hidden && w >= 420.0) {
-        _duoSendToRightBtn.frame = CGRectMake(btnRight - 86, 13, 86, 28);
-        btnRight -= 92.0;
+    if (_secondaryThreadId.length > 0) {
+        _secondaryMessages = [[CTDOCoreBridge shared] getMessagesForSlot:_activeSlot threadId:_secondaryThreadId];
+        NSDictionary *t2 = [self threadById:_secondaryThreadId];
+        _secondaryChatTitleLabel.text = t2[@"name"] ?: @"Dual-Chat";
+        _secondaryChatSubtitleLabel.text = @"Khung chat song song • iPhone Duo / iPad";
     } else {
-        _duoSendToRightBtn.frame = CGRectZero;
+        _secondaryMessages = @[];
     }
-    _callBtnPrimary.frame = CGRectMake(btnRight - 56, 13, 56, 28);
-    btnRight -= 62.0;
-    _syncRefreshBtn.frame = CGRectMake(btnRight - 84, 13, 84, 28);
-    btnRight -= 90.0;
 
-    CGFloat availTitleW = MAX(70.0, btnRight - titleX);
-    _chatTitlePrimary.frame = CGRectMake(titleX, 8, availTitleW, 20);
-    _chatSubPrimary.frame = CGRectMake(titleX, 29, availTitleW, 16);
-
-    CGFloat composerH = 50.0;
-    CGFloat replyH = _replyBarPrimary.hidden ? 0.0 : 28.0;
-    _composerPrimary.frame = CGRectMake(0, h - composerH, w, composerH);
-    if (replyH > 0.0) {
-        _replyBarPrimary.frame = CGRectMake(0, h - composerH - replyH, w, replyH);
-        _replyBarLabelPrimary.frame = CGRectMake(12, 4, w - 44, 20);
-        _replyBarCancelPrimary.frame = CGRectMake(w - 32, 2, 26, 24);
-    }
-    _messagesTablePrimary.frame = CGRectMake(0, 54, w, MAX(40, h - 54 - composerH - replyH));
-
-    _stickerBtnPrimary.frame = CGRectMake(8, 8, 34, 34);
-    _schedQuickBtnPrimary.frame = CGRectMake(46, 8, 34, 34);
-    _sendBtnPrimary.frame = CGRectMake(w - 64, 8, 56, 34);
-    _inputFieldPrimary.frame = CGRectMake(86, 8, MAX(80, w - 156), 34);
-
-    // Layout QR Auth Overlay
-    _qrAuthOverlay.frame = CGRectMake(0, 0, w, h);
-    CGFloat cardW = MIN(w - 16.0, 380.0);
-    CGFloat cardH = MIN(h - 16.0, 440.0);
-    _qrCardView.frame = CGRectMake((w - cardW) * 0.5, (h - cardH) * 0.5, cardW, cardH);
-
-    _qrTitleLabel.frame = CGRectMake(12, 12, cardW - 24, 22);
-    _qrSubtitleLabel.frame = CGRectMake(12, 34, cardW - 24, 30);
-
-    CGFloat qrSide = MIN(cardW - 44.0, MAX(150.0, cardH - 196.0));
-    _qrWhiteFrame.frame = CGRectMake((cardW - qrSide) * 0.5, 68, qrSide, qrSide);
-    _qrImageView.frame = CGRectMake(10, 10, qrSide - 20, qrSide - 20);
-
-    CGFloat afterQrY = 68 + qrSide + 8;
-    _qrTokenLabel.frame = CGRectMake(12, afterQrY, cardW - 24, 16);
-    _qrStatusLabel.frame = CGRectMake(12, afterQrY + 18, cardW - 24, 46);
-
-    CGFloat btnW = (cardW - 32) * 0.5;
-    _qrRefreshBtn.frame = CGRectMake(12, cardH - 46, btnW, 34);
-    _qrPasswordLoginBtn.frame = CGRectMake(20 + btnW, cardH - 46, btnW, 34);
+    [_threadTableView reloadData];
+    [_contactTableView reloadData];
+    [_profileTableView reloadData];
+    [_primaryChatTableView reloadData];
+    [_secondaryChatTableView reloadData];
 }
 
-- (void)layoutSecondaryChatPane {
-    if (_rightPane.hidden) return;
-    CGFloat w = _rightPane.bounds.size.width;
-    CGFloat h = _rightPane.bounds.size.height;
-
-    _chatHeaderSecondary.frame = CGRectMake(0, 0, w, 54);
-    _switchSecondarySlotBtn.frame = CGRectMake(w - 76, 13, 68, 28);
-    _switchSecondaryThreadBtn.frame = CGRectMake(w - 168, 13, 86, 28);
-    _chatTitleSecondary.frame = CGRectMake(10, 8, MAX(60, w - 174), 20);
-    _chatSubSecondary.frame = CGRectMake(10, 29, MAX(60, w - 174), 16);
-
-    CGFloat composerH = 50.0;
-    _composerSecondary.frame = CGRectMake(0, h - composerH, w, composerH);
-    _messagesTableSecondary.frame = CGRectMake(0, 54, w, MAX(40, h - 54 - composerH));
-
-    _sendBtnSecondary.frame = CGRectMake(w - 66, 8, 58, 34);
-    _inputFieldSecondary.frame = CGRectMake(10, 8, MAX(60, w - 82), 34);
+- (nullable NSDictionary *)threadById:(NSString *)threadId {
+    for (NSDictionary *t in _threads) {
+        if ([t[@"id"] isEqualToString:threadId]) return t;
+    }
+    NSArray<NSDictionary *> *all = [[CTDOCoreBridge shared] listThreadsForSlot:_activeSlot filterMode:0 searchQuery:nil];
+    for (NSDictionary *t in all) {
+        if ([t[@"id"] isEqualToString:threadId]) return t;
+    }
+    return nil;
 }
 
-// ============================================================================
-// Theme Styling
-// ============================================================================
+- (void)triggerBackgroundSyncForCurrentSlot {
+    NSInteger slot = _activeSlot;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [[CTDOCoreBridge shared] refreshThreadsForSlot:slot];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.threadRefreshControl endRefreshing];
+            [self reloadAllData];
+        });
+    });
+}
+
+- (void)onPullToRefreshThreads {
+    [self triggerBackgroundSyncForCurrentSlot];
+}
+
+#pragma mark - Theme Application
+
 - (void)applyTheme {
     CTDOTheme *theme = [CTDOTheme shared];
     self.view.backgroundColor = theme.bgPrimary;
-    _topBar.backgroundColor = theme.bgHeader;
+    _leftMasterContainer.backgroundColor = theme.bgSecondary;
+    _primaryChatContainer.backgroundColor = theme.bgChatCanvas;
+    _secondaryChatContainer.backgroundColor = theme.bgChatCanvas;
 
-    _accountButton.backgroundColor = theme.bgElevated;
-    [_accountButton setTitleColor:theme.textPrimary forState:UIControlStateNormal];
+    _leftMasterContainer.layer.borderWidth = 0.5;
+    _leftMasterContainer.layer.borderColor = theme.borderSubtle.CGColor;
+    _secondaryChatContainer.layer.borderWidth = 0.5;
+    _secondaryChatContainer.layer.borderColor = theme.borderSubtle.CGColor;
 
-    _hardwareBadgeLabel.backgroundColor = theme.bgElevated;
-    _hardwareBadgeLabel.textColor = theme.accentOnline;
+    // Sub-Header (Ưu tiên | Khác)
+    _msgSubHeaderView.backgroundColor = theme.bgSecondary;
+    _subHeaderBottomLine.backgroundColor = theme.borderSubtle;
+    UIColor *activeTabColor = (theme.mode == CTDOThemeModeZaloLight) ? [CTDOTheme colorFromHex:@"#141415"] : theme.textPrimary;
+    _subHeaderIndicator.backgroundColor = activeTabColor;
 
-    NSArray<UIButton *> *topBtns = @[_qrButton, _scheduleButton, _autoReplyButton, _themeButton, _updateCheckButton];
-    for (UIButton *b in topBtns) {
-        b.backgroundColor = theme.bgElevated;
-        [b setTitleColor:theme.textPrimary forState:UIControlStateNormal];
-    }
-    _qrButton.backgroundColor = theme.accentPrimary;
-    [_qrButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _updateCheckButton.backgroundColor = [UIColor colorWithRed:0.06 green:0.48 blue:0.36 alpha:1.0];
-    [_updateCheckButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [_uuTienTabBtn setTitleColor:(_activeFilterMode == 0 ? activeTabColor : theme.textSecondary) forState:UIControlStateNormal];
+    _uuTienTabBtn.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:(_activeFilterMode == 0 ? UIFontWeightBold : UIFontWeightMedium)];
 
-    _updateBanner.backgroundColor = [UIColor colorWithRed:0.04 green:0.28 blue:0.22 alpha:1.0];
-    _updateBannerLabel.textColor = [UIColor colorWithRed:0.45 green:0.95 blue:0.75 alpha:1.0];
-    _updateBannerDetailBtn.backgroundColor = theme.accentOnline;
-    [_updateBannerDetailBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [_updateBannerCloseBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [_khacTabBtn setTitleColor:(_activeFilterMode == 1 ? activeTabColor : theme.textSecondary) forState:UIControlStateNormal];
+    _khacTabBtn.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:(_activeFilterMode == 1 ? UIFontWeightBold : UIFontWeightMedium)];
 
-    _leftPane.backgroundColor = theme.bgSecondary;
-    _leftPane.layer.borderColor = theme.borderSubtle.CGColor;
-    _leftPane.layer.borderWidth = 0.5;
-
-    _searchField.backgroundColor = theme.bgElevated;
-    _searchField.textColor = theme.textPrimary;
-    _searchField.attributedPlaceholder = [[NSAttributedString alloc]
-        initWithString:@"🔍 Tìm bạn bè, nhóm Zalo, UID..."
-            attributes:@{NSForegroundColorAttributeName: theme.textSecondary}];
-    _threadsTableView.backgroundColor = theme.bgSecondary;
-    _emptyThreadsLabel.textColor = theme.textSecondary;
-
-    NSDictionary *segNormal = @{
-        NSForegroundColorAttributeName: theme.textSecondary,
-        NSFontAttributeName: [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold]
-    };
-    NSDictionary *segSelected = @{
-        NSForegroundColorAttributeName: (theme.mode == CTDOThemeModeZaloLight) ? [UIColor blackColor] : [UIColor whiteColor],
-        NSFontAttributeName: [UIFont boldSystemFontOfSize:11.0]
-    };
-    [_filterControl setTitleTextAttributes:segNormal forState:UIControlStateNormal];
-    [_filterControl setTitleTextAttributes:segSelected forState:UIControlStateSelected];
-    if (@available(iOS 13.0, *)) {
-        _filterControl.selectedSegmentTintColor = theme.accentPrimary;
+    // Contact Sub-Header (Bạn bè | Nhóm | OA)
+    _contactSubHeaderView.backgroundColor = theme.bgSecondary;
+    _contactSubIndicator.backgroundColor = activeTabColor;
+    NSArray<UIButton *> *cBtns = @[_contactSubBtn0, _contactSubBtn1, _contactSubBtn2];
+    for (NSInteger i = 0; i < 3; i++) {
+        UIButton *b = cBtns[i];
+        BOOL sel = (i == _contactFilterType);
+        [b setTitleColor:(sel ? activeTabColor : theme.textSecondary) forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:(sel ? UIFontWeightBold : UIFontWeightMedium)];
     }
 
-    _centerPane.backgroundColor = theme.bgPrimary;
-    _chatHeaderPrimary.backgroundColor = theme.bgSecondary;
-    _chatTitlePrimary.textColor = theme.textPrimary;
-    _chatSubPrimary.textColor = theme.textSecondary;
-    [_backButtonCompact setTitleColor:theme.accentPrimary forState:UIControlStateNormal];
+    // TableViews
+    _threadTableView.backgroundColor = theme.bgSecondary;
+    _contactTableView.backgroundColor = theme.bgSecondary;
+    _profileTableView.backgroundColor = theme.bgPrimary;
+    _primaryChatTableView.backgroundColor = theme.bgChatCanvas;
+    _secondaryChatTableView.backgroundColor = theme.bgChatCanvas;
 
-    for (UIButton *b in @[_syncRefreshBtn, _callBtnPrimary, _duoSendToRightBtn, _stickerBtnPrimary, _schedQuickBtnPrimary]) {
-        b.backgroundColor = theme.bgElevated;
-        [b setTitleColor:theme.textPrimary forState:UIControlStateNormal];
+    // Bottom TabBar
+    _bottomTabBar.backgroundColor = theme.bgSecondary;
+    _bottomTabTopLine.backgroundColor = theme.borderSubtle;
+    UIColor *tabSelColor = [CTDOTheme colorFromHex:@"#0068FF"];
+    UIColor *tabNormalColor = theme.textSecondary;
+    for (NSInteger i = 0; i < 5; i++) {
+        BOOL sel = (i == _activeBottomTab);
+        _bottomTabIcons[i].image = [CTDOIconRenderer tabIconForIndex:i selected:sel];
+        _bottomTabLabels[i].textColor = sel ? tabSelColor : tabNormalColor;
+        _bottomTabLabels[i].font = [UIFont systemFontOfSize:10.5 weight:(sel ? UIFontWeightSemibold : UIFontWeightRegular)];
     }
 
-    _messagesTablePrimary.backgroundColor = theme.bgPrimary;
-    _replyBarPrimary.backgroundColor = theme.bgElevated;
-    _replyBarLabelPrimary.textColor = theme.textSecondary;
-    [_replyBarCancelPrimary setTitleColor:theme.textPrimary forState:UIControlStateNormal];
+    // Composer Bars
+    _composerBar.backgroundColor = theme.bgSecondary;
+    _composerBar.layer.borderWidth = 0.5;
+    _composerBar.layer.borderColor = theme.borderSubtle.CGColor;
+    _composerTextField.textColor = theme.textPrimary;
+    _composerSendBtn.backgroundColor = theme.accentPrimary;
+    [_composerSendBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
-    _composerPrimary.backgroundColor = theme.bgSecondary;
-    _inputFieldPrimary.backgroundColor = theme.bgElevated;
-    _inputFieldPrimary.textColor = theme.textPrimary;
-    _inputFieldPrimary.attributedPlaceholder = [[NSAttributedString alloc]
-        initWithString:@"Nhập tin nhắn Zalo thực tế (Enter để gửi)..."
-            attributes:@{NSForegroundColorAttributeName: theme.textSecondary}];
-    _sendBtnPrimary.backgroundColor = theme.accentPrimary;
-    [_sendBtnPrimary setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _secondaryComposerBar.backgroundColor = theme.bgSecondary;
+    _secondaryComposerBar.layer.borderWidth = 0.5;
+    _secondaryComposerBar.layer.borderColor = theme.borderSubtle.CGColor;
+    _secondaryComposerField.textColor = theme.textPrimary;
+    _secondaryComposerSendBtn.backgroundColor = theme.accentPrimary;
+    [_secondaryComposerSendBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
 
-    // QR Auth Overlay styling
-    _qrAuthOverlay.backgroundColor = theme.bgPrimary;
-    _qrCardView.backgroundColor = theme.bgSecondary;
-    _qrCardView.layer.borderColor = theme.borderSubtle.CGColor;
-    _qrTitleLabel.textColor = theme.textPrimary;
-    _qrSubtitleLabel.textColor = theme.textSecondary;
-    _qrTokenLabel.textColor = theme.accentPrimary;
-    _qrStatusLabel.textColor = theme.accentOnline;
-    _qrRefreshBtn.backgroundColor = theme.accentPrimary;
-    [_qrRefreshBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    _qrPasswordLoginBtn.backgroundColor = theme.bgElevated;
-    [_qrPasswordLoginBtn setTitleColor:theme.textPrimary forState:UIControlStateNormal];
+    _replyBannerView.backgroundColor = theme.bgElevated;
+    _replyBannerLabel.textColor = theme.textSecondary;
 
-    _hingeBar.backgroundColor = [UIColor colorWithRed:0.02 green:0.03 blue:0.06 alpha:1.0];
-    _hingeLabel.textColor = theme.accentPrimary;
-    _hingeToggleBtn.backgroundColor = theme.accentPrimary;
-    [_hingeToggleBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-    _rightPane.backgroundColor = theme.bgPrimary;
-    _chatHeaderSecondary.backgroundColor = theme.bgSecondary;
-    _chatTitleSecondary.textColor = theme.textPrimary;
-    _chatSubSecondary.textColor = theme.accentOnline;
-    for (UIButton *b in @[_switchSecondaryThreadBtn, _switchSecondarySlotBtn]) {
-        b.backgroundColor = theme.bgElevated;
-        [b setTitleColor:theme.textPrimary forState:UIControlStateNormal];
-    }
-    _messagesTableSecondary.backgroundColor = theme.bgPrimary;
-    _composerSecondary.backgroundColor = theme.bgSecondary;
-    _inputFieldSecondary.backgroundColor = theme.bgElevated;
-    _inputFieldSecondary.textColor = theme.textPrimary;
-    _inputFieldSecondary.attributedPlaceholder = [[NSAttributedString alloc]
-        initWithString:@"Nhắn ở màn hình Phải (iPhone Duo / iPad)..."
-            attributes:@{NSForegroundColorAttributeName: theme.textSecondary}];
-    _sendBtnSecondary.backgroundColor = theme.accentOnline;
-    [_sendBtnSecondary setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-
-    [self setNeedsStatusBarAppearanceUpdate];
-}
-
-// ============================================================================
-// Data Loading & Live QR Status Sync
-// ============================================================================
-- (void)refreshAllData {
-    CTDOCoreBridge *core = [CTDOCoreBridge shared];
-    NSDictionary *auth = [core authStateForSlot:self.activeSlot];
-    NSString *status = auth[@"status"] ?: @"unauthenticated";
-    BOOL isAuthed = [status isEqualToString:@"authenticated"];
-
-    NSString *accTitle = (self.activeSlot == 0)
-        ? (isAuthed ? [NSString stringWithFormat:@"👤 TK1: %@", auth[@"display_name"]] : @"👤 TK1 (Chưa ĐN)")
-        : (isAuthed ? [NSString stringWithFormat:@"👥 TK2: %@", auth[@"display_name"]] : @"👥 TK2 (Chưa ĐN)");
-    [_accountButton setTitle:accTitle forState:UIControlStateNormal];
-
-    if (!isAuthed) {
-        _qrAuthOverlay.hidden = NO;
-        _qrStatusLabel.text = auth[@"status_message"] ?: @"Đang lấy mã QR từ máy chủ Zalo...";
-        NSString *tokenId = auth[@"qr_token_id"] ?: @"";
-        _qrTokenLabel.text = tokenId.length > 0 ? [NSString stringWithFormat:@"Token: %@", tokenId] : @"Đang kết nối wpa.zaloapp.com...";
-
-        NSString *qrPayload = auth[@"qr_payload"] ?: @"";
-        NSString *qrB64 = auth[@"qr_image_b64"] ?: @"";
-        if (qrPayload.length > 0 && ![qrPayload isEqualToString:self.lastRenderedQrPayload]) {
-            self.lastRenderedQrPayload = qrPayload;
-            _qrImageView.image = [CTDOIconRenderer qrCodeImageForString:qrPayload size:240.0];
-        } else if (qrPayload.length == 0 && qrB64.length > 0 && ![qrB64 isEqualToString:self.lastRenderedQrPayload]) {
-            self.lastRenderedQrPayload = qrB64;
-            _qrImageView.image = [CTDOIconRenderer imageFromBase64String:qrB64];
-        } else if (qrPayload.length == 0 && qrB64.length == 0) {
-            _qrImageView.image = [CTDOIconRenderer appLogoWithSize:120.0];
-        }
-    } else {
-        _qrAuthOverlay.hidden = YES;
-    }
-
-    self.threadsPrimary = [core listThreadsForSlot:self.activeSlot
-                                        filterMode:self.filterMode
-                                       searchQuery:self.searchQuery];
-    _emptyThreadsLabel.hidden = (self.threadsPrimary.count > 0);
-    if (isAuthed && self.threadsPrimary.count == 0) {
-        _emptyThreadsLabel.text = @"Đang đồng bộ danh bạ & tin nhắn từ Zalo...\nBấm '🔄 Đồng bộ' nếu chưa thấy hội thoại.";
-    } else if (!isAuthed) {
-        _emptyThreadsLabel.text = @"Chưa đăng nhập Zalo.\nHãy dùng điện thoại quét mã QR bên phải\nđể tải danh bạ & tin nhắn thực tế.";
-    }
-
-    BOOL foundPrimary = NO;
-    NSDictionary *primaryThreadObj = nil;
-    for (NSDictionary *t in self.threadsPrimary) {
-        if ([t[@"id"] isEqualToString:self.selectedThreadIdPrimary]) {
-            foundPrimary = YES;
-            primaryThreadObj = t;
-            break;
-        }
-    }
-    if (!foundPrimary && self.threadsPrimary.count > 0) {
-        primaryThreadObj = self.threadsPrimary.firstObject;
-        self.selectedThreadIdPrimary = primaryThreadObj[@"id"] ?: @"";
-    }
-
-    if (primaryThreadObj) {
-        _chatTitlePrimary.text = primaryThreadObj[@"name"] ?: @"Hội thoại";
-        _chatSubPrimary.text = [NSString stringWithFormat:@"[%@] %@",
-                                primaryThreadObj[@"id"] ?: @"",
-                                primaryThreadObj[@"subtitle_tag"] ?: @""];
-    } else {
-        _chatTitlePrimary.text = isAuthed ? @"Chọn một hội thoại Zalo" : @"Đăng nhập Zalo QR";
-        _chatSubPrimary.text = isAuthed ? @"Đã kết nối phiên Zalo thực tế" : @"Quét mã QR để bắt đầu trò chuyện";
-    }
-
-    self.messagesPrimary = [core getMessagesForSlot:self.activeSlot
-                                           threadId:self.selectedThreadIdPrimary];
-
-    // Secondary Pane (iPhone Duo Right Screen / iPad 3rd Column)
-    NSDictionary *authSec = [core authStateForSlot:self.secondarySlot];
-    BOOL secAuthed = [authSec[@"status"] isEqualToString:@"authenticated"];
-    NSArray<NSDictionary *> *secThreads = [core listThreadsForSlot:self.secondarySlot
-                                                        filterMode:0
-                                                       searchQuery:@""];
-    NSDictionary *secThreadObj = nil;
-    for (NSDictionary *t in secThreads) {
-        if ([t[@"id"] isEqualToString:self.selectedThreadIdSecondary]) {
-            secThreadObj = t;
-            break;
-        }
-    }
-    if (!secThreadObj && secThreads.count > 0) {
-        secThreadObj = (secThreads.count > 1) ? secThreads[1] : secThreads[0];
-        self.selectedThreadIdSecondary = secThreadObj[@"id"] ?: @"";
-    }
-    if (secThreadObj) {
-        _chatTitleSecondary.text = [NSString stringWithFormat:@"Màn #2 (TK%ld): %@",
-                                    (long)(self.secondarySlot + 1),
-                                    secThreadObj[@"name"] ?: @"Hội thoại"];
-        _chatSubSecondary.text = [NSString stringWithFormat:@"ID: %@ · %@",
-                                  secThreadObj[@"id"] ?: @"",
-                                  secThreadObj[@"subtitle_tag"] ?: @""];
-    } else {
-        _chatTitleSecondary.text = [NSString stringWithFormat:@"Màn #2 (TK%ld)", (long)(self.secondarySlot + 1)];
-        _chatSubSecondary.text = secAuthed ? @"Chọn hội thoại để mở song song" : @"Chờ đăng nhập QR Zalo";
-    }
-    self.messagesSecondary = [core getMessagesForSlot:self.secondarySlot
-                                             threadId:self.selectedThreadIdSecondary];
-
-    [_threadsTableView reloadData];
-    [_messagesTablePrimary reloadData];
-    [_messagesTableSecondary reloadData];
-    [self scrollTableToBottom:_messagesTablePrimary count:self.messagesPrimary.count];
-    [self scrollTableToBottom:_messagesTableSecondary count:self.messagesSecondary.count];
+    [_threadTableView reloadData];
+    [_contactTableView reloadData];
+    [_profileTableView reloadData];
+    [_primaryChatTableView reloadData];
+    [_secondaryChatTableView reloadData];
     [self.view setNeedsLayout];
 }
 
-- (void)scrollTableToBottom:(UITableView *)table count:(NSUInteger)count {
-    if (count == 0) return;
-    NSIndexPath *last = [NSIndexPath indexPathForRow:(NSInteger)(count - 1) inSection:0];
-    [table scrollToRowAtIndexPath:last atScrollPosition:UITableViewScrollPositionBottom animated:NO];
+#pragma mark - Navigation & Header Actions
+
+- (void)onTapBottomTab:(UIButton *)sender {
+    _activeBottomTab = sender.tag;
+    _showingSettingsSubscreen = NO;
+    [self applyTheme];
+    [self.view setNeedsLayout];
 }
 
-- (void)onPeriodicTick {
-    [[CTDOCoreBridge shared] pollDueScheduledMessages];
-    [self refreshAllData];
+- (void)onTapUuTienTab {
+    _activeFilterMode = 0;
+    [self reloadAllData];
+    [self applyTheme];
 }
 
-// ============================================================================
-// UITableViewDataSource & UITableViewDelegate
-// ============================================================================
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (tableView == _threadsTableView) {
-        return (NSInteger)self.threadsPrimary.count;
-    }
-    if (tableView == _messagesTablePrimary) {
-        return (NSInteger)self.messagesPrimary.count;
-    }
-    return (NSInteger)self.messagesSecondary.count;
+- (void)onTapKhacTab {
+    _activeFilterMode = 1;
+    [self reloadAllData];
+    [self applyTheme];
 }
 
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView == _threadsTableView) {
-        return 72.0;
-    }
-    if (tableView == _messagesTablePrimary) {
-        NSDictionary *msg = self.messagesPrimary[indexPath.row];
-        return [CTDOMessageCell heightForMessage:msg maxWidth:MAX(260.0, tableView.bounds.size.width)];
-    }
-    NSDictionary *msg = self.messagesSecondary[indexPath.row];
-    return [CTDOMessageCell heightForMessage:msg maxWidth:MAX(240.0, tableView.bounds.size.width)];
+- (void)onTapContactSubTab:(UIButton *)sender {
+    _contactFilterType = sender.tag;
+    [self reloadAllData];
+    [self applyTheme];
 }
 
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView == _threadsTableView) {
-        CTDOThreadCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ThreadCell" forIndexPath:indexPath];
-        NSDictionary *thread = self.threadsPrimary[indexPath.row];
-        BOOL selected = [thread[@"id"] isEqualToString:self.selectedThreadIdPrimary];
-        [cell configureWithThread:thread isSelected:selected];
-        return cell;
+- (void)onTapHeaderBack {
+    if (_showingSettingsSubscreen) {
+        _showingSettingsSubscreen = NO;
+        [self applyTheme];
+        [self.view setNeedsLayout];
     }
-    if (tableView == _messagesTablePrimary) {
-        CTDOMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MsgCellPrimary" forIndexPath:indexPath];
-        NSDictionary *msg = self.messagesPrimary[indexPath.row];
-        [cell configureWithMessage:msg maxWidth:MAX(260.0, tableView.bounds.size.width)];
-        return cell;
-    }
-    CTDOMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"MsgCellSecondary" forIndexPath:indexPath];
-    NSDictionary *msg = self.messagesSecondary[indexPath.row];
-    [cell configureWithMessage:msg maxWidth:MAX(240.0, tableView.bounds.size.width)];
-    return cell;
 }
 
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView == _threadsTableView) {
-        NSDictionary *thread = self.threadsPrimary[indexPath.row];
-        self.selectedThreadIdPrimary = thread[@"id"] ?: @"";
-        self.compactShowingChatDetail = YES;
-        [self refreshAllData];
+- (void)onTapHeaderRight1 {
+    if (_activeBottomTab == 4 && !_showingSettingsSubscreen) {
+        // Gear icon on Cá nhân -> Open Cài đặt (ref5.png)
+        _showingSettingsSubscreen = YES;
+        [self applyTheme];
+        [self.view setNeedsLayout];
         return;
     }
+    if (_activeBottomTab == 0) {
+        // QR / Sync button on Tin nhắn
+        [self triggerBackgroundSyncForCurrentSlot];
+    }
+}
 
-    BOOL isPrimary = (tableView == _messagesTablePrimary);
-    NSArray<NSDictionary *> *list = isPrimary ? self.messagesPrimary : self.messagesSecondary;
-    if (indexPath.row >= (NSInteger)list.count) return;
-    NSDictionary *msg = list[indexPath.row];
-    NSString *mid = msg[@"id"] ?: @"";
-    NSString *tid = isPrimary ? self.selectedThreadIdPrimary : self.selectedThreadIdSecondary;
-    NSInteger slot = isPrimary ? self.activeSlot : self.secondarySlot;
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:msg[@"sender_name"]
-                                                                   message:msg[@"content"]
+- (void)onTapHeaderRight2 {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSString *emoji in @[@"❤️", @"👍", @"😆", @"😮", @"🔥"]) {
-        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Thả biểu cảm %@", emoji]
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction * _Nonnull action) {
-            [[CTDOCoreBridge shared] reactMessageForSlot:slot threadId:tid msgId:mid emoji:emoji];
-            [self refreshAllData];
-        }]];
-    }
-    if (isPrimary) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"↩️ Trả lời (Quote Reply) tin nhắn này"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction * _Nonnull action) {
-            self.replyToMsgIdPrimary = mid;
-            self.replyPreviewTextPrimary = [NSString stringWithFormat:@"Đang trả lời %@: %@", msg[@"sender_name"], msg[@"content"]];
-            self.replyBarLabelPrimary.text = self.replyPreviewTextPrimary;
-            self.replyBarPrimary.hidden = NO;
-            [self.view setNeedsLayout];
-            [self.inputFieldPrimary becomeFirstResponder];
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentPopoverOrSheet:sheet sourceView:tableView];
-}
-
-// iOS 12+ Swipe Actions on Threads (#5, #24)
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView != _threadsTableView) return nil;
-    NSDictionary *thread = self.threadsPrimary[indexPath.row];
-    NSString *tid = thread[@"id"] ?: @"";
-    BOOL pinned = [thread[@"is_pinned"] boolValue];
-
-    UIContextualAction *pinAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                         title:(pinned ? @"Bỏ ghim" : @"📌 Ghim")
-                                                                       handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:1];
-        [self refreshAllData];
-        completionHandler(YES);
-    }];
-    pinAct.backgroundColor = [CTDOTheme shared].accentPrimary;
-
-    UIContextualAction *duoAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                         title:@"📱 Màn #2"
-                                                                       handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        self.secondarySlot = self.activeSlot;
-        self.selectedThreadIdSecondary = tid;
-        self.duoDualChatMode = YES;
-        [self refreshAllData];
-        completionHandler(YES);
-    }];
-    duoAct.backgroundColor = [CTDOTheme shared].accentOnline;
-
-    return [UISwipeActionsConfiguration configurationWithActions:@[pinAct, duoAct]];
-}
-
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView != _threadsTableView) return nil;
-    NSDictionary *thread = self.threadsPrimary[indexPath.row];
-    NSString *tid = thread[@"id"] ?: @"";
-    BOOL muted = [thread[@"is_muted"] boolValue];
-    BOOL hidden = [thread[@"is_hidden"] boolValue];
-
-    UIContextualAction *muteAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                          title:(muted ? @"🔔 Bật TB" : @"🔕 Tắt TB")
-                                                                        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:2];
-        [self refreshAllData];
-        completionHandler(YES);
-    }];
-    muteAct.backgroundColor = [CTDOTheme shared].warningColor;
-
-    UIContextualAction *hideAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                          title:(hidden ? @"👁 Hiện" : @"🙈 Ẩn")
-                                                                        handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:3];
-        [self refreshAllData];
-        completionHandler(YES);
-    }];
-    hideAct.backgroundColor = [UIColor darkGrayColor];
-
-    UIContextualAction *delAct = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
-                                                                         title:@"🗑 Xoá"
-                                                                       handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:4];
-        [self refreshAllData];
-        completionHandler(YES);
-    }];
-
-    return [UISwipeActionsConfiguration configurationWithActions:@[delAct, hideAct, muteAct]];
-}
-
-// ============================================================================
-// User Actions & Modals
-// ============================================================================
-- (void)presentPopoverOrSheet:(UIAlertController *)alert sourceView:(UIView *)sourceView {
-    UIPopoverPresentationController *pop = alert.popoverPresentationController;
-    if (pop) {
-        pop.sourceView = sourceView;
-        pop.sourceRect = CGRectMake(sourceView.bounds.size.width * 0.5, sourceView.bounds.size.height * 0.5, 1, 1);
-    }
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)onTapRefreshQR {
-    self.lastRenderedQrPayload = @"";
-    [[CTDOCoreBridge shared] startQRLoginForSlot:self.activeSlot];
-    [self refreshAllData];
-}
-
-- (void)onTapPasswordLoginModal {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🔑 Đăng nhập Zalo bằng SĐT & Mật khẩu"
-                                                                   message:@"Giao thức ParamCipher v2 (loginByPasswv2). Khuyên dùng quét mã QR Zalo để không bị hỏi Captcha."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Số điện thoại (ví dụ: 0912345678)";
-        tf.keyboardType = UIKeyboardTypePhonePad;
-    }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Mật khẩu Zalo";
-        tf.secureTextEntry = YES;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đăng nhập" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *phone = alert.textFields[0].text ?: @"";
-        NSString *pwd = alert.textFields[1].text ?: @"";
-        [[CTDOCoreBridge shared] loginPasswordForSlot:self.activeSlot phone:phone password:pwd];
-        [self refreshAllData];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Đồng bộ tin nhắn Zalo mới nhất"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [self triggerBackgroundSyncForCurrentSlot];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)onTapRefreshRealZalo {
-    [[CTDOCoreBridge shared] refreshThreadsForSlot:self.activeSlot];
-    [self refreshAllData];
-}
-
-- (void)onLongPressThread:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    CGPoint pt = [gesture locationInView:_threadsTableView];
-    NSIndexPath *idx = [_threadsTableView indexPathForRowAtPoint:pt];
-    if (!idx || idx.row >= (NSInteger)self.threadsPrimary.count) return;
-
-    NSDictionary *thread = self.threadsPrimary[idx.row];
-    NSString *tid = thread[@"id"] ?: @"";
-    NSString *tname = thread[@"name"] ?: @"Hội thoại";
-
-    UIAlertController *menu = [UIAlertController alertControllerWithTitle:tname
-                                                                  message:[NSString stringWithFormat:@"Thread ID: %@ (#5, #24, #63)", tid]
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    [menu addAction:[UIAlertAction actionWithTitle:@"📌 Ghim / Bỏ ghim hội thoại" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:1];
-        [self refreshAllData];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Mở My Documents (Lưu trữ đám mây)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:self.activeSlot];
+        NSString *s2m = auth[@"send2me_id"];
+        [self openThreadId:(s2m.length > 0 ? s2m : @"cloud_self")];
     }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"🔕 Tắt / Bật thông báo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:2];
-        [self refreshAllData];
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"📱 Mở ở Màn hình Phải (iPhone Duo / iPad)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        self.secondarySlot = self.activeSlot;
-        self.selectedThreadIdSecondary = tid;
-        self.duoDualChatMode = YES;
-        [self refreshAllData];
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"🕒 Hẹn giờ gửi tin nhắn vào hội thoại này (#38)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        self.selectedThreadIdPrimary = tid;
-        [self onTapQuickSchedulePrimary];
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"🙈 Ẩn / Hiện hội thoại" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:3];
-        [self refreshAllData];
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"🗑 Xoá lịch sử cuộc trò chuyện" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:tid action:4];
-        [self refreshAllData];
-    }]];
-    [menu addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentPopoverOrSheet:menu sourceView:_threadsTableView];
-}
-
-- (void)onTapAccountSwitch {
-    NSDictionary *a0 = [[CTDOCoreBridge shared] authStateForSlot:0];
-    NSDictionary *a1 = [[CTDOCoreBridge shared] authStateForSlot:1];
-    NSString *lbl0 = [a0[@"status"] isEqualToString:@"authenticated"]
-        ? [NSString stringWithFormat:@"👤 Tài khoản 1: %@ (%@)", a0[@"display_name"], a0[@"uid"]]
-        : @"👤 Tài khoản 1 (Quét mã QR để đăng nhập)";
-    NSString *lbl1 = [a1[@"status"] isEqualToString:@"authenticated"]
-        ? [NSString stringWithFormat:@"👥 Tài khoản 2: %@ (%@)", a1[@"display_name"], a1[@"uid"]]
-        : @"👥 Tài khoản 2 · Duo #2 (Quét mã QR để đăng nhập)";
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Quản lý Tài khoản Zalo Thực tế"
-                                                                   message:@"Hỗ trợ đăng nhập QR độc lập cho 2 tài khoản Zalo trên iPhone / iPad / iPhone Duo"
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:lbl0 style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        self.activeSlot = 0;
-        self.lastRenderedQrPayload = @"";
-        if (![[[CTDOCoreBridge shared] authStateForSlot:0][@"status"] isEqualToString:@"authenticated"]) {
-            [[CTDOCoreBridge shared] startQRLoginForSlot:0];
-        }
-        [self refreshAllData];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:lbl1 style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        self.activeSlot = 1;
-        self.lastRenderedQrPayload = @"";
-        if (![[[CTDOCoreBridge shared] authStateForSlot:1][@"status"] isEqualToString:@"authenticated"]) {
-            [[CTDOCoreBridge shared] startQRLoginForSlot:1];
-        }
-        [self refreshAllData];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"🔄 Làm mới mã QR / Đồng bộ danh bạ Zalo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSDictionary *cur = [[CTDOCoreBridge shared] authStateForSlot:self.activeSlot];
-        if ([cur[@"status"] isEqualToString:@"authenticated"]) {
-            [[CTDOCoreBridge shared] refreshThreadsForSlot:self.activeSlot];
-        } else {
-            self.lastRenderedQrPayload = @"";
-            [[CTDOCoreBridge shared] startQRLoginForSlot:self.activeSlot];
-        }
-        [self refreshAllData];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"📦 Xuất / Nhập (Migrate) lịch sử tin nhắn (#9)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self showHistoryMigrationModal];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"🚪 Đăng xuất tài khoản hiện tại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        self.lastRenderedQrPayload = @"";
-        [[CTDOCoreBridge shared] logoutSlot:self.activeSlot];
-        [self refreshAllData];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Đổi giao diện (Sáng / Tối / OLED)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [[CTDOTheme shared] cycleTheme];
+        [self applyTheme];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentPopoverOrSheet:sheet sourceView:_accountButton];
+    sheet.popoverPresentationController.sourceView = _headerRightBtn2;
+    sheet.popoverPresentationController.sourceRect = _headerRightBtn2.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)onToggleDuoDualChatMode {
-    self.duoDualChatMode = !self.duoDualChatMode;
+- (void)openThreadId:(NSString *)threadId {
+    if (threadId.length == 0) return;
+    _primaryThreadId = [threadId copy];
+    if (_currentDeviceClass == CTDODeviceClassiPhone) {
+        _compactShowingChatDetail = YES;
+    }
+    [self reloadAllData];
     [self.view setNeedsLayout];
-    [self refreshAllData];
+    [self scrollToBottomOfTableView:_primaryChatTableView];
 }
 
-- (void)onTapCompactBack {
-    CTDODeviceClass devClass = [[CTDOCoreBridge shared] hardwareDeviceClassForWindowSize:self.view.bounds.size];
-    if (devClass == CTDODeviceClassiPhoneDuo && self.duoDualChatMode) {
-        self.duoDualChatMode = NO;
-    } else {
-        self.compactShowingChatDetail = NO;
-    }
-    [self.view setNeedsLayout];
-}
-
-- (void)onSearchTextChanged:(UITextField *)tf {
-    self.searchQuery = tf.text ?: @"";
-    [self refreshAllData];
-}
-
-- (void)onFilterChanged:(UISegmentedControl *)seg {
-    self.filterMode = seg.selectedSegmentIndex;
-    [self refreshAllData];
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-    if (textField == _inputFieldPrimary) {
-        [self onSendPrimary];
-        return NO;
-    }
-    if (textField == _inputFieldSecondary) {
-        [self onSendSecondary];
-        return NO;
-    }
-    [textField resignFirstResponder];
-    return YES;
-}
-
-- (void)onSendPrimary {
-    NSString *txt = [_inputFieldPrimary.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (txt.length == 0 || self.selectedThreadIdPrimary.length == 0) return;
-    [[CTDOCoreBridge shared] sendMessageForSlot:self.activeSlot
-                                       threadId:self.selectedThreadIdPrimary
-                                        content:txt
-                                   replyToMsgId:self.replyToMsgIdPrimary];
-    _inputFieldPrimary.text = @"";
-    [self onCancelReplyPrimary];
-    [self refreshAllData];
-}
-
-- (void)onSendSecondary {
-    NSString *txt = [_inputFieldSecondary.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (txt.length == 0 || self.selectedThreadIdSecondary.length == 0) return;
-    [[CTDOCoreBridge shared] sendMessageForSlot:self.secondarySlot
-                                       threadId:self.selectedThreadIdSecondary
-                                        content:txt
-                                   replyToMsgId:nil];
-    _inputFieldSecondary.text = @"";
-    [self refreshAllData];
-}
-
-- (void)onCancelReplyPrimary {
-    self.replyToMsgIdPrimary = nil;
-    self.replyPreviewTextPrimary = nil;
-    self.replyBarPrimary.hidden = YES;
+- (void)onTapChatBack {
+    _compactShowingChatDetail = NO;
     [self.view setNeedsLayout];
 }
 
 - (void)onTapVoiceCall {
-    NSDictionary *signedDiag = [[CTDOCoreBridge shared] buildSignedRequestForService:@"chat"
-                                                                              method:@"voip_call_init"
-                                                                          jsonParams:[NSString stringWithFormat:@"{\"callee\":\"%@\"}", self.selectedThreadIdPrimary ?: @""]];
-    NSString *msg = [NSString stringWithFormat:@"Kết nối VoIP tới [%@]...\n\n• Giao thức: ParamCipher v2 (zpw_ver=694)\n• Signkey: %@\n• Endpoint: %@",
-                     self.selectedThreadIdPrimary ?: @"",
-                     signedDiag[@"signkey"] ?: @"",
-                     signedDiag[@"endpoint"] ?: @""];
-    UIAlertController *callAlert = [UIAlertController alertControllerWithTitle:@"📞 Cuộc gọi Thoại / Video Zalo"
-                                                                       message:msg
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-    [callAlert addAction:[UIAlertAction actionWithTitle:@"Kết thúc" style:UIAlertActionStyleDestructive handler:nil]];
-    [self presentViewController:callAlert animated:YES completion:nil];
+    NSDictionary *t = [self threadById:_primaryThreadId];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Cuộc gọi thoại Zalo"
+                                                                message:[NSString stringWithFormat:@"Đang kết nối cuộc gọi thoại tới %@...", t[@"name"] ?: @"đối tác"]
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Kết thúc" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
-- (void)onTapOpenInRightScreen {
-    self.secondarySlot = self.activeSlot;
-    self.selectedThreadIdSecondary = self.selectedThreadIdPrimary;
-    self.duoDualChatMode = YES;
-    [self refreshAllData];
+- (void)onTapVideoCall {
+    NSDictionary *t = [self threadById:_primaryThreadId];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Cuộc gọi Video Zalo"
+                                                                message:[NSString stringWithFormat:@"Đang kết nối cuộc gọi video tới %@...", t[@"name"] ?: @"đối tác"]
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Kết thúc" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
-- (void)onTapSwitchSecondaryThread {
-    NSArray<NSDictionary *> *threads = [[CTDOCoreBridge shared] listThreadsForSlot:self.secondarySlot filterMode:0 searchQuery:@""];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Chọn hội thoại cho Màn hình Phải (#2)"
-                                                                   message:@"Hiển thị song song 2 cuộc trò chuyện thực tế trên iPhone Duo / iPad"
+- (void)onTapChatMenu {
+    NSDictionary *t = [self threadById:_primaryThreadId];
+    if (!t) return;
+    BOOL pinned = [t[@"is_pinned"] boolValue];
+    BOOL muted = [t[@"is_muted"] boolValue];
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:t[@"name"]
+                                                                   message:@"Tùy chọn cuộc trò chuyện"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSDictionary *t in threads) {
-        NSString *tid = t[@"id"] ?: @"";
-        NSString *label = [NSString stringWithFormat:@"%@ (%@)", t[@"name"], t[@"subtitle_tag"]];
-        [sheet addAction:[UIAlertAction actionWithTitle:label style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            self.selectedThreadIdSecondary = tid;
-            [self refreshAllData];
+    [sheet addAction:[UIAlertAction actionWithTitle:(pinned ? @"Bỏ ghim hội thoại" : @"Ghim hội thoại")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:self.primaryThreadId action:1];
+        [self reloadAllData];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:(muted ? @"Bật thông báo" : @"Tắt thông báo")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [[CTDOCoreBridge shared] performThreadActionForSlot:self.activeSlot threadId:self.primaryThreadId action:2];
+        [self reloadAllData];
+    }]];
+    if (_currentDeviceClass != CTDODeviceClassiPhone) {
+        [sheet addAction:[UIAlertAction actionWithTitle:(_dualChatEnabled ? @"Tắt khung chat song song (Dual-Chat)" : @"Bật khung chat song song (Dual-Chat)")
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+            self.dualChatEnabled = !self.dualChatEnabled;
+            [self.view setNeedsLayout];
         }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentPopoverOrSheet:sheet sourceView:_switchSecondaryThreadBtn];
+    sheet.popoverPresentationController.sourceView = _chatMenuBtn;
+    sheet.popoverPresentationController.sourceRect = _chatMenuBtn.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)onTapToggleSecondarySlot {
-    self.secondarySlot = (self.secondarySlot == 0) ? 1 : 0;
-    [self refreshAllData];
+- (void)onSearchFieldChanged:(__unused UITextField *)sender {
+    [self reloadAllData];
 }
 
-- (void)onTapStickerPicker {
-    if (self.selectedThreadIdPrimary.length == 0) return;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"🎉 Bộ Nhãn dán Zalo (#7)"
-                                                                   message:@"Chọn nhãn dán để gửi"
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray<NSString *> *stickers = @[
-        @"[Sticker] 🐱 Mèo Meng Meng: Xin chào!",
-        @"[Sticker] 🚀 Tên lửa ctdozlite",
-        @"[Sticker] ❤️ Thả tim!",
-        @"[Sticker] ☕ Mời cà phê!"
-    ];
-    for (NSString *st in stickers) {
-        [sheet addAction:[UIAlertAction actionWithTitle:st style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [[CTDOCoreBridge shared] sendMessageForSlot:self.activeSlot
-                                               threadId:self.selectedThreadIdPrimary
-                                                content:st
-                                           replyToMsgId:self.replyToMsgIdPrimary];
-            [self onCancelReplyPrimary];
-            [self refreshAllData];
-        }]];
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    if (textField == _headerSearchField) {
+        [textField resignFirstResponder];
+        [self reloadAllData];
+        return YES;
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentPopoverOrSheet:sheet sourceView:_stickerBtnPrimary];
-}
-
-- (void)onTapQuickSchedulePrimary {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🕒 Hẹn giờ gửi tin nhắn (#38, #24)"
-                                                                   message:[NSString stringWithFormat:@"Hội thoại đích: %@", self.selectedThreadIdPrimary ?: @"(Chưa chọn)"]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Nhập nội dung tin nhắn hẹn giờ...";
-    }];
-    int64_t nowMs = (int64_t)([[NSDate date] timeIntervalSince1970] * 1000.0);
-    [alert addAction:[UIAlertAction actionWithTitle:@"⚡ Gửi sau 3 giây" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *txt = alert.textFields.firstObject.text ?: @"";
-        if (txt.length > 0 && self.selectedThreadIdPrimary.length > 0) {
-            [[CTDOCoreBridge shared] scheduleMessageForSlot:self.activeSlot threadId:self.selectedThreadIdPrimary content:txt deliverAtMs:(nowMs + 3000)];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"🕒 Sau 15 phút (+15m)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *txt = alert.textFields.firstObject.text ?: @"";
-        if (txt.length > 0 && self.selectedThreadIdPrimary.length > 0) {
-            [[CTDOCoreBridge shared] scheduleMessageForSlot:self.activeSlot threadId:self.selectedThreadIdPrimary content:txt deliverAtMs:(nowMs + 15 * 60 * 1000)];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)onTapScheduleModal {
-    NSArray<NSDictionary *> *items = [[CTDOCoreBridge shared] listScheduledForSlot:self.activeSlot];
-    NSMutableString *desc = [NSMutableString stringWithFormat:@"Đang có %lu tin nhắn chờ gửi tự động:\n\n", (unsigned long)items.count];
-    for (NSDictionary *it in items) {
-        [desc appendFormat:@"• [#%@] %@ (%@): %@\n",
-         it[@"id"], it[@"thread_name"], it[@"deliver_time_label"], it[@"content"]];
+    if (textField == _composerTextField) {
+        [self onSendPrimaryMessage];
+        return YES;
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🕒 Quản lý Tin nhắn Hẹn giờ (#38, #24)"
-                                                                   message:desc
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"➕ Thêm tin hẹn giờ mới" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self onTapQuickSchedulePrimary];
-    }]];
-    if (items.count > 0) {
-        int64_t firstId = [items.firstObject[@"id"] longLongValue];
-        [alert addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"🗑 Huỷ tin hẹn giờ #%lld", firstId]
-                                                  style:UIAlertActionStyleDestructive
-                                                handler:^(UIAlertAction *action) {
-            [[CTDOCoreBridge shared] cancelScheduledForSlot:self.activeSlot schedId:firstId];
-        }]];
+    if (textField == _secondaryComposerField) {
+        [self onSendSecondaryMessage];
+        return YES;
     }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    return YES;
 }
 
-- (void)onTapAutoReplyModal {
-    NSArray<NSDictionary *> *rules = [[CTDOCoreBridge shared] listAutoReplyRules];
-    NSMutableString *desc = [NSMutableString stringWithString:@"Danh sách quy tắc tự động trả lời (#35):\n\n"];
-    if (rules.count == 0) {
-        [desc appendString:@"(Chưa có quy tắc nào. Hãy thêm từ khoá bên dưới)"];
-    }
-    for (NSDictionary *r in rules) {
-        BOOL en = [r[@"enabled"] boolValue];
-        [desc appendFormat:@"%@ Từ khoá \"%@\" → \"%@\"\n\n",
-         en ? @"✅ [BẬT]" : @"⏸ [TẮT]", r[@"pattern"], r[@"response"]];
-    }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🤖 Cấu hình Auto-Reply Bot (#35)"
-                                                                   message:desc
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Từ khoá kích hoạt (ví dụ: xin chào)";
-    }];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Nội dung tự động trả lời...";
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"➕ Thêm quy tắc mới" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *pat = alert.textFields[0].text ?: @"";
-        NSString *resp = alert.textFields[1].text ?: @"";
-        if (pat.length > 0 && resp.length > 0) {
-            [[CTDOCoreBridge shared] mutateAutoReplyOp:1 patternOrId:pat response:resp matchMode:@"contains"];
-        }
-    }]];
-    if (rules.count > 0) {
-        NSString *firstId = rules.firstObject[@"id"] ?: @"rule_1";
-        [alert addAction:[UIAlertAction actionWithTitle:@"🔄 Bật/Tắt quy tắc đầu tiên" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [[CTDOCoreBridge shared] mutateAutoReplyOp:2 patternOrId:firstId response:@"" matchMode:@"contains"];
-        }]];
-    }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+#pragma mark - Messaging & Scheduling
+
+- (void)onSendPrimaryMessage {
+    NSString *text = [_composerTextField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (text.length == 0 || _primaryThreadId.length == 0) return;
+
+    _primaryMessages = [[CTDOCoreBridge shared] sendMessageForSlot:_activeSlot
+                                                          threadId:_primaryThreadId
+                                                           content:text
+                                                      replyToMsgId:_replyTargetMsgId];
+    _composerTextField.text = @"";
+    [self onCancelReply];
+    [self reloadAllData];
+    [self scrollToBottomOfTableView:_primaryChatTableView];
 }
 
-- (void)onTapThemeCycle {
-    [[CTDOTheme shared] cycleTheme];
-    [self applyTheme];
-    [self refreshAllData];
+- (void)onSendSecondaryMessage {
+    NSString *text = [_secondaryComposerField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (text.length == 0 || _secondaryThreadId.length == 0) return;
+
+    _secondaryMessages = [[CTDOCoreBridge shared] sendMessageForSlot:_activeSlot
+                                                            threadId:_secondaryThreadId
+                                                             content:text
+                                                        replyToMsgId:nil];
+    _secondaryComposerField.text = @"";
+    [self reloadAllData];
+    [self scrollToBottomOfTableView:_secondaryChatTableView];
 }
 
-- (void)onTapQRModal {
-    NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:self.activeSlot];
-    NSString *info = [NSString stringWithFormat:
-                      @"• Thiết bị thực tế: %@\n"
-                      @"• Tài khoản đang chọn: Slot #%ld (%@)\n"
-                      @"• Trạng thái: %@\n"
-                      @"• Token QR: %@\n"
-                      @"• IMEI: %@",
-                      [[CTDOCoreBridge shared] deviceHardwareName],
-                      (long)(self.activeSlot + 1),
-                      auth[@"status"] ?: @"",
-                      auth[@"status_message"] ?: @"",
-                      auth[@"qr_token_id"] ?: @"(Chưa tạo)",
-                      auth[@"imei"] ?: @""];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📱 Trạng thái Đăng nhập QR Zalo"
-                                                                   message:info
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"🔄 Lấy mã QR Zalo mới (wpa.zaloapp.com)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self onTapRefreshQR];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"🔑 Đăng nhập bằng SĐT / Mật khẩu" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [self onTapPasswordLoginModal];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)showHistoryMigrationModal {
-    NSString *exported = [[CTDOCoreBridge shared] exportHistoryJSONForSlot:self.activeSlot];
-    NSDictionary *importResult = [[CTDOCoreBridge shared] importHistoryJSON:exported forSlot:self.activeSlot];
-    NSString *msg = [NSString stringWithFormat:
-                     @"Đã kiểm tra đồng bộ & gộp lịch sử idempotent (#9):\n\n"
-                     @"• Dung lượng JSON sao lưu: %lu bytes\n"
-                     @"• Hội thoại mới thêm: %@\n"
-                     @"• Tin nhắn mới thêm: %@\n"
-                     @"• Bản ghi trùng lặp đã bỏ qua: %@",
-                     (unsigned long)exported.length,
-                     importResult[@"imported_threads"] ?: @0,
-                     importResult[@"imported_messages"] ?: @0,
-                     importResult[@"skipped_duplicates"] ?: @0];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"📦 Nhập / Xuất Lịch sử Tin nhắn (#9)"
-                                                                   message:msg
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Sao chép JSON vào Clipboard" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [UIPasteboard generalPasteboard].string = exported;
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-// ============================================================================
-// GitHub Releases API Auto-Update Notification
-// ============================================================================
-- (void)triggerGitHubUpdateCheck:(BOOL)simulateOldVersion {
-    [[CTDOCoreBridge shared] checkGitHubLatestReleaseWithSimulateOldVersion:simulateOldVersion
-                                                                 completion:^(NSDictionary *releaseInfo) {
-        self.githubReleaseInfo = releaseInfo;
-        BOOL hasUpdate = [releaseInfo[@"has_update"] boolValue];
-        NSString *latestVer = releaseInfo[@"latest_version"] ?: @"0.0.5";
-        NSString *curVer = releaseInfo[@"current_version"] ?: @"0.0.5";
-
-        if (hasUpdate) {
-            self.updateBannerDismissed = NO;
-            self.updateBanner.hidden = NO;
-            self.updateBannerLabel.text = [NSString stringWithFormat:@"🚀 Bản cập nhật mới ctdozlite v%@ trên GitHub API (hiện tại v%@)!", latestVer, curVer];
-        } else {
-            self.updateBanner.hidden = NO;
-            self.updateBannerLabel.text = [NSString stringWithFormat:@"✅ Đang chạy bản mới nhất ctdozlite v%@ (Pure Objective-C · Real Zalo QR)", latestVer];
-        }
-        [self.view setNeedsLayout];
-    }];
-}
-
-- (void)onDismissUpdateBanner {
-    self.updateBannerDismissed = YES;
-    self.updateBanner.hidden = YES;
+- (void)onCancelReply {
+    _replyTargetMsgId = nil;
+    _replyTargetPreview = nil;
+    _replyBannerView.hidden = YES;
     [self.view setNeedsLayout];
 }
 
-- (void)onTapUpdateModal {
-    if (!self.githubReleaseInfo) {
-        [self triggerGitHubUpdateCheck:NO];
+- (void)onTapScheduleQuickMessage {
+    if (_primaryThreadId.length == 0) return;
+    NSString *draft = [_composerTextField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *msgContent = draft.length > 0 ? draft : @"[Hẹn giờ tự động] Nhắc lịch họp từ Zalo iOS Native";
+    int64_t deliverAt = (int64_t)([[NSDate date] timeIntervalSince1970] * 1000.0) + 10000;
+    [[CTDOCoreBridge shared] scheduleMessageForSlot:_activeSlot
+                                           threadId:_primaryThreadId
+                                            content:msgContent
+                                        deliverAtMs:deliverAt];
+    _composerTextField.text = @"";
+
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Đã hẹn giờ gửi tin nhắn"
+                                                                message:@"Tin nhắn sẽ tự động gửi sau 10 giây."
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)onScheduleTimerTick {
+    NSArray *fired = [[CTDOCoreBridge shared] pollDueScheduledMessages];
+    if (fired.count > 0) {
+        [self reloadAllData];
+    }
+}
+
+- (void)scrollToBottomOfTableView:(UITableView *)tv {
+    NSInteger rows = [tv numberOfRowsInSection:0];
+    if (rows > 0) {
+        [tv scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:rows - 1 inSection:0]
+                  atScrollPosition:UITableViewScrollPositionBottom
+                          animated:YES];
+    }
+}
+
+#pragma mark - QR Authentication Flow
+
+- (void)refreshAuthOverlayState {
+    NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:_activeSlot];
+    BOOL isAuthed = [auth[@"authenticated"] boolValue];
+    _loginOverlay.hidden = isAuthed;
+    if (!isAuthed) {
+        NSString *qrB64 = auth[@"qr_image_base64"];
+        if ([qrB64 isKindOfClass:[NSString class]] && qrB64.length > 0) {
+            UIImage *img = [CTDOIconRenderer imageFromBase64String:qrB64];
+            if (img) _qrImageView.image = img;
+        }
+        _qrStatusLabel.text = auth[@"status_text"] ?: @"Nhấn 'Lấy mã QR mới' để bắt đầu.";
+    } else {
+        [_qrPollTimer invalidate];
+        _qrPollTimer = nil;
+    }
+    [self.view setNeedsLayout];
+}
+
+- (void)onTapStartQRLogin {
+    NSDictionary *state = [[CTDOCoreBridge shared] startQRLoginForSlot:_activeSlot];
+    _qrStatusLabel.text = state[@"status_text"] ?: @"Đang kết nối tới máy chủ Zalo...";
+    [_qrPollTimer invalidate];
+    _qrPollTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                    target:self
+                                                  selector:@selector(onQRPollTimerTick)
+                                                  userInfo:nil
+                                                   repeats:YES];
+}
+
+- (void)onQRPollTimerTick {
+    NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:_activeSlot];
+    BOOL isAuthed = [auth[@"authenticated"] boolValue];
+    NSString *qrB64 = auth[@"qr_image_base64"];
+    if ([qrB64 isKindOfClass:[NSString class]] && qrB64.length > 0) {
+        UIImage *img = [CTDOIconRenderer imageFromBase64String:qrB64];
+        if (img) _qrImageView.image = img;
+    }
+    _qrStatusLabel.text = auth[@"status_text"] ?: @"";
+    if (isAuthed) {
+        [_qrPollTimer invalidate];
+        _qrPollTimer = nil;
+        _loginOverlay.hidden = YES;
+        [self reloadAllData];
+        [self.view setNeedsLayout];
+    }
+}
+
+- (void)onTapLogoutButton {
+    [[CTDOCoreBridge shared] logoutSlot:_activeSlot];
+    _showingSettingsSubscreen = NO;
+    [self reloadAllData];
+    [self refreshAuthOverlayState];
+    [self onTapStartQRLogin];
+}
+
+#pragma mark - Profile & Settings Data Model (ref4.png & ref5.png)
+
+- (NSArray<NSArray<NSDictionary *> *> *)profileMenuSections {
+    if (_activeBottomTab == 2) {
+        // Khám phá
+        return @[
+            @[
+                @{@"icon": @"game", @"color": @"#0068FF", @"title": @"Mini Apps", @"subtitle": @"Tiện ích Zalo trên iPhone & iPad"},
+                @{@"icon": @"video", @"color": @"#F97316", @"title": @"Zalo Video", @"subtitle": @"Video ngắn xu hướng"},
+                @{@"icon": @"qr_wallet", @"color": @"#10B981", @"title": @"Quét mã QR", @"subtitle": @"Đăng nhập và thanh toán nhanh"},
+            ]
+        ];
+    }
+    if (_activeBottomTab == 3) {
+        // Tường nhà
+        return @[
+            @[
+                @{@"icon": @"journal", @"color": @"#0068FF", @"title": @"Nhật ký bạn bè", @"subtitle": @"Cập nhật khoảnh khắc mới nhất"},
+                @{@"icon": @"style", @"color": @"#EC4899", @"title": @"Khoảnh khắc", @"subtitle": @"Chia sẻ câu chuyện 24 giờ"},
+            ]
+        ];
+    }
+    if (_showingSettingsSubscreen) {
+        // Cài đặt screen matching ref5.png
+        return @[
+            @[
+                @{@"icon": @"security", @"color": @"#0068FF", @"title": @"Tài khoản và bảo mật", @"action": @"security"},
+                @{@"icon": @"privacy", @"color": @"#0068FF", @"title": @"Quyền riêng tư", @"action": @"privacy"},
+            ],
+            @[
+                @{@"icon": @"storage", @"color": @"#0068FF", @"title": @"Dữ liệu trên máy", @"action": @"storage"},
+                @{@"icon": @"backup", @"color": @"#0068FF", @"title": @"Sao lưu và khôi phục", @"action": @"backup"},
+            ],
+            @[
+                @{@"icon": @"notif", @"color": @"#0068FF", @"title": @"Thông báo", @"action": @"notif"},
+                @{@"icon": @"msg", @"color": @"#0068FF", @"title": @"Tin nhắn", @"action": @"msg"},
+                @{@"icon": @"call", @"color": @"#0068FF", @"title": @"Cuộc gọi", @"action": @"call"},
+                @{@"icon": @"journal", @"color": @"#0068FF", @"title": @"Nhật ký", @"action": @"journal"},
+                @{@"icon": @"contacts", @"color": @"#0068FF", @"title": @"Danh bạ", @"action": @"contacts"},
+                @{@"icon": @"theme", @"color": @"#0068FF", @"title": @"Giao diện và ngôn ngữ", @"action": @"theme"},
+            ],
+            @[
+                @{@"icon": @"info", @"color": @"#0068FF", @"title": @"Thông tin về Zalo", @"action": @"github_update"},
+                @{@"icon": @"help", @"color": @"#0068FF", @"title": @"Liên hệ hỗ trợ", @"action": @"help"},
+                @{@"icon": @"switch_acc", @"color": @"#0068FF", @"title": @"Chuyển tài khoản", @"action": @"switch_acc"},
+            ]
+        ];
+    }
+
+    // Cá nhân screen matching ref4.png
+    return @[
+        @[
+            @{@"icon": @"cloud", @"color": @"#0068FF", @"title": @"zCloud", @"subtitle": @"Không gian lưu trữ dữ liệu trên đám mây", @"action": @"cloud"},
+            @{@"icon": @"style", @"color": @"#0068FF", @"title": @"zStyle – Nổi bật trên Zalo", @"subtitle": @"Hình nền và nhạc cho cuộc gọi Zalo", @"action": @"style"},
+        ],
+        @[
+            @{@"icon": @"mydocs", @"color": @"#0068FF", @"title": @"My Documents", @"subtitle": @"Lưu trữ các tin nhắn quan trọng", @"action": @"open_mydocs"},
+            @{@"icon": @"storage", @"color": @"#0068FF", @"title": @"Dữ liệu trên máy", @"subtitle": @"Quản lý dữ liệu Zalo của bạn", @"action": @"storage"},
+            @{@"icon": @"qr_wallet", @"color": @"#0068FF", @"title": @"Ví QR", @"subtitle": @"Lưu trữ và xuất trình các mã QR quan trọng", @"action": @"qr_wallet"},
+        ],
+        @[
+            @{@"icon": @"security", @"color": @"#0068FF", @"title": @"Tài khoản và bảo mật", @"action": @"security"},
+            @{@"icon": @"privacy", @"color": @"#0068FF", @"title": @"Quyền riêng tư", @"action": @"privacy"},
+        ]
+    ];
+}
+
+#pragma mark - UITableViewDataSource & UITableViewDelegate
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    if (tableView == _threadTableView) return 1;
+    if (tableView == _primaryChatTableView || tableView == _secondaryChatTableView) return 1;
+    if (tableView == _contactTableView) {
+        if (_contactFilterType == 0) {
+            // Section 0: Lời mời kết bạn + Danh bạ máy shortcuts; Sections 1..N: Alphabetical
+            return 1 + _contactSectionTitles.count;
+        }
+        return 1;
+    }
+    if (tableView == _profileTableView) {
+        NSArray *menuSecs = [self profileMenuSections];
+        if (_activeBottomTab == 4 && !_showingSettingsSubscreen) {
+            return 1 + menuSecs.count; // Section 0 = User Profile Card
+        }
+        if (_activeBottomTab == 4 && _showingSettingsSubscreen) {
+            return menuSecs.count + 1; // Last Section = Logout Pill Button
+        }
+        return menuSecs.count;
+    }
+    return 1;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (tableView == _threadTableView) {
+        return _threads.count;
+    }
+    if (tableView == _primaryChatTableView) {
+        return _primaryMessages.count;
+    }
+    if (tableView == _secondaryChatTableView) {
+        return _secondaryMessages.count;
+    }
+    if (tableView == _contactTableView) {
+        if (_contactFilterType == 0) {
+            if (section == 0) return 2; // Lời mời kết bạn + Danh bạ máy
+            NSString *letter = _contactSectionTitles[section - 1];
+            return [_contactSections[letter] count];
+        }
+        return _contacts.count;
+    }
+    if (tableView == _profileTableView) {
+        NSArray *menuSecs = [self profileMenuSections];
+        if (_activeBottomTab == 4 && !_showingSettingsSubscreen) {
+            if (section == 0) return 1; // User Profile Card
+            return [menuSecs[section - 1] count];
+        }
+        if (_activeBottomTab == 4 && _showingSettingsSubscreen) {
+            if (section == (NSInteger)menuSecs.count) return 1; // Logout Row
+            return [menuSecs[section] count];
+        }
+        return [menuSecs[section] count];
+    }
+    return 0;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView == _threadTableView) {
+        return 74.0;
+    }
+    if (tableView == _primaryChatTableView) {
+        NSDictionary *msg = _primaryMessages[indexPath.row];
+        return [CTDOMessageCell heightForMessage:msg maxWidth:tableView.bounds.size.width];
+    }
+    if (tableView == _secondaryChatTableView) {
+        NSDictionary *msg = _secondaryMessages[indexPath.row];
+        return [CTDOMessageCell heightForMessage:msg maxWidth:tableView.bounds.size.width];
+    }
+    if (tableView == _contactTableView) {
+        if (_contactFilterType == 0 && indexPath.section == 0) return 60.0;
+        return 66.0;
+    }
+    if (tableView == _profileTableView) {
+        if (_activeBottomTab == 4 && !_showingSettingsSubscreen && indexPath.section == 0) {
+            return 84.0; // Profile header row (ref4.png)
+        }
+        if (_activeBottomTab == 4 && _showingSettingsSubscreen && indexPath.section == (NSInteger)[[self profileMenuSections] count]) {
+            return 72.0; // Logout button row (ref5.png)
+        }
+        NSArray *menuSecs = [self profileMenuSections];
+        NSInteger secIdx = (_activeBottomTab == 4 && !_showingSettingsSubscreen) ? (indexPath.section - 1) : indexPath.section;
+        NSDictionary *item = menuSecs[secIdx][indexPath.row];
+        NSString *sub = item[@"subtitle"];
+        return (sub.length > 0) ? 68.0 : 54.0;
+    }
+    return 56.0;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (tableView == _contactTableView && _contactFilterType == 0 && section > 0) {
+        return 28.0;
+    }
+    if (tableView == _profileTableView && section > 0) {
+        return 8.0;
+    }
+    return 0.0;
+}
+
+- (nullable UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    CTDOTheme *theme = [CTDOTheme shared];
+    if (tableView == _contactTableView && _contactFilterType == 0 && section > 0) {
+        UIView *hdr = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 28.0)];
+        hdr.backgroundColor = theme.bgSecondary;
+        UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(16.0, 4.0, 100.0, 20.0)];
+        lbl.text = _contactSectionTitles[section - 1];
+        lbl.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightSemibold];
+        lbl.textColor = theme.textPrimary;
+        [hdr addSubview:lbl];
+        return hdr;
+    }
+    if (tableView == _profileTableView && section > 0) {
+        UIView *spacer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, tableView.bounds.size.width, 8.0)];
+        spacer.backgroundColor = theme.bgPrimary;
+        return spacer;
+    }
+    return nil;
+}
+
+- (nullable NSArray<NSString *> *)sectionIndexTitlesForTableView:(UITableView *)tableView {
+    if (tableView == _contactTableView && _contactFilterType == 0) {
+        return _contactSectionTitles;
+    }
+    return nil;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView sectionForSectionIndexTitle:(NSString *)title atIndex:(NSInteger)index {
+    if (tableView == _contactTableView && _contactFilterType == 0) {
+        return index + 1;
+    }
+    return 0;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    CTDOTheme *theme = [CTDOTheme shared];
+
+    // 1. Thread List (ref1.png & ref2.png)
+    if (tableView == _threadTableView) {
+        CTDOThreadCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOThreadCell" forIndexPath:indexPath];
+        NSDictionary *thread = _threads[indexPath.row];
+        BOOL isSelected = (_currentDeviceClass != CTDODeviceClassiPhone) && [thread[@"id"] isEqualToString:_primaryThreadId];
+        __weak typeof(tableView) weakTV = tableView;
+        [cell configureWithThread:thread isSelected:isSelected onAvatarLoaded:^{
+            [weakTV reloadData];
+        }];
+        return cell;
+    }
+
+    // 2. Primary Chat Messages
+    if (tableView == _primaryChatTableView) {
+        CTDOMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOMessageCell" forIndexPath:indexPath];
+        NSDictionary *msg = _primaryMessages[indexPath.row];
+        [cell configureWithMessage:msg maxWidth:tableView.bounds.size.width];
+        return cell;
+    }
+
+    // 3. Secondary Dual-Chat Messages
+    if (tableView == _secondaryChatTableView) {
+        CTDOMessageCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOMessageCell2" forIndexPath:indexPath];
+        NSDictionary *msg = _secondaryMessages[indexPath.row];
+        [cell configureWithMessage:msg maxWidth:tableView.bounds.size.width];
+        return cell;
+    }
+
+    // 4. Contacts Tab (ref3.png)
+    if (tableView == _contactTableView) {
+        if (_contactFilterType == 0 && indexPath.section == 0) {
+            CTDOMenuCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOMenuCell" forIndexPath:indexPath];
+            if (indexPath.row == 0) {
+                [cell configureWithIcon:@"switch_user" title:[NSString stringWithFormat:@"Lời mời kết bạn (%lu)", (unsigned long)MIN((NSUInteger)17, _contacts.count)] subtitle:nil showChevron:NO];
+            } else {
+                [cell configureWithIcon:@"folder" title:@"Danh bạ máy" subtitle:@"Các liên hệ có dùng Zalo" showChevron:NO];
+            }
+            return cell;
+        }
+
+        CTDOContactCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOContactCell" forIndexPath:indexPath];
+        NSDictionary *contact = nil;
+        if (_contactFilterType == 0) {
+            NSString *letter = _contactSectionTitles[indexPath.section - 1];
+            contact = _contactSections[letter][indexPath.row];
+        } else {
+            contact = _contacts[indexPath.row];
+        }
+        __weak typeof(tableView) weakTV = tableView;
+        [cell configureWithContact:contact onAvatarLoaded:^{
+            [weakTV reloadData];
+        }];
+        return cell;
+    }
+
+    // 5. Profile & Settings Tab (ref4.png & ref5.png)
+    if (tableView == _profileTableView) {
+        // User Profile Card at top of Cá nhân (ref4.png)
+        if (_activeBottomTab == 4 && !_showingSettingsSubscreen && indexPath.section == 0) {
+            UITableViewCell *cardCell = [tableView dequeueReusableCellWithIdentifier:@"ProfileHeaderCell"];
+            if (!cardCell) {
+                cardCell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"ProfileHeaderCell"];
+                cardCell.selectionStyle = UITableViewCellSelectionStyleNone;
+            }
+            for (UIView *sub in cardCell.contentView.subviews) [sub removeFromSuperview];
+            cardCell.backgroundColor = theme.bgSecondary;
+            cardCell.contentView.backgroundColor = theme.bgSecondary;
+
+            NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:_activeSlot];
+            NSString *userName = auth[@"display_name"] ?: @"Đỗ Trung Thành";
+            NSString *avatarUrl = auth[@"avatar_url"];
+
+            UIImageView *av = [[UIImageView alloc] initWithFrame:CGRectMake(16.0, 14.0, 56.0, 56.0)];
+            av.layer.cornerRadius = 28.0;
+            av.layer.masksToBounds = YES;
+            __weak typeof(tableView) weakTV = tableView;
+            av.image = [CTDOIconRenderer avatarForURL:avatarUrl
+                                         fallbackName:userName
+                                             colorHex:@"#0068FF"
+                                                 size:56.0
+                                         onCompletion:^{
+                [weakTV reloadData];
+            }];
+            [cardCell.contentView addSubview:av];
+
+            UILabel *nameLbl = [[UILabel alloc] initWithFrame:CGRectMake(86.0, 30.0, 180.0, 24.0)];
+            nameLbl.text = [NSString stringWithFormat:@"%@  ›", userName];
+            nameLbl.font = [UIFont systemFontOfSize:17.5 weight:UIFontWeightSemibold];
+            nameLbl.textColor = theme.textPrimary;
+            [cardCell.contentView addSubview:nameLbl];
+
+            CGFloat w = tableView.bounds.size.width;
+            UILabel *statusPill = [[UILabel alloc] initWithFrame:CGRectMake(w - 118.0, 26.0, 102.0, 32.0)];
+            statusPill.text = @"✏️ Trạng thái...";
+            statusPill.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+            statusPill.textAlignment = NSTextAlignmentCenter;
+            statusPill.textColor = theme.textSecondary;
+            statusPill.backgroundColor = theme.bgSecondary;
+            statusPill.layer.cornerRadius = 16.0;
+            statusPill.layer.borderWidth = 1.0;
+            statusPill.layer.borderColor = theme.borderSubtle.CGColor;
+            statusPill.layer.masksToBounds = YES;
+            [cardCell.contentView addSubview:statusPill];
+
+            return cardCell;
+        }
+
+        // Logout Pill Button at bottom of Cài đặt (ref5.png)
+        NSArray *menuSecs = [self profileMenuSections];
+        if (_activeBottomTab == 4 && _showingSettingsSubscreen && indexPath.section == (NSInteger)menuSecs.count) {
+            UITableViewCell *logoutCell = [tableView dequeueReusableCellWithIdentifier:@"LogoutCell"];
+            if (!logoutCell) {
+                logoutCell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"LogoutCell"];
+                logoutCell.selectionStyle = UITableViewCellSelectionStyleNone;
+            }
+            for (UIView *sub in logoutCell.contentView.subviews) [sub removeFromSuperview];
+            logoutCell.backgroundColor = theme.bgPrimary;
+            logoutCell.contentView.backgroundColor = theme.bgPrimary;
+
+            CGFloat w = tableView.bounds.size.width;
+            UIButton *logoutBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+            logoutBtn.frame = CGRectMake(16.0, 12.0, w - 32.0, 48.0);
+            logoutBtn.backgroundColor = (theme.mode == CTDOThemeModeZaloLight)
+                ? [CTDOTheme colorFromHex:@"#E9EBED"]
+                : theme.bgElevated;
+            [logoutBtn setTitle:@"↪   Đăng xuất" forState:UIControlStateNormal];
+            [logoutBtn setTitleColor:theme.textPrimary forState:UIControlStateNormal];
+            logoutBtn.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+            logoutBtn.layer.cornerRadius = 24.0;
+            [logoutBtn addTarget:self action:@selector(onTapLogoutButton) forControlEvents:UIControlEventTouchUpInside];
+            [logoutCell.contentView addSubview:logoutBtn];
+            return logoutCell;
+        }
+
+        CTDOMenuCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CTDOMenuCell" forIndexPath:indexPath];
+        NSInteger secIdx = (_activeBottomTab == 4 && !_showingSettingsSubscreen) ? (indexPath.section - 1) : indexPath.section;
+        NSDictionary *item = menuSecs[secIdx][indexPath.row];
+        [cell configureWithIcon:(item[@"icon"] ?: @"info") title:item[@"title"] subtitle:item[@"subtitle"] showChevron:YES];
+        return cell;
+    }
+
+    return [[UITableViewCell alloc] init];
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+
+    if (tableView == _threadTableView) {
+        NSDictionary *thread = _threads[indexPath.row];
+        NSString *tid = thread[@"id"] ?: @"";
+        if (_currentDeviceClass != CTDODeviceClassiPhone && _dualChatEnabled && ![tid isEqualToString:_primaryThreadId]) {
+            _secondaryThreadId = [_primaryThreadId copy];
+        }
+        [self openThreadId:tid];
         return;
     }
-    NSDictionary *info = self.githubReleaseInfo;
-    BOOL hasUpdate = [info[@"has_update"] boolValue];
-    NSString *latestVer = info[@"latest_version"] ?: @"0.0.5";
-    NSString *curVer = info[@"current_version"] ?: @"0.0.5";
-    NSString *title = info[@"title"] ?: @"ctdozlite v0.0.5";
-    NSArray *bullets = [info[@"bullets"] isKindOfClass:[NSArray class]] ? info[@"bullets"] : @[];
 
-    NSMutableString *bodyText = [NSMutableString stringWithFormat:
-                                 @"Nguồn: api.github.com/repos/ctdoteam1110/ctdozlite/releases/latest\n"
-                                 @"Trạng thái: %@\n"
-                                 @"Tiêu đề: %@\n\n"
-                                 @"📋 Chi tiết Sửa lỗi & Cập nhật:\n",
-                                 hasUpdate
-                                    ? [NSString stringWithFormat:@"🚀 Có bản mới v%@ (đang dùng v%@)", latestVer, curVer]
-                                    : [NSString stringWithFormat:@"✅ Đã ở bản mới nhất v%@", latestVer],
-                                 title];
-
-    for (NSString *b in bullets) {
-        [bodyText appendFormat:@"\n• %@", b];
+    if (tableView == _contactTableView) {
+        if (_contactFilterType == 0 && indexPath.section == 0) return;
+        NSDictionary *contact = nil;
+        if (_contactFilterType == 0) {
+            NSString *letter = _contactSectionTitles[indexPath.section - 1];
+            contact = _contactSections[letter][indexPath.row];
+        } else {
+            contact = _contacts[indexPath.row];
+        }
+        NSString *cid = contact[@"id"] ?: @"";
+        if (cid.length > 0) {
+            _activeBottomTab = 0;
+            [self openThreadId:cid];
+            [self applyTheme];
+        }
+        return;
     }
 
-    UIAlertController *modal = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"🚀 GitHub Releases API — v%@", latestVer]
-                                                                   message:bodyText
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [modal addAction:[UIAlertAction actionWithTitle:@"🔔 Giả lập đang ở v0.0.4 để test báo Update v0.0.5"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        [self triggerGitHubUpdateCheck:YES];
-    }]];
-    [modal addAction:[UIAlertAction actionWithTitle:@"🔄 Kiểm tra lại từ GitHub API (v0.0.5)"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        [self triggerGitHubUpdateCheck:NO];
-    }]];
-    [modal addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:modal animated:YES completion:nil];
+    if (tableView == _profileTableView) {
+        if (_activeBottomTab == 4 && !_showingSettingsSubscreen && indexPath.section == 0) return;
+        NSArray *menuSecs = [self profileMenuSections];
+        if (_activeBottomTab == 4 && _showingSettingsSubscreen && indexPath.section == (NSInteger)menuSecs.count) return;
+
+        NSInteger secIdx = (_activeBottomTab == 4 && !_showingSettingsSubscreen) ? (indexPath.section - 1) : indexPath.section;
+        NSDictionary *item = menuSecs[secIdx][indexPath.row];
+        NSString *action = item[@"action"] ?: @"";
+
+        if ([action isEqualToString:@"open_mydocs"]) {
+            _activeBottomTab = 0;
+            NSDictionary *auth = [[CTDOCoreBridge shared] authStateForSlot:_activeSlot];
+            NSString *s2m = auth[@"send2me_id"];
+            [self openThreadId:(s2m.length > 0 ? s2m : @"cloud_self")];
+            [self applyTheme];
+        } else if ([action isEqualToString:@"theme"]) {
+            [[CTDOTheme shared] cycleTheme];
+            [self applyTheme];
+        } else if ([action isEqualToString:@"github_update"]) {
+            [[CTDOCoreBridge shared] checkGitHubLatestReleaseWithSimulateOldVersion:NO completion:^(NSDictionary *releaseInfo) {
+                NSString *tag = releaseInfo[@"tag_name"] ?: @"v0.2.3";
+                NSString *body = releaseInfo[@"body"] ?: @"Phiên bản mới nhất từ GitHub Releases.";
+                UIAlertController *ac = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Zalo iOS Native • %@", tag]
+                                                                            message:body
+                                                                     preferredStyle:UIAlertControllerStyleAlert];
+                [ac addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:ac animated:YES completion:nil];
+            }];
+        } else if ([action isEqualToString:@"switch_acc"]) {
+            _activeSlot = (_activeSlot + 1) % 3;
+            [self reloadAllData];
+            [self refreshAuthOverlayState];
+        }
+        return;
+    }
+
+    if (tableView == _primaryChatTableView) {
+        NSDictionary *msg = _primaryMessages[indexPath.row];
+        NSString *mid = msg[@"id"] ?: @"";
+        NSString *content = msg[@"content"] ?: @"";
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Tác vụ tin nhắn"
+                                                                       message:content
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        for (NSString *emoji in @[@"❤️", @"👍", @"😆", @"😮", @"😢", @"😡"]) {
+            [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Thả biểu cảm %@", emoji]
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(__unused UIAlertAction *a) {
+                [[CTDOCoreBridge shared] reactMessageForSlot:self.activeSlot threadId:self.primaryThreadId msgId:mid emoji:emoji];
+                [self reloadAllData];
+            }]];
+        }
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Trả lời (Trích dẫn)"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *a) {
+            self.replyTargetMsgId = mid;
+            self.replyTargetPreview = content;
+            self.replyBannerLabel.text = [NSString stringWithFormat:@"Đang trả lời: %@", content];
+            self.replyBannerView.hidden = NO;
+            [self.view setNeedsLayout];
+            [self.composerTextField becomeFirstResponder];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Đóng" style:UIAlertActionStyleCancel handler:nil]];
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        sheet.popoverPresentationController.sourceView = cell ?: tableView;
+        sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : CGRectMake(0, 0, 100, 44);
+        [self presentViewController:sheet animated:YES completion:nil];
+    }
 }
 
 @end

@@ -1,5 +1,6 @@
 # =============================================================================
-# ctdozlite iOS / iPadOS / iPhone Duo Build System (Minimum iOS 12.0+)
+# ctdozlite iOS / iPadOS / iPhone Duo Build System (100% Pure Native Objective-C)
+# Minimum iOS 12.0+ — Supports iPhone, iPad Split-View, and iPhone Duo (iPhone19,4)
 # Self-contained inside ./ios/ — zero modifications to desktop workspace files
 # =============================================================================
 
@@ -20,31 +21,22 @@ SIM_APP        := $(BUILD_DIR)/sim/$(APP_NAME).app
 IPA_OUT        := $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-ios$(MIN_IOS)-universal.ipa
 
 OBJC_SOURCES   := App/main.m App/CTDOBridge.m App/CTDOMainViewController.m
-OBJC_HEADERS   := App/CTDOBridge.h App/CTDOMainViewController.h rust-core/include/ctdozlite_ios.h
+OBJC_HEADERS   := App/CTDOBridge.h App/CTDOMainViewController.h
 
-RUST_DEV_LIB   := rust-core/target/aarch64-apple-ios/release/libctdozlite_ios_core.a
-RUST_SIM_LIB   := rust-core/target/aarch64-apple-ios-sim/release/libctdozlite_ios_core.a
-
-COMMON_FLAGS   := -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -Irust-core/include
+COMMON_FLAGS   := -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter
 FRAMEWORKS     := -framework UIKit -framework Foundation -framework CoreGraphics \
-                  -framework QuartzCore -framework CoreImage -framework Security \
-                  -lresolv
+                  -framework QuartzCore -framework CoreImage -framework Security
 
-.PHONY: all rust-core device sim ipa test clean
+.PHONY: all device sim ipa test clean
 
-all: rust-core device sim ipa
+all: device sim ipa
 
-rust-core:
-	@echo "=== [1/4] Building Rust Core Static Library (IPHONEOS_DEPLOYMENT_TARGET=$(MIN_IOS)) ==="
-	cd rust-core && IPHONEOS_DEPLOYMENT_TARGET=$(MIN_IOS) cargo build --release --target aarch64-apple-ios
-	cd rust-core && IPHONEOS_DEPLOYMENT_TARGET=$(MIN_IOS) cargo build --release --target aarch64-apple-ios-sim
-
-device: rust-core $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScreen.storyboard
-	@echo "=== [2/4] Compiling Native iOS Device Bundle (arm64, min iOS $(MIN_IOS)) ==="
+device: $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScreen.storyboard
+	@echo "=== [1/3] Compiling Pure Objective-C iOS Device Bundle (arm64, min iOS $(MIN_IOS)) ==="
 	@mkdir -p "$(DEVICE_APP)"
 	"$(CLANG_IOS)" -arch arm64 -isysroot "$(IOS_SDK)" \
 		-mios-version-min=$(MIN_IOS) \
-		$(COMMON_FLAGS) $(OBJC_SOURCES) $(RUST_DEV_LIB) $(FRAMEWORKS) \
+		$(COMMON_FLAGS) $(OBJC_SOURCES) $(FRAMEWORKS) \
 		-o "$(DEVICE_APP)/$(APP_NAME)"
 	@cp App/Info.plist "$(DEVICE_APP)/Info.plist"
 	@printf "APPL????" > "$(DEVICE_APP)/PkgInfo"
@@ -54,12 +46,12 @@ device: rust-core $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScree
 	@codesign --force --sign - --timestamp=none "$(DEVICE_APP)"
 	@echo "✅ Device bundle ready: $(DEVICE_APP)"
 
-sim: rust-core $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScreen.storyboard
-	@echo "=== [3/4] Compiling Native iOS Simulator Bundle (arm64-sim, min iOS $(MIN_IOS)) ==="
+sim: $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScreen.storyboard
+	@echo "=== [2/3] Compiling Pure Objective-C iOS Simulator Bundle (arm64-sim, min iOS $(MIN_IOS)) ==="
 	@mkdir -p "$(SIM_APP)"
 	"$(CLANG_SIM)" -arch arm64 -isysroot "$(SIM_SDK)" \
 		-miphonesimulator-version-min=$(MIN_IOS) \
-		$(COMMON_FLAGS) $(OBJC_SOURCES) $(RUST_SIM_LIB) $(FRAMEWORKS) \
+		$(COMMON_FLAGS) $(OBJC_SOURCES) $(FRAMEWORKS) \
 		-o "$(SIM_APP)/$(APP_NAME)"
 	@cp App/Info.plist "$(SIM_APP)/Info.plist"
 	@printf "APPL????" > "$(SIM_APP)/PkgInfo"
@@ -70,7 +62,7 @@ sim: rust-core $(OBJC_SOURCES) $(OBJC_HEADERS) App/Info.plist App/LaunchScreen.s
 	@echo "✅ Simulator bundle ready: $(SIM_APP)"
 
 ipa: device
-	@echo "=== [4/4] Packaging Unsigned/Ad-Hoc .ipa Installer ($(IPA_OUT)) ==="
+	@echo "=== [3/3] Packaging Unsigned/Ad-Hoc .ipa Installer ($(IPA_OUT)) ==="
 	@rm -rf "$(BUILD_DIR)/Payload" "$(IPA_OUT)"
 	@mkdir -p "$(BUILD_DIR)/Payload"
 	@cp -R "$(DEVICE_APP)" "$(BUILD_DIR)/Payload/$(APP_NAME).app"
@@ -79,21 +71,12 @@ ipa: device
 	@ls -lh "$(IPA_OUT)"
 
 test: all
-	@echo "=== [TEST 1/3] Running Rust Core Unit Tests ==="
-	cd rust-core && cargo test
-	@echo "=== [TEST 2/3] Verifying Mach-O Minimum OS Version == $(MIN_IOS) ==="
+	@echo "=== [TEST 1/2] Verifying Mach-O Minimum OS Version == $(MIN_IOS) ==="
 	@otool -l "$(DEVICE_APP)/$(APP_NAME)" | grep -A 4 "LC_BUILD_VERSION"
 	@otool -l "$(DEVICE_APP)/$(APP_NAME)" | grep -A 4 "LC_BUILD_VERSION" | grep -q "minos 12.0"
 	@echo "✅ Verified LC_BUILD_VERSION minos == 12.0 on arm64 device binary"
-	@echo "=== [TEST 3/3] Running Simulator Headless Self-Test (--self-test) ==="
-	@SIM_UDID=$$(xcrun simctl list devices available | grep -E "iPhone.*\(Booted\)" | head -n1 | sed -E 's/.*\(([0-9A-F-]+)\) \(Booted\).*/\1/'); \
-	if [ -z "$$SIM_UDID" ]; then \
-		SIM_UDID=$$(xcrun simctl list devices available | grep -E "iPhone " | head -n1 | sed -E 's/.*\(([0-9A-F-]+)\).*/\1/'); \
-		xcrun simctl boot "$$SIM_UDID" 2>/dev/null || true; \
-		xcrun simctl bootstatus "$$SIM_UDID" -b; \
-	fi; \
-	xcrun simctl spawn "$$SIM_UDID" "$(abspath $(SIM_APP)/$(APP_NAME))" --self-test
+	@echo "=== [TEST 2/2] Running Pure Objective-C & Live Zalo QR Self-Test on iPhone Duo Simulator ==="
+	@xcrun simctl spawn "B1F272E0-C6BD-480E-A941-CD25127135B7" "$(abspath $(SIM_APP)/$(APP_NAME))" --self-test
 
 clean:
 	rm -rf "$(BUILD_DIR)"
-	cd rust-core && cargo clean

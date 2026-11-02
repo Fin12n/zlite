@@ -1,6 +1,5 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#include "../rust-core/include/ctdozlite_ios.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -10,11 +9,10 @@ typedef NS_ENUM(NSInteger, CTDOThemeMode) {
     CTDOThemeModeOLEDMidnight = 2
 };
 
-typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
-    CTDOLayoutModeAuto = 0,
-    CTDOLayoutModeCompactPhone = 1,
-    CTDOLayoutModeiPhoneDuo = 2,
-    CTDOLayoutModeiPadThreeColumn = 3
+typedef NS_ENUM(NSInteger, CTDODeviceClass) {
+    CTDODeviceClassiPhone = 0,
+    CTDODeviceClassiPhoneDuo = 1,
+    CTDODeviceClassiPad = 2
 };
 
 @interface CTDOTheme : NSObject
@@ -46,13 +44,29 @@ typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
                            size:(CGFloat)size
                        isOnline:(BOOL)isOnline;
 + (UIImage *)qrCodeImageForString:(NSString *)content size:(CGFloat)size;
++ (nullable UIImage *)imageFromBase64String:(NSString *)base64String;
 + (UIImage *)appLogoWithSize:(CGFloat)size;
 @end
 
 @interface CTDOCoreBridge : NSObject
 + (instancetype)shared;
 - (NSString *)versionString;
+
+/// Hardware-truth device classification (iPhone vs iPhone Duo vs iPad).
+- (CTDODeviceClass)hardwareDeviceClassForWindowSize:(CGSize)windowSize;
 - (BOOL)isiPhoneDuoHardwareOrGeometry:(CGSize)windowSize;
+- (NSString *)deviceHardwareName;
+
+/// Real Zalo Authentication & QR Login (Zero fake data).
+- (NSDictionary *)authStateForSlot:(NSInteger)slot;
+- (NSDictionary *)startQRLoginForSlot:(NSInteger)slot;
+- (NSDictionary *)loginPasswordForSlot:(NSInteger)slot
+                                 phone:(NSString *)phone
+                              password:(NSString *)password;
+- (NSDictionary *)logoutSlot:(NSInteger)slot;
+- (NSDictionary *)refreshThreadsForSlot:(NSInteger)slot;
+
+/// Account & Thread Operations.
 - (NSDictionary *)switchAccount:(NSInteger)slot;
 - (NSArray<NSDictionary *> *)listThreadsForSlot:(NSInteger)slot
                                      filterMode:(NSInteger)filterMode
@@ -63,10 +77,6 @@ typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
                                        threadId:(NSString *)threadId
                                         content:(NSString *)content
                                    replyToMsgId:(nullable NSString *)replyToMsgId;
-- (NSArray<NSDictionary *> *)simulateIncomingForSlot:(NSInteger)slot
-                                            threadId:(NSString *)threadId
-                                          senderName:(nullable NSString *)senderName
-                                             content:(NSString *)content;
 - (NSArray<NSDictionary *> *)reactMessageForSlot:(NSInteger)slot
                                         threadId:(NSString *)threadId
                                            msgId:(NSString *)msgId
@@ -74,6 +84,8 @@ typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
 - (NSArray<NSDictionary *> *)performThreadActionForSlot:(NSInteger)slot
                                                threadId:(NSString *)threadId
                                                  action:(NSInteger)action;
+
+/// Scheduled Messages (#38) & Auto-Reply (#35).
 - (NSArray<NSDictionary *> *)scheduleMessageForSlot:(NSInteger)slot
                                            threadId:(NSString *)threadId
                                             content:(NSString *)content
@@ -87,6 +99,8 @@ typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
                                    patternOrId:(NSString *)patternOrId
                                       response:(NSString *)response
                                      matchMode:(NSString *)matchMode;
+
+/// Native CommonCrypto AES-CBC / MD5 Signkey & GitHub Releases Updater.
 - (NSDictionary *)buildSignedRequestForService:(NSString *)service
                                         method:(NSString *)method
                                     jsonParams:(NSString *)jsonParams;
@@ -96,6 +110,12 @@ typedef NS_ENUM(NSInteger, CTDOLayoutMode) {
                                             completion:(void (^)(NSDictionary *releaseInfo))completion;
 - (NSString *)exportHistoryJSONForSlot:(NSInteger)slot;
 - (NSDictionary *)importHistoryJSON:(NSString *)jsonString forSlot:(NSInteger)slot;
+
+/// Crypto self-test for `make test`.
++ (nullable NSString *)aesCBCEncryptUTF8:(NSString *)plainText keyData:(NSData *)keyData;
++ (nullable NSData *)aesCBCDecryptBase64:(NSString *)base64Cipher keyData:(NSData *)keyData;
++ (NSString *)md5Hex:(NSString *)input;
++ (NSString *)zaloSignKeyForTag:(NSString *)tag params:(NSDictionary<NSString *, id> *)params;
 @end
 
 NS_ASSUME_NONNULL_END

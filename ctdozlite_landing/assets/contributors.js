@@ -772,9 +772,9 @@ window.CTD_CONTRIBUTORS = [
     "name": "Thuong Tin (@thuongtin)",
     "avatar": "TT",
     "type": "bug",
-    "tag": "GitHub 7 PRs (> 6,000 LoC)",
-    "role": "Đóng góp 7 PRs lõi (múi giờ OS, data-dir, macOS helpers, session atomic, media cache, updater, message state)",
-    "detail": "Tác giả của 7 Pull Requests quan trọng: PR #40 (múi giờ OS), PR #41 (--data-dir), PR #51 (macOS native helpers), PR #52 (session atomic save), PR #53 (media cache & admission), PR #54 (transactional updater), PR #55 (message state & reactions). Đóng góp hơn 6,000 dòng code.",
+    "tag": "GitHub 10 PRs (> 11,500 LoC)",
+    "role": "Đóng góp 10 PRs lõi (múi giờ OS, data-dir, macOS helpers, session atomic, media cache, updater, message state, message identity, quote nav, macOS notification)",
+    "detail": "Tác giả của 10 Pull Requests quan trọng: PR #40 (múi giờ OS), PR #41 (--data-dir), PR #51 (macOS native helpers), PR #52 (session atomic save), PR #53 (media cache & admission), PR #54 (transactional updater), PR #55 (message state & reactions), PR #59 (macOS notification permissions), PR #60 (quote message navigation), PR #61 (exact message identity deduplication). Đóng góp hơn 11,500 dòng code.",
     "status": "active",
     "statusText": "Đã đóng góp & Merge",
     "source": "GitHub ctdozlite"

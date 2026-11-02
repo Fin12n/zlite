@@ -757,6 +757,10 @@ impl ZaloGuiApp {
 
         let mut theme_switched = false;
         let mut trigger_sync = false;
+        let mut trigger_phone_sync = false;
+        let mut apply_proxy_now = false;
+        let mut clear_proxy_now = false;
+        let mut spawn_multi_zalo = false;
         let mut pick_dl_dir = false;
         let mut open_dl_dir = false;
         let mut pick_migrate_file = false;
@@ -1108,6 +1112,61 @@ impl ZaloGuiApp {
                                                         });
                                                     });
                                                 });
+                                            ui.add_space(14.0);
+
+                                            ui.label(RichText::new("🌐 Cấu hình Proxy & Đa tài khoản (Multi-Zalo PC)").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 10.0))
+                                                .show(ui, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            RichText::new(
+                                                                "Định tuyến lưu lượng Zalo qua Proxy (http://, https://, socks5://) và mở nhiều cửa sổ Zalo độc lập với thư mục dữ liệu riêng (--profile <tên>).",
+                                                            )
+                                                            .color(pal.text_secondary)
+                                                            .size(12.0),
+                                                        );
+                                                        ui.add_space(8.0);
+                                                        ui.label(RichText::new("Địa chỉ Proxy (để trống nếu kết nối trực tiếp):").color(pal.text_primary).size(12.6));
+                                                        ui.add_space(4.0);
+                                                        ui.horizontal(|ui| {
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(&mut self.settings.proxy_url)
+                                                                    .hint_text("http://user:pass@ip:port hoặc socks5://127.0.0.1:1080")
+                                                                    .desired_width((inner_w - 190.0).max(160.0)),
+                                                            );
+                                                            if ui.button("Áp dụng Proxy").clicked() {
+                                                                apply_proxy_now = true;
+                                                            }
+                                                            if ui.button("Tắt").clicked() {
+                                                                clear_proxy_now = true;
+                                                            }
+                                                        });
+                                                        ui.add_space(10.0);
+                                                        ui.separator();
+                                                        ui.add_space(6.0);
+                                                        ui.label(RichText::new("Chạy thêm tài khoản Zalo mới trên PC (Multi-Profile):").color(pal.text_primary).size(12.6));
+                                                        ui.add_space(4.0);
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new("Tên Profile:").color(pal.text_secondary).size(12.2));
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(&mut self.settings.multi_profile_name)
+                                                                    .hint_text("acc2, work, shop1…")
+                                                                    .desired_width(120.0),
+                                                            );
+                                                            if ui
+                                                                .button(RichText::new("➕ Mở thêm cửa sổ Zalo mới").strong())
+                                                                .clicked()
+                                                            {
+                                                                spawn_multi_zalo = true;
+                                                            }
+                                                        });
+                                                    });
+                                                });
                                         }
                                         SettingsTab::Privacy => {
                                             ui.label(RichText::new("Cá nhân").color(pal.text_primary).size(13.5).strong());
@@ -1210,7 +1269,78 @@ impl ZaloGuiApp {
                                                 });
                                         }
                                         SettingsTab::Sync => {
-                                            ui.label(RichText::new("Đồng bộ tin nhắn").color(pal.text_primary).size(13.5).strong());
+                                            ui.label(RichText::new("📲 Đồng bộ tin nhắn từ điện thoại (1-1 & Nhóm)").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(10.0))
+                                                .inner_margin(Margin::same(14.0))
+                                                .show(ui, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            RichText::new(
+                                                                "Gửi yêu cầu đồng bộ trực tiếp tới ứng dụng Zalo trên điện thoại (pull_mobile_msg / transfer-sync-v2) để kéo toàn bộ tin nhắn 1-1 và nhóm gần đây từ điện thoại về máy tính.",
+                                                            )
+                                                            .color(pal.text_primary)
+                                                            .size(13.0),
+                                                        );
+                                                        ui.add_space(4.0);
+                                                        ui.label(
+                                                            RichText::new(
+                                                                "Mẹo: Hãy giữ ứng dụng Zalo trên điện thoại mở và kết nối mạng trong lúc đồng bộ (xác nhận trên điện thoại nếu Zalo hỏi).",
+                                                            )
+                                                            .color(pal.text_secondary)
+                                                            .size(12.2),
+                                                        );
+                                                        ui.add_space(10.0);
+                                                        if crate::history_sync::PHONE_SYNC_RUNNING
+                                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                                        {
+                                                            ui.add(
+                                                                egui::ProgressBar::new(
+                                                                    self.phone_sync_progress.clamp(0.05, 1.0),
+                                                                )
+                                                                .text(&self.phone_sync_status)
+                                                                .animate(true),
+                                                            );
+                                                            ui.add_space(6.0);
+                                                            if ui
+                                                                .button(RichText::new("Dừng đồng bộ điện thoại").size(13.0))
+                                                                .clicked()
+                                                            {
+                                                                crate::history_sync::PHONE_SYNC_CANCEL.store(
+                                                                    true,
+                                                                    std::sync::atomic::Ordering::Relaxed,
+                                                                );
+                                                            }
+                                                        } else {
+                                                            if ui
+                                                                .button(
+                                                                    RichText::new(format!(
+                                                                        "{} Đồng bộ tin nhắn từ điện thoại ngay",
+                                                                        lucide::REFRESH
+                                                                    ))
+                                                                    .size(13.0)
+                                                                    .strong(),
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                trigger_phone_sync = true;
+                                                            }
+                                                            if !self.phone_sync_status.is_empty() {
+                                                                ui.add_space(6.0);
+                                                                ui.label(
+                                                                    RichText::new(&self.phone_sync_status)
+                                                                        .color(pal.text_secondary)
+                                                                        .size(12.0),
+                                                                );
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                            ui.add_space(16.0);
+                                            ui.label(RichText::new("☁️ Đồng bộ lịch sử Nhóm & Cloud từ máy chủ").color(pal.text_primary).size(13.5).strong());
                                             ui.add_space(6.0);
                                             egui::Frame::none()
                                                 .fill(pal.bg_elevated)
@@ -1221,7 +1351,6 @@ impl ZaloGuiApp {
                                                     ui.vertical(|ui| {
                                                         ui.label(RichText::new("Tải lịch sử cũ của các nhóm và Cloud của tôi từ máy chủ Zalo về zalo_history.db, mỗi lần tối đa 1.000 tin/hội thoại; bấm lần nữa để lùi xa hơn.").color(pal.text_primary).size(13.0));
                                                         ui.add_space(4.0);
-                                                        ui.label(RichText::new("Zalo không cho tải lịch sử cũ của chat 1-1 qua máy chủ; tin 1-1 chỉ có từ lúc đăng nhập app.").color(pal.text_secondary).size(12.2));
                                                         if ui
                                                             .add(
                                                                 egui::Label::new(
@@ -1248,7 +1377,7 @@ impl ZaloGuiApp {
                                                             if ui.button(RichText::new("Dừng").size(13.0)).clicked() {
                                                                 crate::history_sync::CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
                                                             }
-                                                        } else if ui.button(RichText::new(format!("{} Đồng bộ ngay", lucide::REFRESH)).size(13.0).strong()).clicked() {
+                                                        } else if ui.button(RichText::new(format!("{} Đồng bộ Nhóm & Cloud ngay", lucide::REFRESH)).size(13.0).strong()).clicked() {
                                                             trigger_sync = true;
                                                         }
                                                     });
@@ -2298,6 +2427,51 @@ impl ZaloGuiApp {
                 let _ = tx.send(WorkerCmd::SyncHistory { threads });
             }
             self.show_toast(format!("Bắt đầu đồng bộ lịch sử {n} hội thoại nhóm/Cloud…"));
+        }
+        if trigger_phone_sync {
+            self.phone_sync_progress = 0.05;
+            self.phone_sync_status = "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
+            let threads = self.threads.clone();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SyncPhoneMessages { threads });
+            }
+            self.show_toast("📲 Đang yêu cầu đồng bộ tin nhắn từ điện thoại…");
+        }
+        if apply_proxy_now {
+            let proxy_url = self.settings.proxy_url.trim().to_string();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SetProxy { proxy_url });
+            }
+        }
+        if clear_proxy_now {
+            self.settings.proxy_url.clear();
+            self.settings.save();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SetProxy {
+                    proxy_url: String::new(),
+                });
+            }
+        }
+        if spawn_multi_zalo {
+            let profile = self.settings.multi_profile_name.trim().to_string();
+            if profile.is_empty() {
+                self.show_toast("⚠️ Vui lòng nhập tên Profile (ví dụ: acc2)");
+            } else if let Ok(exe) = std::env::current_exe() {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("--gui").arg("--profile").arg(&profile);
+                if !self.settings.proxy_url.trim().is_empty() {
+                    cmd.arg("--proxy").arg(self.settings.proxy_url.trim());
+                }
+                match cmd.spawn() {
+                    Ok(_) => {
+                        self.settings.save();
+                        self.show_toast(format!("🚀 Đã mở cửa sổ Zalo mới (Profile: {profile})"));
+                    }
+                    Err(e) => {
+                        self.show_toast(format!("⚠️ Không mở được cửa sổ mới: {e}"));
+                    }
+                }
+            }
         }
         if pick_dl_dir {
             if let Some(folder) = pick_native_file_dialog(false) {

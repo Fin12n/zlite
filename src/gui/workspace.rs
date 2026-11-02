@@ -1017,7 +1017,8 @@ impl ZaloGuiApp {
                                 .get(&t.id)
                                 .map(|&until| until == -1 || until > now_unix)
                                 .unwrap_or(false)
-                                || t.presentation.muted;
+                                || t.presentation.muted
+                                || t.unread.is_muted();
                             let is_hidden = self.settings.hidden_threads.contains(&t.id)
                                 || t.presentation.hidden;
                             let cur_label = self.settings.thread_labels.get(&t.id).cloned();
@@ -1759,6 +1760,14 @@ impl ZaloGuiApp {
                             };
                             if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
                                 th.presentation.muted = mute;
+                                th.unread.muted = mute;
+                                th.unread.muted_until = if mute && dur_sec > 0 {
+                                    Some(now_unix + dur_sec)
+                                } else {
+                                    None
+                                };
+                                th.unread.settings_fresh = true;
+                                th.unread.fresh = true;
                             }
                             self.settings.save();
                             self.persist_threads_async();

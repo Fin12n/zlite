@@ -130,8 +130,20 @@ where
         0.08,
         "📲 Đang gửi tín hiệu đồng bộ tới Zalo trên điện thoại…".to_string(),
     );
-    let _ = chat::request_phone_sync(s, &pub_key).await;
+    let r1 = chat::request_phone_sync(s, &pub_key).await;
     let _ = chat::request_phone_sync_v2(s, &pub_key).await;
+
+    let r1_err = match &r1 {
+        Ok(v) => v.get("error_code").and_then(|c| c.as_i64()).filter(|&c| c != 0),
+        Err(_) => Some(-1),
+    };
+    if r1_err.is_some() {
+        on_progress(
+            0.15,
+            "ℹ️ Máy chủ Zalo yêu cầu xác thực thiết bị Sync-V2, đang đồng bộ Cloud & Nhóm…".to_string(),
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
 
     if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
         let _ = chat::cancel_phone_sync(s, &pub_key).await;

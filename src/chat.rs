@@ -424,6 +424,8 @@ pub struct SidebarMember {
     pub id: String,
     pub name: String,
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1298,7 +1300,7 @@ fn parse_thread(v: &Value) -> Option<Thread> {
     })
 }
 
-fn pick_str(v: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn pick_str(v: &Value, keys: &[&str]) -> Option<String> {
     for k in keys {
         match v.get(*k) {
             Some(Value::String(s)) if !s.is_empty() => return Some(s.clone()),
@@ -4701,35 +4703,50 @@ fn extract_sticker_info(v: &Value) -> Option<(u64, u64, u32)> {
     }
 }
 
-/// Check whether `url` points to a Zalo photo CDN asset (`photo-stal`, `photo-zmp`, `zpcloud.zdn.vn`, etc., #72).
+/// Check whether `url` points to an image asset (Zalo photo CDN, local photo, or direct image URL, #72).
 pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
     let u = url.trim().to_ascii_lowercase();
-    if (!u.starts_with("http://") && !u.starts_with("https://")) || u.contains("/renewmedia") {
+    if (!u.starts_with("http://") && !u.starts_with("https://") && !u.starts_with("local://"))
+        || u.contains("/renewmedia")
+    {
         return false;
     }
     let path_part = u.split('?').next().unwrap_or(&u);
     if [
-        ".doc", ".docx", ".pdf", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".txt",
-        ".csv", ".mp4", ".mov", ".mp3", ".m4a", ".exe", ".dmg", ".apk",
+        ".doc", ".docx", ".pdf", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".tar",
+        ".gz", ".txt", ".csv", ".mp4", ".mov", ".mkv", ".avi", ".mp3", ".m4a", ".wav", ".exe",
+        ".dmg", ".apk",
     ]
     .iter()
     .any(|ext| path_part.ends_with(ext))
     {
         return false;
     }
+    // Direct image file extensions anywhere
+    if [
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tiff",
+    ]
+    .iter()
+    .any(|ext| path_part.ends_with(ext))
+    {
+        return true;
+    }
+    // Zalo specific photo CDNs and subpaths
     u.contains("photo-stal")
         || u.contains("photo-zmp")
         || u.contains("photo-aka")
-        || (u.contains("zdn.vn")
+        || u.contains("photo-link-talk")
+        || u.contains("res-zalo")
+        || ((u.contains("zdn.vn") || u.contains("zadn.vn"))
             && (path_part.contains("/jpg/")
                 || path_part.contains("/png/")
                 || path_part.contains("/webp/")
                 || path_part.contains("/gif/")
-                || path_part.ends_with(".jpg")
-                || path_part.ends_with(".jpeg")
-                || path_part.ends_with(".png")
-                || path_part.ends_with(".webp")
-                || path_part.ends_with(".gif")))
+                || path_part.contains("/gr/")
+                || path_part.contains("/no/")
+                || u.contains("zpcloud")
+                || u.contains("zpg-r")
+                || u.contains("zfcloud")))
 }
 
 /// Sanitize and resolve the original sender filename for a Zalo file attachment (#74),
@@ -7497,5 +7514,22 @@ mod send_identity_tests {
         let msg_b = parse_chat_message(&raw_file_no_ext).expect("must parse file message");
         assert_eq!(msg_b.link_src.as_deref(), Some("Tập tin Zalo"));
         assert_eq!(msg_b.link_title.as_deref(), Some("De_cuong_mon_hoc.doc"));
+    }
+
+    #[test]
+    fn test_is_zalo_photo_cdn_url_comprehensive() {
+        // Direct images and Zalo CDNs
+        assert!(is_zalo_photo_cdn_url("https://photo-stal-6.zdn.vn/gr/jpg/beab7091ea123f4c6603/1WUpuktR2ex7c7iAAbWSyDORFc86tI59Rxwuy31ukJWzM6h8D9hN5HA66gJ2eFCzUBU.jpg"));
+        assert!(is_zalo_photo_cdn_url("https://f16-zpcloud.zdn.vn/4755838023238443440/415f16b28c720c2c5563.jpg"));
+        assert!(is_zalo_photo_cdn_url("https://b-f65-zpg-r.zdn.vn/1913892508530765023/24acd63939f9b9a7e0e8.jpg"));
+        assert!(is_zalo_photo_cdn_url("https://res-zalo.zadn.vn/upload/media/2020/2/7/2x_ecardsn_1581058405234_716426.png"));
+        assert!(is_zalo_photo_cdn_url("https://example.com/banner.webp?w=500"));
+        assert!(is_zalo_photo_cdn_url("local:///Users/mac/test.png"));
+
+        // Non-images
+        assert!(!is_zalo_photo_cdn_url("https://file-stal-10.dlfl.vn/gr/1d5605655a9c8fc2d68d/document.pdf"));
+        assert!(!is_zalo_photo_cdn_url("https://www.youtube.com/watch?v=F1c8-nNze3U"));
+        assert!(!is_zalo_photo_cdn_url("https://docs.google.com/spreadsheets/d/123/edit"));
+        assert!(!is_zalo_photo_cdn_url("https://f16-zpc.zdn.vn/renewMedia?p=abc"));
     }
 }

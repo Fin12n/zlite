@@ -963,9 +963,7 @@ pub fn merge_thread_into(
     if incoming_id_is_authoritative && !incoming.id.is_empty() && incoming.id != "0" {
         target.id = incoming.id;
     }
-    if !incoming.name.is_empty()
-        && (!is_generic_thread_name(&incoming.name) || is_generic_thread_name(&target.name))
-    {
+    if is_generic_thread_name(&target.name) && !incoming.name.is_empty() {
         target.name = incoming.name;
     }
     if should_replace_avatar(target.avatar.as_deref(), incoming.avatar.as_deref()) {
@@ -1853,7 +1851,12 @@ pub async fn send_attachment(
         return Ok((send_resp, cm));
     }
 
-    // Video / Audio / Document / Archive upload (`asyncfile/upload` -> `asyncfile/msg`, fallback `sharefile_full`)
+    // Video / Audio / Document / Archive upload (`asyncfile/upload` -> `asyncfile/msg`)
+    // Zalo server processes the uploaded file asynchronously and emits a WebSocket notification
+    // (`cmd = 601`, `subCmd = 0`, `act_type = "file_done"`) containing the CDN fileUrl.
+    // That fileUrl is mandatory for `/api/message/asyncfile/msg` (or `/api/group/asyncfile/msg`).
+    let mut ws_rx = crate::socket::spawn(s.clone());
+
     let mime = match ext.as_str() {
         "mp4" => "video/mp4",
         "mov" => "video/quicktime",
@@ -1894,56 +1897,108 @@ pub async fn send_attachment(
             "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
             s.common_params()
         );
-        if let Ok(up_raw) = s
+        match s
             .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
             .await
         {
-            last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-        } else {
-            break;
+            Ok(up_raw) => {
+                last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+            }
+            Err(e) => {
+                eprintln!("[upload] chunk {chunk_id}/{total_chunks} error: {e:#}");
+                break;
+            }
         }
     }
 
     let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
     let file_id = pick_str(data_node, &["fileId", "clientFileId"]);
-    let file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    let client_file_id = data_node
+        .get("clientFileId")
+        .cloned()
+        .unwrap_or_else(|| json!(client_id));
 
-    let mut send_resp = if let Some(fid) = file_id {
+    // Wait up to 6s for the WebSocket `file_done` event to retrieve the uploaded CDN URL.
+    let mut file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    if file_url.is_empty() {
+        if let Some(ref fid) = file_id {
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(6);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(ev)) = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(500),
+                    ws_rx.recv(),
+                )
+                .await
+                {
+                    let ev_data = ev.payload.get("data").unwrap_or(&ev.payload);
+                    if let Some(controls) = ev_data.get("controls").and_then(|c| c.as_array()) {
+                        for c in controls {
+                            if c.get("content")
+                                .and_then(|cnt| cnt.get("act_type"))
+                                .and_then(|a| a.as_str())
+                                == Some("file_done")
+                            {
+                                let c_fid = c
+                                    .get("content")
+                                    .and_then(|cnt| cnt.get("fileId"))
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_default();
+                                let fid_clean = c_fid.trim_matches('"');
+                                if fid_clean == fid || fid_clean == fid.as_str() || c_fid.is_empty() {
+                                    if let Some(u) = c
+                                        .get("content")
+                                        .and_then(|cnt| cnt.get("data"))
+                                        .and_then(|d| d.get("url"))
+                                        .and_then(|u| u.as_str())
+                                    {
+                                        file_url = u.to_string();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !file_url.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let send_resp = if let Some(fid) = file_id {
         let msg_ep = if is_group {
             "/api/group/asyncfile/msg"
         } else {
             "/api/message/asyncfile/msg"
         };
-        let fid_val = fid
-            .parse::<u64>()
-            .map(|n| json!(n))
-            .unwrap_or_else(|_| json!(fid));
         let mut msg_obj = serde_json::Map::new();
-        msg_obj.insert("fileId".into(), fid_val);
-        if !file_url.is_empty() {
-            msg_obj.insert("fileUrl".into(), json!(file_url));
-        }
+        msg_obj.insert("fileId".into(), json!(fid));
         msg_obj.insert("checksum".into(), json!(checksum));
         msg_obj.insert("checksumSha".into(), json!(""));
+        msg_obj.insert("extention".into(), json!(ext));
         msg_obj.insert("extension".into(), json!(ext));
         msg_obj.insert("totalSize".into(), json!(total_size));
         msg_obj.insert("fileName".into(), json!(file_name));
-        msg_obj.insert("clientId".into(), json!(client_id));
+        msg_obj.insert("clientId".into(), client_file_id);
         msg_obj.insert("fType".into(), json!(if is_video { 2 } else { 1 }));
         msg_obj.insert("fileCount".into(), json!(0));
         msg_obj.insert("fdata".into(), json!("{}"));
-        msg_obj.insert("imei".into(), json!(s.imei));
         if is_group {
             msg_obj.insert("grid".into(), json!(clean_target));
         } else {
             msg_obj.insert("toid".into(), json!(clean_target));
         }
+        msg_obj.insert("fileUrl".into(), json!(file_url));
+        msg_obj.insert("zsource".into(), json!(-1));
+        msg_obj.insert("ttl".into(), json!(0));
+
         let params = s.encoded_params(&Value::Object(msg_obj))?;
         let url = format!("{file_host}{msg_ep}?{}", s.common_params());
         let r = s.post_form(&url, format!("params={params}")).await?;
         s.maybe_decrypt(r, s.session_key_bytes()).await
     } else {
-        json!({ "error_code": -1 })
+        json!({ "error_code": -1, "error_message": "Không nhận được fileId từ máy chủ Zalo" })
     };
 
     if send_resp
@@ -1952,32 +2007,7 @@ pub async fn send_attachment(
         .unwrap_or(-1)
         != 0
     {
-        // Fallback to single-shot `/api/message/sharefile_full` or `/api/group/sharefile_full`
-        let share_ep = if is_group {
-            "/api/group/sharefile_full"
-        } else {
-            "/api/message/sharefile_full"
-        };
-        let body = if is_group {
-            obj(&[
-                ("grid", json!(clean_target)),
-                ("clientId", json!(client_id)),
-            ])
-        } else {
-            obj(&[
-                ("toid", json!(clean_target)),
-                ("clientId", json!(client_id)),
-            ])
-        };
-        let params = s.encoded_params(&body)?;
-        let url = format!(
-            "{file_host}{share_ep}?{}&params={params}&type={target_type}",
-            s.common_params()
-        );
-        let r = s
-            .post_multipart(&url, "fileContent", &file_name, mime, &file_bytes)
-            .await?;
-        send_resp = s.maybe_decrypt(r, s.session_key_bytes()).await;
+        eprintln!("[send_attachment] asyncfile/msg failed: {send_resp:?}");
     }
 
     if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
@@ -2130,7 +2160,7 @@ pub async fn scrape_opengraph_metadata(url: &str) -> Option<LinkMetadata> {
         let tag = &after[..=end];
         cursor = &after[end + 1..];
 
-        if tag.len() >= 5 && tag[1..5].eq_ignore_ascii_case("meta") {
+        if tag.get(1..5).map_or(false, |s| s.eq_ignore_ascii_case("meta")) {
             let key = extract_meta_attr(tag, "property")
                 .or_else(|| extract_meta_attr(tag, "name"))
                 .unwrap_or_default()
@@ -2155,7 +2185,7 @@ pub async fn scrape_opengraph_metadata(url: &str) -> Option<LinkMetadata> {
                 }
                 _ => {}
             }
-        } else if og_title.is_empty() && tag.len() >= 6 && tag[1..6].eq_ignore_ascii_case("title") {
+        } else if og_title.is_empty() && tag.get(1..6).map_or(false, |s| s.eq_ignore_ascii_case("title")) {
             if let Some(close) = cursor.find("</") {
                 let raw_t = unescape_html_entities(&cursor[..close]);
                 if !raw_t.is_empty() {

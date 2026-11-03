@@ -1758,6 +1758,21 @@ impl ZaloGuiApp {
 // Main eframe::App Implementation
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
+fn is_space_key_down() -> bool {
+    extern "C" {
+        fn CGEventSourceKeyState(state_id: i32, keycode: u16) -> bool;
+    }
+    // 0 is kCGEventSourceStateCombinedSessionState
+    // 49 (0x31) is the standard macOS virtual keycode for Spacebar (kVK_Space)
+    unsafe { CGEventSourceKeyState(0, 49) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_space_key_down() -> bool {
+    false
+}
+
 impl eframe::App for ZaloGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
@@ -1769,6 +1784,120 @@ impl eframe::App for ZaloGuiApp {
             }
             std::process::exit(0);
         }
+
+        // Track IME Preedit / Composition lifecycle (macOS Telex, VNI & CJK)
+        let mut ime_commit_in_frame = false;
+        let mut ime_active = self.ime_active;
+        let was_composing = self.ime_active;
+        let mut ime_space_commit = false;
+        let space_is_down = is_space_key_down();
+        let is_macos = cfg!(target_os = "macos");
+
+        ctx.input_mut(|i| {
+            let space_in_events = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Space,
+                        ..
+                    }
+                ) || matches!(
+                    e,
+                    egui::Event::Text(s) if s == " "
+                )
+            });
+            let enter_pressed = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        ..
+                    }
+                )
+            });
+            let non_space_text = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(s) if !s.trim().is_empty()
+                )
+            });
+            let mouse_clicked = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::PointerButton { .. }
+                )
+            });
+
+            for event in &mut i.events {
+                match event {
+                    egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
+                        ime_active = !text.is_empty();
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(ref mut text)) => {
+                        ime_commit_in_frame = true;
+                        ime_active = false;
+
+                        // macOS Vietnamese IME fix:
+                        // In Vietnamese Telex/Simple Telex on macOS, pressing Spacebar commits marked preedit
+                        // text via insertText and finishes the word. Upstream winit marks ime_state as Committed
+                        // and suppresses raw KeyboardInput for the Space key. When typing at normal speed,
+                        // keyup occurs in tens of milliseconds, so checking physical keydown is often false.
+                        // A Latin/Vietnamese IME commit that occurs while composing WITHOUT Enter, without
+                        // trailing punctuation text, and without mouse clicks was 100% committed by Spacebar.
+                        // We ensure exactly one trailing space is added so words never glue together ("dính dấu cách").
+                        let space_committed = space_is_down
+                            || space_in_events
+                            || (is_macos && was_composing && !enter_pressed && !non_space_text && !mouse_clicked);
+
+                        if space_committed
+                            && !text.is_empty()
+                            && !text.ends_with(' ')
+                            && !text.chars().any(crate::gui::theme::is_cjk)
+                        {
+                            text.push(' ');
+                            ime_space_commit = true;
+                        }
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Disabled) => {
+                        ime_active = false;
+                    }
+                    _ => {}
+                }
+            }
+
+            // If a space was appended as part of IME Commit, filter out any redundant raw Space events
+            // in this frame to prevent accidental double spaces.
+            if ime_space_commit {
+                i.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Text(s) if s == " "
+                    ) && !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Space,
+                            ..
+                        }
+                    )
+                });
+            }
+
+            // When IME is currently composing or committing, consume and filter Key::Enter
+            // so it doesn't cause TextEdit to blur or trigger premature message sending!
+            if ime_active || ime_commit_in_frame {
+                i.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            ..
+                        }
+                    )
+                });
+            }
+        });
+        self.ime_active = ime_active;
+        self.ime_just_committed = ime_commit_in_frame;
         if self.theme_dirty {
             self.palette().apply_to_ctx(ctx);
             self.theme_dirty = false;

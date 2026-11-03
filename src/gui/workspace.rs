@@ -4268,6 +4268,11 @@ impl ZaloGuiApp {
                                         self.composer_sticker_selected = None;
                                     }
 
+                                    let is_ime_busy = self.ime_active || self.ime_just_committed;
+                                    if is_ime_busy && response.lost_focus() {
+                                        response.request_focus();
+                                    }
+
                                     let enter_pressed = (response.lost_focus()
                                         || response.has_focus())
                                         && send_via_enter

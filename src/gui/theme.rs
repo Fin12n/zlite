@@ -670,6 +670,11 @@ pub mod lucide {
     pub const CHEVRON_DOWN: &str = "\u{e06d}";
     pub const USER: &str = "\u{e19f}";
     pub const NEWSPAPER: &str = "\u{e124}";
+    pub const QUOTE: &str = "\u{e239}";
+    pub const FORWARD: &str = "\u{e229}";
+    pub const SHARE_2: &str = "\u{e156}";
+    pub const TRASH_2: &str = "\u{e18e}";
+    pub const INFO: &str = "\u{e0f9}";
 }
 
 pub(super) fn draw_lucide_icon(

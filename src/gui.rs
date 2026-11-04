@@ -1831,8 +1831,7 @@ impl eframe::App for ZaloGuiApp {
             for event in &mut i.events {
                 match event {
                     egui::Event::Ime(egui::ImeEvent::Enabled) => {
-                        self.ime_active = true;
-                        was_composing = true;
+                        // Enabled marks text-input focus; preedit text marks composition.
                     }
                     egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                         self.ime_active = !text.is_empty();
@@ -1848,10 +1847,11 @@ impl eframe::App for ZaloGuiApp {
                             && !mouse_clicked;
                         if (space_pressed || inferred_macos_space_commit)
                             && !text.is_empty()
-                            && !text.ends_with(' ')
                             && !text.chars().any(crate::gui::theme::is_cjk)
                         {
-                            text.push(' ');
+                            if !text.ends_with(' ') {
+                                text.push(' ');
+                            }
                             ime_space_commit = true;
                         }
                         self.ime_active = false;

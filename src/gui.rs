@@ -625,6 +625,7 @@ pub struct ZaloGuiApp {
     ime_active: bool,
     ime_just_committed: bool,
     history_reached_start: HashSet<String>,
+    force_scroll_to_bottom: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -862,6 +863,7 @@ impl ZaloGuiApp {
             ime_active: false,
             ime_just_committed: false,
             history_reached_start: HashSet::new(),
+            force_scroll_to_bottom: false,
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();

@@ -1634,6 +1634,8 @@ impl ZaloGuiApp {
                     if self.selected_thread_index != resolved_idx {
                         self.replying_to = None;
                         self.filter_starred_only = false;
+                        self.force_scroll_to_bottom = true;
+                        self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
                     }
                     self.selected_thread_index = resolved_idx;
                     if self.unread_counts.remove(&tid).is_some() {
@@ -1667,7 +1669,11 @@ impl ZaloGuiApp {
                         .get(resolved_idx)
                         .map(|t| t.name.contains("Cloud của tôi"))
                         .unwrap_or(false);
-                    if is_group || is_cloud {
+                    let needs_history = self
+                        .threads
+                        .get(resolved_idx)
+                        .map_or(true, |t| t.messages.is_empty());
+                    if (is_group || is_cloud) && needs_history {
                         if let Some(tx) = WORKER_TX.get() {
                             let _ = tx.send(WorkerCmd::LoadGroupHistory {
                                 group_id: tid,
@@ -3287,7 +3293,7 @@ impl ZaloGuiApp {
                         - composer_extra_h
                         - picker_reserve)
                         .max(100.0);
-                    egui::ScrollArea::vertical()
+                    let chat_scroll_out = egui::ScrollArea::vertical()
                         .id_salt(Id::new(("chat_scroll", &thread_id)))
                         .max_height(msg_area_height)
                         .auto_shrink([false, false])
@@ -3501,10 +3507,62 @@ impl ZaloGuiApp {
                                                     jump_scrolled |= jump_scroll_pending;
                                                 }
                                             }
+                                            let (bottom_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 1.0), Sense::hover());
+                                            if self.force_scroll_to_bottom {
+                                                ui.scroll_to_rect(bottom_rect, Some(Align::BOTTOM));
+                                                self.force_scroll_to_bottom = false;
+                                            }
                                         }
                                     }
                                 });
                         });
+
+                    let dist_from_bottom = (chat_scroll_out.content_size.y
+                        - (chat_scroll_out.state.offset.y + chat_scroll_out.inner_rect.height()))
+                        .max(0.0);
+                    if dist_from_bottom > 180.0 {
+                        let btn_size = 36.0;
+                        let btn_pos = Pos2::new(
+                            chat_scroll_out.inner_rect.right() - btn_size - 22.0,
+                            chat_scroll_out.inner_rect.bottom() - btn_size - 16.0,
+                        );
+                        egui::Area::new(Id::new(("auto_scroll_btn", &thread_id)))
+                            .order(egui::Order::Middle)
+                            .fixed_pos(btn_pos)
+                            .show(ctx, |ui| {
+                                egui::Frame::none()
+                                    .fill(pal.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                    .rounding(Rounding::same(btn_size / 2.0))
+                                    .shadow(egui::epaint::Shadow {
+                                        offset: Vec2::new(0.0, 2.0),
+                                        blur: 8.0,
+                                        spread: 0.0,
+                                        color: Color32::from_black_alpha(if pal.is_dark { 80 } else { 35 }),
+                                    })
+                                    .show(ui, |ui| {
+                                        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(btn_size), Sense::click());
+                                        if resp.hovered() {
+                                            ui.painter().circle_filled(rect.center(), btn_size / 2.0, pal.bg_hover);
+                                        }
+                                        draw_lucide_icon(
+                                            ui.painter(),
+                                            rect.center(),
+                                            lucide::CHEVRON_DOWN,
+                                            16.0,
+                                            if resp.hovered() { pal.primary_hover } else { pal.text_primary },
+                                        );
+                                        if resp
+                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                            .on_hover_text("Cuộn xuống tin nhắn mới nhất")
+                                            .clicked()
+                                        {
+                                            self.force_scroll_to_bottom = true;
+                                            ui.ctx().request_repaint();
+                                        }
+                                    });
+                            });
+                    }
                     if jump_scrolled {
                         if let Some(jump) = &mut self.quote_jump {
                             jump.scroll_pending = false;

@@ -1831,7 +1831,8 @@ impl eframe::App for ZaloGuiApp {
             for event in &mut i.events {
                 match event {
                     egui::Event::Ime(egui::ImeEvent::Enabled) => {
-                        // Enabled marks text-input focus; preedit text marks composition.
+                        self.ime_active = true;
+                        was_composing = true;
                     }
                     egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                         self.ime_active = !text.is_empty();

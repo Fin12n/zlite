@@ -329,64 +329,46 @@ impl State {
             }
 
             WindowEvent::Ime(ime) => {
-                // Linux sends Enabled as a text-input-focus notification. Only enable egui
-                // composition when actual preedit text arrives; the Linux Enabled event
-                // must not disable Enter handling in the focused text field.
-                #[cfg(target_os = "linux")]
-                if !matches!(ime, winit::event::Ime::Enabled) {
-                    match ime {
-                        winit::event::Ime::Preedit(text, Some(_cursor)) => {
+                // on Mac even Cmd-C is pressed during ime, a `c` is pushed to Preedit.
+                // So no need to check is_mac_cmd.
+                //
+                // How winit produce `Ime::Enabled` and `Ime::Disabled` differs in MacOS
+                // and Windows.
+                //
+                // - On Windows, before and after each Commit will produce an Enable/Disabled
+                // event.
+                // - On MacOS, only when user explicit enable/disable ime. No Disabled
+                // after Commit.
+                //
+                // We use input_method_editor_started to manually insert CompositionStart
+                // between Commits.
+                match ime {
+                    winit::event::Ime::Enabled => {
+                        // PATCHED (see ../PATCHES.md): upstream ignores all IME events on Linux
+                        // because of https://github.com/emilk/egui/issues/5008. There winit sends
+                        // `Enabled` as a text-input focus notification, which put every `TextEdit`
+                        // into IME mode and swallowed Backspace/arrow keys. Linux composition
+                        // starts at the first `Preedit` below instead.
+                        if !cfg!(target_os = "linux") {
                             self.ime_event_enable();
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
                         }
-                        winit::event::Ime::Commit(text) => {
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
-                            self.ime_event_disable();
-                        }
-                        winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
-                            self.ime_event_disable();
-                        }
-                        winit::event::Ime::Enabled => unreachable!(),
                     }
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    // on Mac even Cmd-C is pressed during ime, a `c` is pushed to Preedit.
-                    // So no need to check is_mac_cmd.
-                    //
-                    // How winit produce `Ime::Enabled` and `Ime::Disabled` differs in MacOS
-                    // and Windows.
-                    //
-                    // - On Windows, before and after each Commit will produce an Enable/Disabled
-                    // event.
-                    // - On MacOS, only when user explicit enable/disable ime. No Disabled
-                    // after Commit.
-                    //
-                    // We use input_method_editor_started to manually insert CompositionStart
-                    // between Commits.
-                    match ime {
-                        winit::event::Ime::Enabled => self.ime_event_enable(),
-                        winit::event::Ime::Preedit(text, Some(_cursor)) => {
-                            self.ime_event_enable();
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
-                        }
-                        winit::event::Ime::Commit(text) => {
-                            self.egui_input
-                                .events
-                                .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
-                            self.ime_event_disable();
-                        }
-                        winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
-                            self.ime_event_disable();
-                        }
-                    };
-                }
+                    winit::event::Ime::Preedit(text, Some(_cursor)) => {
+                        self.ime_event_enable();
+                        self.egui_input
+                            .events
+                            .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
+                    }
+                    winit::event::Ime::Commit(text) => {
+                        self.egui_input
+                            .events
+                            .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
+                        self.ime_event_disable();
+                    }
+                    winit::event::Ime::Disabled | winit::event::Ime::Preedit(_, None) => {
+                        self.ime_event_disable();
+                    }
+                };
 
                 EventResponse {
                     repaint: true,

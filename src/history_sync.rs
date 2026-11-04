@@ -131,6 +131,9 @@ where
         "📲 Đang gửi tín hiệu đồng bộ tới Zalo trên điện thoại…".to_string(),
     );
     let r1 = chat::request_phone_sync(s, &pub_key).await;
+    if let Ok(ref val) = r1 {
+        chat::merge_previews(threads, val);
+    }
     let _ = chat::request_phone_sync_v2(s, &pub_key).await;
 
     let r1_err = match &r1 {
@@ -140,9 +143,19 @@ where
     if r1_err.is_some() {
         on_progress(
             0.15,
-            "ℹ️ Máy chủ Zalo yêu cầu xác thực thiết bị Sync-V2, đang đồng bộ Cloud & Nhóm…".to_string(),
+            "ℹ️ Đồng bộ Cloud, nhóm & tin nhắn gần đây từ máy chủ Zalo…".to_string(),
         );
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    // Phase 1b: Synchronize pinned conversations from server (/api/pinconvers/list, #87)
+    on_progress(
+        0.18,
+        "📌 Đang đồng bộ danh sách hội thoại đã ghim từ máy chủ Zalo…".to_string(),
+    );
+    if let Ok(pinned_val) = chat::get_pinned(s).await {
+        let pinned_ids = chat::parse_pinned_conversations(&pinned_val);
+        chat::apply_pinned_threads(threads, &pinned_ids);
     }
 
     if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {

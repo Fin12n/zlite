@@ -738,6 +738,8 @@ impl ZaloGuiApp {
                                         .filter(|t| {
                                             t.name.contains("Cloud của tôi")
                                                 || t.presentation.pinned
+                                                || self.settings.pinned_threads.contains(&t.id)
+                                                || crate::chat::is_pinned_in_list(&t.id, t.is_group, &self.settings.pinned_threads)
                                         })
                                         .count();
                                     if pinned_cnt > 0 {
@@ -857,14 +859,15 @@ impl ZaloGuiApp {
                         let ta = &self.threads[a];
                         let tb = &self.threads[b];
                         let a_pinned = ta.name.contains("Cloud của tôi")
-                            || self.settings.pinned_threads.contains(&ta.id);
+                            || ta.presentation.pinned
+                            || self.settings.pinned_threads.contains(&ta.id)
+                            || crate::chat::is_pinned_in_list(&ta.id, ta.is_group, &self.settings.pinned_threads);
                         let b_pinned = tb.name.contains("Cloud của tôi")
-                            || self.settings.pinned_threads.contains(&tb.id);
+                            || tb.presentation.pinned
+                            || self.settings.pinned_threads.contains(&tb.id)
+                            || crate::chat::is_pinned_in_list(&tb.id, tb.is_group, &self.settings.pinned_threads);
                         if a_pinned != b_pinned {
                             return b_pinned.cmp(&a_pinned);
-                        }
-                        if ta.presentation.pinned != tb.presentation.pinned {
-                            return tb.presentation.pinned.cmp(&ta.presentation.pinned);
                         }
                         let ts_a = ta
                             .messages
@@ -943,8 +946,9 @@ impl ZaloGuiApp {
                         for &i in &filtered_indices {
                             let t = &self.threads[i];
                             let is_selected = i == self.selected_thread_index;
-                            let is_user_pinned = self.settings.pinned_threads.contains(&t.id)
-                                || t.presentation.pinned;
+                            let is_user_pinned = t.presentation.pinned
+                                || self.settings.pinned_threads.contains(&t.id)
+                                || crate::chat::is_pinned_in_list(&t.id, t.is_group, &self.settings.pinned_threads);
                             let is_pinned_cloud =
                                 t.name.contains("Cloud của tôi") || is_user_pinned;
                             let is_muted = self

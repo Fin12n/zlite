@@ -1012,6 +1012,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 );
                                                             }
                                                         }
+                                                        if let Ok(pinned_resp) = crate::chat::get_pinned(&s).await {
+                                                            let pids = crate::chat::parse_pinned_conversations(&pinned_resp);
+                                                            crate::chat::apply_pinned_threads(&mut list, &pids);
+                                                            let _ = gui_tx_clone.send(GuiEvent::PinnedSnapshotSynced(pids));
+                                                        }
                                                         let sync_snapshot = list.clone();
                                                         let _ = gui_tx_clone
                                                             .send(GuiEvent::ThreadsUpdated(list));
@@ -1207,6 +1212,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             let _ = gui_tx_clone
                                                 .send(GuiEvent::MuteSnapshotSynced(mute_map));
                                         }
+                                    }
+                                    if let Ok(pinned_resp) = crate::chat::get_pinned(&s).await {
+                                        let pids = crate::chat::parse_pinned_conversations(&pinned_resp);
+                                        crate::chat::apply_pinned_threads(&mut list, &pids);
+                                        let _ = gui_tx_clone.send(GuiEvent::PinnedSnapshotSynced(pids));
                                     }
                                     let total_msgs: usize =
                                         list.iter().map(|t| t.messages.len()).sum();

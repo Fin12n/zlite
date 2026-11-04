@@ -944,6 +944,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     ) {
                                                                         ex.avatar = gt.avatar;
                                                                     }
+                                                                    ex.presentation.posting_restricted = gt.presentation.posting_restricted;
                                                                     ex.is_group = true;
                                                                 } else {
                                                                     list.push(gt);
@@ -1134,6 +1135,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     ) {
                                                         ex.avatar = gt.avatar;
                                                     }
+                                                    ex.presentation.posting_restricted = gt.presentation.posting_restricted;
                                                     ex.is_group = true;
                                                 } else {
                                                     list.push(gt);
@@ -2692,6 +2694,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             ) {
                                                                 ex.avatar = gt.avatar;
                                                             }
+                                                            ex.presentation.posting_restricted = gt.presentation.posting_restricted;
                                                             ex.is_group = true;
                                                         } else {
                                                             list.push(gt);

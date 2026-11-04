@@ -2058,7 +2058,7 @@ pub fn build_pure_rust_invite_fields_with_probe(
         "srtcp": 0,
         "srtpMode": 0,
         "supportCallBusy": 1,
-        "supportHevcDecode": 0,
+        "supportHevcDecode": if crate::media::is_ffmpeg_available() { 1 } else { 0 },
         "tpType": 0,
         "video": {
             "codec": [
@@ -2132,7 +2132,7 @@ pub fn build_callee_extend_data(
         "srtcp": 0,
         "srtpMode": 0,
         "supportCallBusy": 1,
-        "supportHevcDecode": 0,
+        "supportHevcDecode": if crate::media::is_ffmpeg_available() { 1 } else { 0 },
         "tpType": 0,
         "video": {
             "codec": [
@@ -2155,6 +2155,7 @@ enum CallEngineCmd {
     },
     AnswerCall {
         accept: bool,
+        cam_start_off: bool,
     },
     SetMediaState {
         is_on_mic: bool,
@@ -2885,7 +2886,7 @@ impl CallBridge {
                         });
                     }
 
-                    CallEngineCmd::AnswerCall { accept } => {
+                    CallEngineCmd::AnswerCall { accept, cam_start_off } => {
                         let s_snap = session.lock().await.clone();
                         let active_clone = active_call.clone();
                         let gui_tx_clone = gui_tx.clone();
@@ -2945,6 +2946,9 @@ impl CallBridge {
                                         Some(ctx_clone.clone()),
                                     ) {
                                         Ok(m) => {
+                                            if cam_start_off {
+                                                m.set_cam_enabled(false);
+                                            }
                                             st.media = Some(m);
                                         }
                                         Err(e) => {
@@ -4099,8 +4103,11 @@ impl CallBridge {
     }
 
     /// Accept (`true`) or decline (`false`) an incoming VoIP call.
-    pub fn answer_call(&self, accept: bool) {
-        let _ = self.cmd_tx.send(CallEngineCmd::AnswerCall { accept });
+    pub fn answer_call(&self, accept: bool, cam_start_off: bool) {
+        let _ = self.cmd_tx.send(CallEngineCmd::AnswerCall {
+            accept,
+            cam_start_off,
+        });
     }
 
     /// Update microphone/camera state (`12006` `/api/voicecall/conf`) during an active call.

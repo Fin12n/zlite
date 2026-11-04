@@ -503,6 +503,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             {
                                                 cb.handle_control_event(voip_ev);
                                             }
+                                            crate::chat::dispatch_file_done_controls(data_node);
                                             let mute_evs = crate::chat::extract_mute_controls(
                                                 data_node,
                                                 crate::login::unix_now() as i64,

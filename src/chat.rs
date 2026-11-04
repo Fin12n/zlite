@@ -1618,6 +1618,137 @@ fn md5_hex_bytes(bytes: &[u8]) -> String {
     })
 }
 
+/// How long `send_attachment` waits for the `file_done` control event of an async file upload.
+const FILE_DONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// How long an unclaimed `file_done` event is kept for a waiter that registers late.
+const FILE_DONE_EARLY_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Async file uploads waiting for their `act_type: "file_done"` control event, keyed by `fileId`.
+///
+/// `asyncfile/upload` only returns a `fileId`; Zalo pushes the final `fileUrl` later over the
+/// WebSocket (`cmd 601`) or `lp_control`, and `asyncfile/msg` is rejected without it.
+#[derive(Default)]
+struct FileDoneRegistry {
+    waiters: std::collections::HashMap<String, tokio::sync::oneshot::Sender<String>>,
+    /// Events that arrived before their waiter registered (`fileId` -> (`fileUrl`, received at)).
+    early: std::collections::HashMap<String, (String, std::time::Instant)>,
+}
+
+static FILE_DONE_REGISTRY: std::sync::LazyLock<std::sync::Mutex<FileDoneRegistry>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(FileDoneRegistry::default()));
+
+/// Set once any control-event consumer (WebSocket or `lp_control` poll) feeds `file_done` events,
+/// so front-ends without one (TUI) skip the wait instead of stalling for `FILE_DONE_TIMEOUT`.
+static FILE_DONE_LISTENER_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn file_id_key(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse `act_type: "file_done"` items (`{fileId, data: {url}}`) into `(fileId, fileUrl)` pairs.
+pub fn extract_file_done_controls(data_node: &Value) -> Vec<(String, String)> {
+    let mut candidates: Vec<&Value> = Vec::new();
+    if let Some(arr) = data_node.get("controls").and_then(Value::as_array) {
+        candidates.extend(arr.iter());
+    } else if let Some(arr) = data_node.as_array() {
+        for item in arr {
+            if let Some(sub) = item.get("controls").and_then(Value::as_array) {
+                candidates.extend(sub.iter());
+            } else {
+                candidates.push(item);
+            }
+        }
+    } else {
+        candidates.push(data_node);
+    }
+
+    let mut out = Vec::new();
+    for item in candidates {
+        let c = item.get("content").unwrap_or(item);
+        if c.get("act_type").and_then(Value::as_str) != Some("file_done") {
+            continue;
+        }
+        let raw_data = c.get("data").unwrap_or(&Value::Null);
+        let parsed_data: Value;
+        let d = if let Some(s) = raw_data.as_str() {
+            parsed_data = serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+            &parsed_data
+        } else {
+            raw_data
+        };
+        let Some(file_id) = c
+            .get("fileId")
+            .or_else(|| d.get("fileId"))
+            .and_then(file_id_key)
+        else {
+            continue;
+        };
+        let Some(url) = pick_str(d, &["url", "fileUrl"]) else {
+            continue;
+        };
+        out.push((file_id, url));
+    }
+    out
+}
+
+/// Resolve pending async file uploads from a decrypted control payload (WebSocket `cmd 601` or
+/// `lp_control`). Unclaimed events are kept briefly for uploads whose waiter registers late.
+pub fn dispatch_file_done_controls(data_node: &Value) {
+    FILE_DONE_LISTENER_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let events = extract_file_done_controls(data_node);
+    if events.is_empty() {
+        return;
+    }
+    let Ok(mut reg) = FILE_DONE_REGISTRY.lock() else {
+        crate::logger::log_error("chat::file_done", "registry mutex poisoned");
+        return;
+    };
+    reg.early
+        .retain(|_, (_, at)| at.elapsed() < FILE_DONE_EARLY_TTL);
+    for (file_id, url) in events {
+        match reg.waiters.remove(&file_id) {
+            Some(tx) => {
+                let _ = tx.send(url);
+            }
+            None => {
+                reg.early.insert(file_id, (url, std::time::Instant::now()));
+            }
+        }
+    }
+}
+
+fn register_file_done_waiter(file_id: &str) -> tokio::sync::oneshot::Receiver<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    match FILE_DONE_REGISTRY.lock() {
+        Ok(mut reg) => match reg.early.remove(file_id) {
+            Some((url, _)) => {
+                let _ = tx.send(url);
+            }
+            None => {
+                reg.waiters.insert(file_id.to_string(), tx);
+            }
+        },
+        // Dropping `tx` makes the receiver resolve immediately with an error.
+        Err(_) => crate::logger::log_error("chat::file_done", "registry mutex poisoned"),
+    }
+    rx
+}
+
+/// Wait up to `timeout` for the `file_done` event of `file_id`; `None` on timeout.
+async fn wait_for_file_done(file_id: &str, timeout: std::time::Duration) -> Option<String> {
+    let rx = register_file_done_waiter(file_id);
+    let res = tokio::time::timeout(timeout, rx).await;
+    if let Ok(mut reg) = FILE_DONE_REGISTRY.lock() {
+        reg.waiters.remove(file_id);
+    }
+    res.ok().and_then(Result::ok)
+}
+
 /// Upload and send a photo, video, or general file attachment to a 1-1 or group conversation.
 ///
 /// Implements Zalo PC 26.10.11's two-stage chunked upload (`photo_original/upload` -> `photo_original/send`
@@ -1894,19 +2025,36 @@ pub async fn send_attachment(
             "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
             s.common_params()
         );
-        if let Ok(up_raw) = s
+        let up_raw = s
             .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
             .await
-        {
-            last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-        } else {
-            break;
+            .map_err(|e| anyhow::anyhow!("tải lên phần {chunk_id}/{total_chunks} thất bại: {e}"))?;
+        last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+        if let Some(code) = last_up_dec.get("error_code").and_then(Value::as_i64) {
+            if code != 0 {
+                let msg = last_up_dec
+                    .get("error_message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return Err(crate::session::SessionError::new(code, msg).into());
+            }
         }
     }
 
     let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
-    let file_id = pick_str(data_node, &["fileId", "clientFileId"]);
-    let file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    let file_id = pick_str(data_node, &["fileId", "clientFileId"]).filter(|id| id != "-1");
+    let mut file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl"]).unwrap_or_default();
+    if file_url.is_empty() && FILE_DONE_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(fid) = file_id.as_deref() {
+            match wait_for_file_done(fid, FILE_DONE_TIMEOUT).await {
+                Some(url) => file_url = url,
+                None => crate::logger::log_error(
+                    "chat::send_attachment",
+                    &format!("no file_done event for fileId {fid} within {FILE_DONE_TIMEOUT:?}"),
+                ),
+            }
+        }
+    }
 
     let mut send_resp = if let Some(fid) = file_id {
         let msg_ep = if is_group {
@@ -7328,6 +7476,58 @@ mod send_identity_tests {
         for (_, body) in requests {
             assert_eq!(body["clientId"], json!(client_id));
         }
+    }
+
+    #[test]
+    fn extract_file_done_controls_parses_object_and_string_data() {
+        let payload = json!({
+            "controls": [
+                { "content": { "act_type": "file_done", "fileId": 1234567, "data": { "url": "https://f.zdn.vn/a.pdf" } } },
+                { "content": { "act_type": "file_done", "fileId": "89", "data": "{\"url\":\"https://f.zdn.vn/b.mp4\"}" } },
+                { "content": { "act_type": "voip", "fileId": 1, "data": { "url": "https://x" } } },
+                { "content": { "act_type": "file_done", "fileId": 2, "data": {} } }
+            ]
+        });
+        assert_eq!(
+            extract_file_done_controls(&payload),
+            vec![
+                ("1234567".to_string(), "https://f.zdn.vn/a.pdf".to_string()),
+                ("89".to_string(), "https://f.zdn.vn/b.mp4".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn file_done_resolves_waiters_registered_before_and_after_the_event() {
+        let ev = |id: &str, url: &str| json!({ "controls": [{ "content": { "act_type": "file_done", "fileId": id, "data": { "url": url } } }] });
+
+        // Event arrives while the upload is already waiting.
+        let waiter = tokio::spawn(async {
+            wait_for_file_done("test_fd_after", std::time::Duration::from_secs(5)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        dispatch_file_done_controls(&ev("test_fd_after", "https://f/after"));
+        assert_eq!(waiter.await.unwrap().as_deref(), Some("https://f/after"));
+
+        // Event arrives before the upload registers its waiter.
+        dispatch_file_done_controls(&ev("test_fd_early", "https://f/early"));
+        assert_eq!(
+            wait_for_file_done("test_fd_early", std::time::Duration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("https://f/early")
+        );
+
+        // No event: times out and leaves no stale waiter behind.
+        assert_eq!(
+            wait_for_file_done("test_fd_none", std::time::Duration::from_millis(20)).await,
+            None
+        );
+        assert!(!FILE_DONE_REGISTRY
+            .lock()
+            .unwrap()
+            .waiters
+            .contains_key("test_fd_none"));
     }
 
     #[test]

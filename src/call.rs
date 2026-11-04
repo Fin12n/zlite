@@ -1019,6 +1019,7 @@ pub async fn poll_control_events(
         data_node = inner;
     }
     state.update_from_response(data_node);
+    crate::chat::dispatch_file_done_controls(data_node);
     let mute_events = crate::chat::extract_mute_controls(data_node, ts);
     if is_initial_cursor {
         // First poll with cursor "1" syncs `lastActionId`, but preserve any fresh (< 45s) incoming

@@ -1310,7 +1310,21 @@ impl ZaloGuiApp {
                         if let Some(m) = t.messages.iter_mut().find(|m| {
                             (!m.id.is_empty() && m.id == msg_id) || (m.id.is_empty() && m.ts == ts)
                         }) {
-                            m.reactions = vec![reaction];
+                            if m.reaction_summaries.is_empty() && !m.reactions.is_empty() {
+                                m.reaction_summaries = m.reactions.iter().map(|e| crate::reactions::ReactionSummary {
+                                    emoji: e.clone(),
+                                    count: 1,
+                                    ..Default::default()
+                                }).collect();
+                            }
+                            if !m.reaction_summaries.iter().any(|s| s.emoji == reaction) {
+                                m.reaction_summaries.push(crate::reactions::ReactionSummary {
+                                    emoji: reaction.clone(),
+                                    count: 1,
+                                    ..Default::default()
+                                });
+                            }
+                            m.reactions = m.reaction_summaries.iter().map(|s| s.emoji.clone()).collect();
                         }
                         self.persist_threads_async();
                     }

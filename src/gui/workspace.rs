@@ -1177,10 +1177,21 @@ impl ZaloGuiApp {
                                     } else {
                                         "Chưa có tin nhắn".to_string()
                                     }
-                                } else if last_outgoing && !t.preview.starts_with("Bạn:") {
-                                    format!("Bạn: {}", t.preview)
                                 } else {
-                                    t.preview.clone()
+                                    let clean_prev = if t.preview.starts_with("[Hình ảnh] ")
+                                        && [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]
+                                            .iter()
+                                            .any(|ext| t.preview.to_ascii_lowercase().ends_with(ext))
+                                    {
+                                        "[Hình ảnh]"
+                                    } else {
+                                        t.preview.as_str()
+                                    };
+                                    if last_outgoing && !clean_prev.starts_with("Bạn:") {
+                                        format!("Bạn: {clean_prev}")
+                                    } else {
+                                        clean_prev.to_string()
+                                    }
                                 };
                                 let unread_n = self.unread_counts.get(&t.id).copied().unwrap_or(0);
                                 let max_snip_chars = if is_compact_w {
@@ -4034,13 +4045,32 @@ impl ZaloGuiApp {
                                         .get_mut(self.selected_thread_index)
                                         .and_then(|t| t.messages.get_mut(idx))
                                     {
-                                        if real.reactions.contains(&r.to_string()) {
-                                            real.reactions.clear();
+                                        let r_str = r.to_string();
+                                        if real.reaction_summaries.is_empty() && !real.reactions.is_empty() {
+                                            real.reaction_summaries = real.reactions.iter().map(|e| crate::reactions::ReactionSummary {
+                                                emoji: e.clone(),
+                                                count: 1,
+                                                ..Default::default()
+                                            }).collect();
+                                        }
+
+                                        let existing_idx = real.reaction_summaries.iter().position(|s| s.emoji == r_str);
+                                        if let Some(pos) = existing_idx {
+                                            if real.reaction_summaries[pos].count <= 1 {
+                                                real.reaction_summaries.remove(pos);
+                                            } else {
+                                                real.reaction_summaries[pos].count -= 1;
+                                            }
                                             self.status_msg = "Đã bỏ cảm xúc".into();
                                         } else {
-                                            real.reactions = vec![r.to_string()];
+                                            real.reaction_summaries.push(crate::reactions::ReactionSummary {
+                                                emoji: r_str.clone(),
+                                                count: 1,
+                                                ..Default::default()
+                                            });
                                             self.status_msg = format!("Đã thả cảm xúc {r}");
                                         }
+                                        real.reactions = real.reaction_summaries.iter().map(|s| s.emoji.clone()).collect();
                                     }
                                     self.persist_threads_async();
                                     if let Some(tx) = WORKER_TX.get() {

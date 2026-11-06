@@ -543,6 +543,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 let _ = gui_tx_ws.send(GuiEvent::SeenEventsReceived(seen_evs));
                                                 ctx_ws.request_repaint();
                                             }
+                                            let react_evs =
+                                                crate::reactions::parse_reaction_events(data_node);
+                                            if !react_evs.is_empty() {
+                                                let _ = gui_tx_ws
+                                                    .send(GuiEvent::ReactionEventsReceived(react_evs));
+                                                ctx_ws.request_repaint();
+                                            }
 
                                             for sync_ev in
                                                 crate::chat::extract_mobile_sync_controls(data_node)

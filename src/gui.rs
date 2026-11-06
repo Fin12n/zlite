@@ -127,6 +127,7 @@ pub enum GuiEvent {
         ts: i64,
         reaction: String,
     },
+    ReactionEventsReceived(Vec<crate::reactions::ReactionEvent>),
     MessageDeleted {
         thread_id: String,
         msg_id: String,
@@ -1317,7 +1318,9 @@ impl ZaloGuiApp {
                                     ..Default::default()
                                 }).collect();
                             }
-                            if !m.reaction_summaries.iter().any(|s| s.emoji == reaction) {
+                            if let Some(pos) = m.reaction_summaries.iter().position(|s| s.emoji == reaction) {
+                                m.reaction_summaries[pos].count += 1;
+                            } else {
                                 m.reaction_summaries.push(crate::reactions::ReactionSummary {
                                     emoji: reaction.clone(),
                                     count: 1,
@@ -1329,6 +1332,26 @@ impl ZaloGuiApp {
                         self.persist_threads_async();
                     }
                     self.status_msg = "Đã thả cảm xúc".into();
+                }
+                GuiEvent::ReactionEventsReceived(events) => {
+                    let mut any_changed = false;
+                    for ev in events {
+                        for t in self.threads.iter_mut() {
+                            for m in t.messages.iter_mut() {
+                                if (!ev.message_id.is_empty() && m.id == ev.message_id)
+                                    || (!ev.client_message_id.is_empty() && m.client_message_id == ev.client_message_id)
+                                    || (ev.ts > 0 && m.ts == ev.ts)
+                                {
+                                    if m.apply_reaction(&ev) {
+                                        any_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if any_changed {
+                        self.persist_threads_async();
+                    }
                 }
                 GuiEvent::MessageDeleted {
                     thread_id,

@@ -4063,12 +4063,8 @@ impl ZaloGuiApp {
 
                                         let existing_idx = real.reaction_summaries.iter().position(|s| s.emoji == r_str);
                                         if let Some(pos) = existing_idx {
-                                            if real.reaction_summaries[pos].count <= 1 {
-                                                real.reaction_summaries.remove(pos);
-                                            } else {
-                                                real.reaction_summaries[pos].count -= 1;
-                                            }
-                                            self.status_msg = "Đã bỏ cảm xúc".into();
+                                            real.reaction_summaries[pos].count += 1;
+                                            self.status_msg = format!("Đã thả cảm xúc {r} ({})", real.reaction_summaries[pos].count);
                                         } else {
                                             real.reaction_summaries.push(crate::reactions::ReactionSummary {
                                                 emoji: r_str.clone(),

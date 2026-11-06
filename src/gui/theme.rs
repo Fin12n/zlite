@@ -351,6 +351,50 @@ pub(super) fn matches_vn_query(haystack: &str, query_lower: &str, query_folded: 
     !query_folded.is_empty() && fold_vn_search(haystack).contains(query_folded)
 }
 
+fn paint_circular_image(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    tex: &TextureHandle,
+) {
+    let [tw, th] = tex.size();
+    let (uv_min, uv_max) = if tw == th || tw == 0 || th == 0 {
+        (Pos2::ZERO, Pos2::new(1.0, 1.0))
+    } else if tw > th {
+        let crop = (tw - th) as f32 / (2.0 * tw as f32);
+        (Pos2::new(crop, 0.0), Pos2::new(1.0 - crop, 1.0))
+    } else {
+        let crop = (th - tw) as f32 / (2.0 * th as f32);
+        (Pos2::new(0.0, crop), Pos2::new(1.0, 1.0 - crop))
+    };
+
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    let n_pts = 32;
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: center,
+        uv: Pos2::new((uv_min.x + uv_max.x) * 0.5, (uv_min.y + uv_max.y) * 0.5),
+        color: Color32::WHITE,
+    });
+    for i in 0..=n_pts {
+        let angle = (i as f32) / (n_pts as f32) * std::f32::consts::TAU;
+        let (sin_a, cos_a) = angle.sin_cos();
+        let pos = Pos2::new(center.x + radius * cos_a, center.y + radius * sin_a);
+        let u = uv_min.x + (cos_a * 0.5 + 0.5) * (uv_max.x - uv_min.x);
+        let v = uv_min.y + (sin_a * 0.5 + 0.5) * (uv_max.y - uv_min.y);
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: Pos2::new(u, v),
+            color: Color32::WHITE,
+        });
+        if i > 0 {
+            mesh.indices.push(0);
+            mesh.indices.push(i as u32);
+            mesh.indices.push((i + 1) as u32);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn paint_single_circle_avatar(
     painter: &egui::Painter,
     center: Pos2,
@@ -370,13 +414,7 @@ fn paint_single_circle_avatar(
             .unwrap_or_else(|| url.split('?').next().unwrap_or(url).to_string());
         let key = format!("ava_{}", crate::crypto::md5_hex(&file_or_base));
         if let Some(tex) = textures.get(&key) {
-            let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
-            painter.image(
-                tex.id(),
-                rect,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            paint_circular_image(painter, center, radius, tex);
             painter.circle_stroke(
                 center,
                 radius,
@@ -443,7 +481,6 @@ pub(super) fn paint_user_avatar(
     }
 
     // Parse composite group member slots (`multi:<total>;<name1>|<url1>;<name2>|<url2>;...`)
-    // or derive member slots from comma-separated group name (`"Đỗ Thành, Đtc, Hoang"`).
     let mut slots: Vec<(String, String)> = Vec::new();
     let mut total_members: usize = 0;
     if let Some(rest) = raw_ava.strip_prefix("multi:") {
@@ -459,111 +496,96 @@ pub(super) fn paint_user_avatar(
             }
         }
     }
-    if slots.is_empty() {
-        let comma_parts: Vec<&str> = name
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if comma_parts.len() >= 2 {
-            for p in comma_parts.iter().take(4) {
-                slots.push(((*p).to_string(), String::new()));
-            }
-            total_members = comma_parts.len();
-        } else {
-            let words: Vec<&str> = name.split_whitespace().filter(|w| !w.is_empty()).collect();
-            if words.len() >= 3 {
-                for w in words.iter().take(3) {
-                    slots.push(((*w).to_string(), String::new()));
-                }
-            } else {
-                slots.push((name.to_string(), String::new()));
-                slots.push(("TV".to_string(), String::new()));
-                slots.push(("N".to_string(), String::new()));
-            }
-            total_members = slots.len();
-        }
+
+    // Nếu không có slots hoặc tất cả các slot đều không có ảnh URL:
+    // Vẽ avatar nhóm chuẩn đơn với màu sắc và tên viết tắt đẹp mắt, không cắt ghép chữ li ti
+    let has_any_photo = slots.iter().any(|(_, u)| !u.is_empty());
+    if !has_any_photo {
+        paint_single_circle_avatar(
+            painter, center, radius, name, true, None, textures, loading,
+        );
+        return;
     }
+
     if total_members < slots.len() {
         total_members = slots.len();
     }
 
-    let border_col = Color32::from_rgb(24, 27, 34);
-    let n_slots = slots.len();
+    let border_col = Color32::from_rgb(26, 30, 38);
+    // Vẽ vòng tròn nền lớn chuẩn bán kính R để toàn bộ avatar nhóm nằm gọn trong hình tròn
+    painter.circle_filled(center, radius, border_col);
+    painter.circle_stroke(
+        center,
+        radius,
+        Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 24)),
+    );
+
+    let n_slots = slots.len().min(4);
     if n_slots == 2 {
-        let sub_r = (radius * 0.61).max(6.0);
-        let p1 = Pos2::new(center.x + radius - sub_r, center.y - radius + sub_r);
-        let p0 = Pos2::new(center.x - radius + sub_r, center.y + radius - sub_r);
+        let sub_r = radius * 0.46;
+        let delta = radius * 0.25;
+        let p0 = Pos2::new(center.x - delta, center.y + delta);
+        let p1 = Pos2::new(center.x + delta, center.y - delta);
         for &(pos, idx) in &[(p1, 1usize), (p0, 0usize)] {
-            painter.circle_filled(pos, sub_r + 1.2, border_col);
-            let (ref m_name, ref m_url) = slots[idx];
-            paint_single_circle_avatar(
-                painter,
-                pos,
-                sub_r,
-                m_name,
-                false,
-                if m_url.is_empty() {
-                    None
-                } else {
-                    Some(m_url.as_str())
-                },
-                textures,
-                loading,
-            );
+            if let Some((ref m_name, ref m_url)) = slots.get(idx) {
+                painter.circle_filled(pos, sub_r + 1.2, border_col);
+                paint_single_circle_avatar(
+                    painter,
+                    pos,
+                    sub_r,
+                    m_name,
+                    false,
+                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                    textures,
+                    loading,
+                );
+            }
         }
     } else if n_slots == 3 && total_members <= 3 {
-        // Zalo PC `zavatar-multi.zavatar-3`: 1 top-center (z=4), 1 bottom-left (z=3), 1 bottom-right (z=2)
-        let sub_r = (radius * 0.56).max(5.5);
-        let p_top = Pos2::new(center.x, center.y - radius + sub_r);
-        let p_bl = Pos2::new(
-            center.x - radius + sub_r + 0.5,
-            center.y + radius - sub_r - 0.5,
-        );
-        let p_br = Pos2::new(
-            center.x + radius - sub_r - 0.5,
-            center.y + radius - sub_r - 0.5,
-        );
+        // Zalo PC `zavatar-multi.zavatar-3`: 1 top-center, 1 bottom-left, 1 bottom-right
+        let sub_r = radius * 0.42;
+        let p_top = Pos2::new(center.x, center.y - radius * 0.40);
+        let p_bl = Pos2::new(center.x - radius * 0.38, center.y + radius * 0.34);
+        let p_br = Pos2::new(center.x + radius * 0.38, center.y + radius * 0.34);
         for &(pos, idx) in &[(p_br, 2usize), (p_bl, 1usize), (p_top, 0usize)] {
-            painter.circle_filled(pos, sub_r + 1.2, border_col);
-            let (ref m_name, ref m_url) = slots[idx];
-            paint_single_circle_avatar(
-                painter,
-                pos,
-                sub_r,
-                m_name,
-                false,
-                if m_url.is_empty() {
-                    None
-                } else {
-                    Some(m_url.as_str())
-                },
-                textures,
-                loading,
-            );
+            if let Some((ref m_name, ref m_url)) = slots.get(idx) {
+                painter.circle_filled(pos, sub_r + 1.2, border_col);
+                paint_single_circle_avatar(
+                    painter,
+                    pos,
+                    sub_r,
+                    m_name,
+                    false,
+                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                    textures,
+                    loading,
+                );
+            }
         }
     } else {
-        // Zalo PC `zavatar-multi.zavatar-4`: 2x2 grid (with member count badge in bottom-right if total_members >= 4)
-        let sub_r = (radius * 0.52).max(5.0);
-        let p_tl = Pos2::new(center.x - radius + sub_r, center.y - radius + sub_r);
-        let p_tr = Pos2::new(center.x + radius - sub_r, center.y - radius + sub_r);
-        let p_bl = Pos2::new(center.x - radius + sub_r, center.y + radius - sub_r);
-        let p_br = Pos2::new(center.x + radius - sub_r, center.y + radius - sub_r);
-        let show_counter = total_members > 4 || n_slots < 4;
+        // Zalo PC `zavatar-multi.zavatar-4`: 2x2 grid (với ô đếm số thành viên còn lại ở góc dưới-phải nếu > 4)
+        let sub_r = radius * 0.38;
+        let delta = radius * 0.38;
+        let p_tl = Pos2::new(center.x - delta, center.y - delta);
+        let p_tr = Pos2::new(center.x + delta, center.y - delta);
+        let p_bl = Pos2::new(center.x - delta, center.y + delta);
+        let p_br = Pos2::new(center.x + delta, center.y + delta);
+
+        let show_counter = total_members > 4;
         if show_counter {
             painter.circle_filled(p_br, sub_r + 1.2, border_col);
-            painter.circle_filled(p_br, sub_r, Color32::from_rgb(56, 65, 82));
+            painter.circle_filled(p_br, sub_r, Color32::from_rgb(52, 60, 76));
             let cnt_txt = if total_members > 99 {
                 "99+".to_string()
             } else {
-                total_members.to_string()
+                format!("+{}", total_members.saturating_sub(3))
             };
             painter.text(
                 p_br,
                 egui::Align2::CENTER_CENTER,
                 cnt_txt,
                 FontId::proportional((sub_r * 0.76).max(8.0)),
-                Color32::from_rgb(218, 226, 240),
+                Color32::from_rgb(220, 228, 242),
             );
         } else if let Some((ref m_name, ref m_url)) = slots.get(3) {
             painter.circle_filled(p_br, sub_r + 1.2, border_col);
@@ -573,15 +595,12 @@ pub(super) fn paint_user_avatar(
                 sub_r,
                 m_name,
                 false,
-                if m_url.is_empty() {
-                    None
-                } else {
-                    Some(m_url.as_str())
-                },
+                if m_url.is_empty() { None } else { Some(m_url.as_str()) },
                 textures,
                 loading,
             );
         }
+
         for &(pos, idx) in &[(p_bl, 2usize), (p_tr, 1usize), (p_tl, 0usize)] {
             if let Some((ref m_name, ref m_url)) = slots.get(idx) {
                 painter.circle_filled(pos, sub_r + 1.2, border_col);
@@ -591,11 +610,7 @@ pub(super) fn paint_user_avatar(
                     sub_r,
                     m_name,
                     false,
-                    if m_url.is_empty() {
-                        None
-                    } else {
-                        Some(m_url.as_str())
-                    },
+                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
                     textures,
                     loading,
                 );
@@ -655,6 +670,11 @@ pub mod lucide {
     pub const CHEVRON_DOWN: &str = "\u{e06d}";
     pub const USER: &str = "\u{e19f}";
     pub const NEWSPAPER: &str = "\u{e124}";
+    pub const QUOTE: &str = "\u{e239}";
+    pub const FORWARD: &str = "\u{e229}";
+    pub const SHARE_2: &str = "\u{e156}";
+    pub const TRASH_2: &str = "\u{e18e}";
+    pub const INFO: &str = "\u{e0f9}";
 }
 
 pub(super) fn draw_lucide_icon(
@@ -699,6 +719,10 @@ pub(super) fn draw_icon_video(painter: &egui::Painter, center: Pos2, size: f32, 
 
 pub(super) fn draw_icon_image(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
     draw_lucide_icon(painter, center, lucide::IMAGE, size, color);
+}
+
+pub(super) fn draw_icon_camera(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    draw_lucide_icon(painter, center, lucide::CAMERA, size, color);
 }
 
 pub(super) fn draw_icon_attachment(
@@ -781,6 +805,155 @@ pub fn load_app_icon() -> Option<egui::IconData> {
         rgba: img.into_raw(),
         width,
         height,
+    })
+}
+
+/// Render a dynamic 64x64 RGBA window/taskbar icon with a crisp anti-aliased red unread badge
+/// (`1`..`99+`) using a 3x5 bitmap pixel font renderer.
+pub fn load_app_icon_with_badge(unread_count: usize) -> Option<egui::IconData> {
+    if unread_count == 0 {
+        return load_app_icon();
+    }
+    let base = image::load_from_memory(APP_ICON_PNG).ok()?;
+    let size: u32 = 64;
+    let mut rgba = image::imageops::resize(
+        &base.to_rgba8(),
+        size,
+        size,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw();
+
+    let label = if unread_count > 99 {
+        "99+".to_string()
+    } else {
+        unread_count.to_string()
+    };
+    let chars: Vec<char> = label.chars().collect();
+
+    let blend_pixel = |buf: &mut [u8], x: i32, y: i32, r: u8, g: u8, b: u8, alpha: u8| {
+        if x < 0 || y < 0 || x >= size as i32 || y >= size as i32 || alpha == 0 {
+            return;
+        }
+        let idx = ((y as u32 * size + x as u32) * 4) as usize;
+        let src_a = alpha as f32 / 255.0;
+        let dst_a = buf[idx + 3] as f32 / 255.0;
+        let out_a = src_a + dst_a * (1.0 - src_a);
+        if out_a <= 0.0 {
+            return;
+        }
+        buf[idx] = (((r as f32) * src_a + (buf[idx] as f32) * dst_a * (1.0 - src_a)) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 1] = (((g as f32) * src_a + (buf[idx + 1] as f32) * dst_a * (1.0 - src_a))
+            / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 2] = (((b as f32) * src_a + (buf[idx + 2] as f32) * dst_a * (1.0 - src_a))
+            / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        buf[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+    };
+
+    let scale: f32 = 2.0;
+    let badge_radius: f32 = 6.5 * scale;
+    let half_span: f32 = if chars.len() >= 3 {
+        4.0 * scale
+    } else if chars.len() == 2 {
+        2.0 * scale
+    } else {
+        0.0
+    };
+    let border_w: f32 = 1.2 * scale;
+    let cx: f32 = (size as f32) - badge_radius - half_span - border_w.ceil();
+    let cy: f32 = badge_radius + border_w.floor();
+
+    let min_y = ((cy - badge_radius - border_w - 1.0).floor() as i32).max(0);
+    let max_y = ((cy + badge_radius + border_w + 2.0).ceil() as i32).min(size as i32);
+    let min_x = ((cx - half_span - badge_radius - border_w - 1.0).floor() as i32).max(0);
+    let max_x = ((cx + half_span + badge_radius + border_w + 2.0).ceil() as i32).min(size as i32);
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let fx = x as f32;
+            let fy = y as f32;
+            let clamped_x = fx.clamp(cx - half_span, cx + half_span);
+            let dist = (fx - clamped_x).hypot(fy - cy);
+            if dist <= badge_radius + border_w + 0.6 {
+                if dist <= badge_radius - 0.5 {
+                    blend_pixel(&mut rgba, x, y, 239, 56, 56, 255);
+                } else if dist <= badge_radius + 0.5 {
+                    let t = dist - (badge_radius - 0.5);
+                    let r = (239.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    let g = (56.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    let b = (56.0 * (1.0 - t) + 255.0 * t).round() as u8;
+                    blend_pixel(&mut rgba, x, y, r, g, b, 255);
+                } else if dist <= badge_radius + border_w - 0.3 {
+                    blend_pixel(&mut rgba, x, y, 255, 255, 255, 255);
+                } else {
+                    let a = ((badge_radius + border_w + 0.6 - dist) * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                    blend_pixel(&mut rgba, x, y, 255, 255, 255, a);
+                }
+            }
+        }
+    }
+
+    let glyph_rows = |ch: char| -> [u8; 5] {
+        match ch {
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+            '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+            '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+            '+' => [0b000, 0b010, 0b111, 0b010, 0b000],
+            _ => [0; 5],
+        }
+    };
+
+    let px_scale: i32 = 2;
+    let glyph_w: i32 = 3 * px_scale;
+    let glyph_h: i32 = 5 * px_scale;
+    let gap: i32 = px_scale;
+    let total_w: i32 = (chars.len() as i32) * glyph_w + ((chars.len() as i32 - 1).max(0)) * gap;
+    let start_x: i32 = (cx - (total_w as f32) * 0.5).round() as i32;
+    let start_y: i32 = (cy - (glyph_h as f32) * 0.5).round() as i32;
+
+    for (idx, ch) in chars.iter().enumerate() {
+        let rows = glyph_rows(*ch);
+        let gx = start_x + (idx as i32) * (glyph_w + gap);
+        for (r, mask) in rows.iter().enumerate() {
+            for c in 0..3_i32 {
+                if (mask >> (2 - c)) & 1 == 1 {
+                    for dy in 0..px_scale {
+                        for dx in 0..px_scale {
+                            blend_pixel(
+                                &mut rgba,
+                                gx + c * px_scale + dx,
+                                start_y + (r as i32) * px_scale + dy,
+                                255,
+                                255,
+                                255,
+                                255,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(egui::IconData {
+        rgba,
+        width: size,
+        height: size,
     })
 }
 

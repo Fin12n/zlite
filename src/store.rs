@@ -192,7 +192,14 @@ impl MessageStore {
             "INSERT INTO threads (thread_id, name, is_group, last_ts)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(thread_id) DO UPDATE SET
-                 name = excluded.name,
+                 name = CASE
+                     WHEN excluded.name IS NOT NULL AND excluded.name != ''
+                          AND excluded.name NOT LIKE 'Người dùng %'
+                          AND excluded.name NOT LIKE 'Nhóm %'
+                          AND (threads.name IS NULL OR threads.name = '' OR threads.name LIKE 'Người dùng %' OR threads.name LIKE 'Nhóm %')
+                     THEN excluded.name
+                     ELSE COALESCE(NULLIF(threads.name, ''), excluded.name)
+                 END,
                  is_group = excluded.is_group,
                  last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts)",
             params![
@@ -290,9 +297,7 @@ impl MessageStore {
                 continue;
             }
             if let Some(existing) = threads.iter_mut().find(|t| t.id == st.thread_id) {
-                if crate::chat::is_generic_thread_name(&existing.name)
-                    && !st.name.is_empty()
-                {
+                if !st.name.is_empty() && !crate::chat::is_generic_thread_name(&st.name) {
                     existing.name = st.name;
                 }
                 existing.is_group = existing.is_group || st.is_group;

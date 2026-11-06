@@ -225,6 +225,28 @@ pub enum GuiEvent {
     ProxyUpdated(Result<Option<String>, String>),
     FileDownloaded(Result<(String, String), String>),
     LoggedOut,
+    HistoryReachedStart(String),
+    AccountSwitched {
+        uin: String,
+        name: String,
+        avatar: Option<String>,
+        threads: Vec<Thread>,
+    },
+}
+
+fn phone_sync_completion_message(
+    added: usize,
+    active_threads: usize,
+    cancelled: bool,
+    error: Option<&str>,
+) -> String {
+    if let Some(err) = error {
+        return format!("⚠️ Đồng bộ thất bại: {err}");
+    }
+    let prefix = if cancelled { "Đã dừng" } else { "Đã hoàn tất" };
+    format!(
+        "{prefix} yêu cầu: {added} tin mới từ Cloud/Nhóm ({active_threads} hội thoại). Lịch sử điện thoại chưa được tải vào ứng dụng."
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +287,8 @@ struct ActiveCallOverlay {
     is_incoming_ringing: bool,
     error_code: Option<i64>,
     error_reason: Option<String>,
+    speaker_view: bool,
+    pinned_tile_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +319,7 @@ enum ContactsSubTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
+    Account,
     Privacy,
     Sync,
     Appearance,
@@ -303,7 +328,6 @@ enum SettingsTab {
     Utilities,
     Update,
 }
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppSettings {
@@ -318,6 +342,9 @@ struct AppSettings {
     show_online_status: bool,
     show_seen_status: bool,
     allow_message_from: String,
+    block_typing: bool,
+    block_delivered: bool,
+    block_seen: bool,
     allow_call_from: String,
     allow_search_by_phone: bool,
     friend_src_qr: bool,
@@ -345,6 +372,7 @@ struct AppSettings {
     // 7. Thiết bị cuộc gọi (Mic & Camera)
     selected_mic_device: String,
     selected_camera_device: String,
+    mic_gain_percent: u32,
     // 8. Quản lý hội thoại (Context menu: Ghim, Phân loại, Tắt thông báo, Ẩn)
     pinned_threads: Vec<String>,
     muted_threads: HashMap<String, i64>,
@@ -379,6 +407,9 @@ impl Default for AppSettings {
             show_birthday: "Không hiện".into(),
             show_online_status: true,
             show_seen_status: true,
+            block_typing: false,
+            block_delivered: false,
+            block_seen: false,
             allow_message_from: "Tất cả mọi người".into(),
             allow_call_from: "Bạn bè và người lạ từng liên hệ".into(),
             allow_search_by_phone: true,
@@ -402,6 +433,7 @@ impl Default for AppSettings {
             enable_sticker_keyword_search: true,
             selected_mic_device: String::new(),
             selected_camera_device: String::new(),
+            mic_gain_percent: 100,
             pinned_threads: Vec::new(),
             muted_threads: HashMap::new(),
             hidden_threads: HashSet::new(),
@@ -593,7 +625,6 @@ pub struct ZaloGuiApp {
     feed_loading_timeline: bool,
     feed_items: Vec<crate::feed::FeedItem>,
     feed_friend_profiles: Vec<crate::feed::SocialUserProfile>,
-    feed_composer_text: String,
     feed_search_query: String,
     feed_pkt_owner_id: String,
     feed_pkt_viewer_id: String,
@@ -609,6 +640,8 @@ pub struct ZaloGuiApp {
     scheduled_items: Vec<crate::scheduler::ScheduledMessage>,
     phone_sync_progress: f32,
     phone_sync_status: String,
+    last_typing_sent_at: Option<(String, std::time::Instant)>,
+    last_synced_icon_unread: Option<usize>,
 
     // Background channels
     event_rx: Receiver<GuiEvent>,
@@ -619,6 +652,8 @@ pub struct ZaloGuiApp {
     quote_jump: Option<QuoteJump>,
     ime_active: bool,
     ime_just_committed: bool,
+    history_reached_start: HashSet<String>,
+    force_scroll_to_bottom: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -659,6 +694,12 @@ impl ZaloGuiApp {
         }
         crate::media::set_selected_mic_device(&loaded_settings.selected_mic_device);
         crate::media::set_selected_camera_device(&loaded_settings.selected_camera_device);
+        crate::media::set_mic_gain_percent(loaded_settings.mic_gain_percent);
+        crate::session::set_privacy_blocker(
+            loaded_settings.block_typing,
+            loaded_settings.block_delivered,
+            loaded_settings.block_seen,
+        );
         let dark_mode = loaded_settings.theme_mode != "light";
         ThemePalette::load_with_custom_override(dark_mode).apply_to_ctx(&cc.egui_ctx);
 
@@ -833,7 +874,6 @@ impl ZaloGuiApp {
             feed_loading_timeline: false,
             feed_items: Vec::new(),
             feed_friend_profiles: Vec::new(),
-            feed_composer_text: String::new(),
             feed_search_query: String::new(),
             feed_pkt_owner_id: String::new(),
             feed_pkt_viewer_id: String::new(),
@@ -850,12 +890,16 @@ impl ZaloGuiApp {
                 .unwrap_or_default(),
             phone_sync_progress: 0.0,
             phone_sync_status: String::new(),
+            last_typing_sent_at: None,
+            last_synced_icon_unread: None,
             event_rx: rx,
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),
             quote_jump: None,
             ime_active: false,
             ime_just_committed: false,
+            history_reached_start: HashSet::new(),
+            force_scroll_to_bottom: false,
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();
@@ -959,6 +1003,10 @@ impl ZaloGuiApp {
                     if avatar.is_some() {
                         self.user_avatar = avatar;
                     }
+                    self.threads.clear();
+                    self.unread_counts.clear();
+                    self.history_reached_start.clear();
+                    self.selected_thread_index = 0;
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
                     self.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
@@ -1040,6 +1088,10 @@ impl ZaloGuiApp {
                                             new_incoming_alert = true;
                                         }
                                     }
+                                    if existing.id == self.chat_render_window.0 {
+                                        self.chat_render_window.1 += added;
+                                        self.show_toast(format!("Đã tải thêm {added} tin nhắn cũ"));
+                                    }
                                 }
                             } else if let Some(existing) = self.threads.iter_mut().find(|t| {
                                 !update_ids.contains(&t.id)
@@ -1113,6 +1165,22 @@ impl ZaloGuiApp {
                     self.qr_texture = None;
                     self.qr_status = "Đang xin mã QR mới…".into();
                     self.status_msg = "Đã đăng xuất".into();
+                }
+                GuiEvent::AccountSwitched {
+                    uin,
+                    name,
+                    avatar,
+                    threads,
+                } => {
+                    self.is_logged_in = true;
+                    self.user_uin = uin;
+                    self.user_name = name.clone();
+                    self.user_avatar = avatar;
+                    self.threads = threads;
+                    self.selected_thread_index = 0;
+                    self.status_msg = format!("Đã chuyển sang tài khoản {name}");
+                    self.show_toast(format!("Đã chuyển sang tài khoản {name}"));
+                    self.history_reached_start.clear();
                 }
                 GuiEvent::MessageSent {
                     client_message_id,
@@ -1598,6 +1666,8 @@ impl ZaloGuiApp {
                         is_incoming_ringing: true,
                         error_code: None,
                         error_reason: None,
+                        speaker_view: false,
+                        pinned_tile_idx: 0,
                     });
                     ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                         egui::UserAttentionType::Critical,
@@ -1613,6 +1683,10 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StatusUpdate(msg) => {
                     self.status_msg = msg;
+                }
+                GuiEvent::HistoryReachedStart(tid) => {
+                    self.history_reached_start.insert(tid);
+                    self.show_toast("Đã hiển thị toàn bộ lịch sử tin nhắn của cuộc trò chuyện này");
                 }
                 GuiEvent::RefreshFinished {
                     threads,
@@ -1871,19 +1945,12 @@ impl ZaloGuiApp {
                         self.settings.save();
                         self.persist_threads_async();
                     }
-                    let msg = if let Some(err) = error {
-                        format!("⚠️ Đồng bộ thất bại: {err}")
-                    } else if cancelled {
-                        format!(
-                            "Đã dừng đồng bộ (nhận {added} tin nhắn tại {active_threads} hội thoại)"
-                        )
-                    } else if added > 0 {
-                        format!(
-                            "✅ Đồng bộ hoàn tất: nhận {added} tin nhắn ({active_threads} hội thoại)"
-                        )
-                    } else {
-                        "✅ Đã đồng bộ tin nhắn & hội thoại đã ghim từ máy chủ Zalo".into()
-                    };
+                    let msg = phone_sync_completion_message(
+                        added,
+                        active_threads,
+                        cancelled,
+                        error.as_deref(),
+                    );
                     self.phone_sync_status = msg.clone();
                     self.status_msg = msg.clone();
                     self.show_toast(msg);
@@ -1935,21 +2002,6 @@ impl ZaloGuiApp {
 // Main eframe::App Implementation
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
-fn is_space_key_down() -> bool {
-    extern "C" {
-        fn CGEventSourceKeyState(state_id: i32, keycode: u16) -> bool;
-    }
-    // 0 is kCGEventSourceStateCombinedSessionState
-    // 49 (0x31) is the standard macOS virtual keycode for Spacebar (kVK_Space)
-    unsafe { CGEventSourceKeyState(0, 49) }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn is_space_key_down() -> bool {
-    false
-}
-
 impl eframe::App for ZaloGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
@@ -1961,120 +2013,10 @@ impl eframe::App for ZaloGuiApp {
             }
             std::process::exit(0);
         }
-
-        // Track IME Preedit / Composition lifecycle (macOS Telex, VNI & CJK)
-        let mut ime_commit_in_frame = false;
-        let mut ime_active = self.ime_active;
-        let was_composing = self.ime_active;
-        let mut ime_space_commit = false;
-        let space_is_down = is_space_key_down();
-        let is_macos = cfg!(target_os = "macos");
-
-        ctx.input_mut(|i| {
-            let space_in_events = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Key {
-                        key: egui::Key::Space,
-                        ..
-                    }
-                ) || matches!(
-                    e,
-                    egui::Event::Text(s) if s == " "
-                )
-            });
-            let enter_pressed = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Key {
-                        key: egui::Key::Enter,
-                        ..
-                    }
-                )
-            });
-            let non_space_text = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Text(s) if !s.trim().is_empty()
-                )
-            });
-            let mouse_clicked = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::PointerButton { .. }
-                )
-            });
-
-            for event in &mut i.events {
-                match event {
-                    egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
-                        ime_active = !text.is_empty();
-                    }
-                    egui::Event::Ime(egui::ImeEvent::Commit(ref mut text)) => {
-                        ime_commit_in_frame = true;
-                        ime_active = false;
-
-                        // macOS Vietnamese IME fix:
-                        // In Vietnamese Telex/Simple Telex on macOS, pressing Spacebar commits marked preedit
-                        // text via insertText and finishes the word. Upstream winit marks ime_state as Committed
-                        // and suppresses raw KeyboardInput for the Space key. When typing at normal speed,
-                        // keyup occurs in tens of milliseconds, so checking physical keydown is often false.
-                        // A Latin/Vietnamese IME commit that occurs while composing WITHOUT Enter, without
-                        // trailing punctuation text, and without mouse clicks was 100% committed by Spacebar.
-                        // We ensure exactly one trailing space is added so words never glue together ("dính dấu cách").
-                        let space_committed = space_is_down
-                            || space_in_events
-                            || (is_macos && was_composing && !enter_pressed && !non_space_text && !mouse_clicked);
-
-                        if space_committed
-                            && !text.is_empty()
-                            && !text.ends_with(' ')
-                            && !text.chars().any(crate::gui::theme::is_cjk)
-                        {
-                            text.push(' ');
-                            ime_space_commit = true;
-                        }
-                    }
-                    egui::Event::Ime(egui::ImeEvent::Disabled) => {
-                        ime_active = false;
-                    }
-                    _ => {}
-                }
-            }
-
-            // If a space was appended as part of IME Commit, filter out any redundant raw Space events
-            // in this frame to prevent accidental double spaces.
-            if ime_space_commit {
-                i.events.retain(|event| {
-                    !matches!(
-                        event,
-                        egui::Event::Text(s) if s == " "
-                    ) && !matches!(
-                        event,
-                        egui::Event::Key {
-                            key: egui::Key::Space,
-                            ..
-                        }
-                    )
-                });
-            }
-
-            // When IME is currently composing or committing, consume and filter Key::Enter
-            // so it doesn't cause TextEdit to blur or trigger premature message sending!
-            if ime_active || ime_commit_in_frame {
-                i.events.retain(|event| {
-                    !matches!(
-                        event,
-                        egui::Event::Key {
-                            key: egui::Key::Enter,
-                            ..
-                        }
-                    )
-                });
-            }
-        });
-        self.ime_active = ime_active;
-        self.ime_just_committed = ime_commit_in_frame;
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)) {
+            self.settings_modal_open = true;
+            self.settings_tab = SettingsTab::Privacy;
+        }
         if self.theme_dirty {
             self.palette().apply_to_ctx(ctx);
             self.theme_dirty = false;
@@ -2342,6 +2284,12 @@ impl ZaloGuiApp {
     fn render_custom_title_bar(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         let total_unread: usize = self.unread_counts.values().sum();
+        if self.last_synced_icon_unread != Some(total_unread) {
+            self.last_synced_icon_unread = Some(total_unread);
+            if let Some(icon) = crate::gui::theme::load_app_icon_with_badge(total_unread) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(icon))));
+            }
+        }
 
         egui::TopBottomPanel::top("custom_title_bar")
             .exact_height(32.0)
@@ -2864,7 +2812,7 @@ impl ZaloGuiApp {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer_semver;
+    use super::{is_newer_semver, phone_sync_completion_message};
 
     #[test]
     fn sent_message_reconciles_when_server_push_arrives_first() {
@@ -2942,5 +2890,19 @@ mod tests {
         assert!(is_newer_semver("V1.0.0-beta.1", "0.9.9"));
         assert!(!is_newer_semver("v0.0.1", "0.0.1"));
         assert!(!is_newer_semver("0.0.1", "0.0.2"));
+    }
+
+    #[test]
+    fn phone_sync_completion_does_not_claim_phone_messages_were_imported() {
+        let none = phone_sync_completion_message(0, 0, false, None);
+        assert!(none.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
+        assert!(none.contains("0 tin mới từ Cloud/Nhóm"));
+
+        let cloud = phone_sync_completion_message(12, 3, false, None);
+        assert!(cloud.contains("12 tin mới từ Cloud/Nhóm (3 hội thoại)"));
+        assert!(cloud.contains("Lịch sử điện thoại chưa được tải vào ứng dụng"));
+
+        let failed = phone_sync_completion_message(0, 0, false, Some("network"));
+        assert!(failed.contains("Đồng bộ thất bại: network"));
     }
 }

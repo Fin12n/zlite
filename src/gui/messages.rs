@@ -701,7 +701,10 @@ pub(super) fn read_clipboard_image_to_png(
         let script = format!(
             "try\nset img to the clipboard as «class PNGf»\nset fp to open for access (POSIX file \"{tmp_str}\") with write permission\nset eof fp to 0\nwrite img to fp\nclose access fp\nreturn \"ok\"\non error\nreturn \"none\"\nend try"
         );
-        if let Ok(out) = std::process::Command::new("osascript").args(["-e", &script]).output() {
+        if let Ok(out) = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+        {
             let s = String::from_utf8_lossy(&out.stdout);
             if s.trim() == "ok" && tmp.exists() {
                 if let Ok(bytes) = std::fs::read(&tmp) {
@@ -1109,7 +1112,8 @@ fn render_markdown_inline_rich(
                 || after.starts_with("Tat ca")
                 || after.starts_with("tat ca");
             if is_all {
-                let all_len = if after.starts_with("Tất cả") || after.starts_with("tất cả") {
+                let all_len = if after.starts_with("Tất cả") || after.starts_with("tất cả")
+                {
                     "Tất cả".len()
                 } else if after.starts_with("Tat ca") || after.starts_with("tat ca") {
                     6
@@ -1159,7 +1163,23 @@ fn render_markdown_inline_rich(
             for (idx, ch) in after.char_indices() {
                 if ch == '\n'
                     || ch == '\r'
-                    || matches!(ch, ',' | '.' | '!' | '?' | ':' | ';' | '(' | ')' | '[' | ']' | '"' | '\'' | '`' | '<' | '>')
+                    || matches!(
+                        ch,
+                        ',' | '.'
+                            | '!'
+                            | '?'
+                            | ':'
+                            | ';'
+                            | '('
+                            | ')'
+                            | '['
+                            | ']'
+                            | '"'
+                            | '\''
+                            | '`'
+                            | '<'
+                            | '>'
+                    )
                 {
                     break;
                 }
@@ -1175,7 +1195,9 @@ fn render_markdown_inline_rich(
                 end_idx = idx + ch.len_utf8();
             }
             let candidate_name = after[..end_idx].trim_end();
-            if !candidate_name.is_empty() && candidate_name.chars().next().unwrap().is_alphanumeric() {
+            if !candidate_name.is_empty()
+                && candidate_name.chars().next().unwrap().is_alphanumeric()
+            {
                 let mention_len = 1 + candidate_name.len();
                 let mention_str = &rest[..mention_len];
                 job.append(
@@ -1537,8 +1559,14 @@ pub(super) fn render_message_body(
                         .show(ui, |ui| {
                             ui.set_min_width(ph_w);
                             ui.vertical_centered(|ui| {
-                                let (ir, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-                                draw_icon_image(ui.painter(), ir.center(), 22.0, text_col.linear_multiply(0.4));
+                                let (ir, _) =
+                                    ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                                draw_icon_image(
+                                    ui.painter(),
+                                    ir.center(),
+                                    22.0,
+                                    text_col.linear_multiply(0.4),
+                                );
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("Ảnh đã hết hạn trên Zalo")
@@ -1580,7 +1608,11 @@ pub(super) fn render_message_body(
                         Rounding::same(12.0),
                         Stroke::new(
                             if resp.hovered() { 1.6_f32 } else { 1.0_f32 },
-                            if resp.hovered() { pal.primary } else { pal.border },
+                            if resp.hovered() {
+                                pal.primary
+                            } else {
+                                pal.border
+                            },
                         ),
                     );
                     if resp.hovered() {
@@ -1589,7 +1621,8 @@ pub(super) fn render_message_body(
                             Rounding::same(12.0),
                             Color32::from_rgba_unmultiplied(6, 10, 20, 88),
                         );
-                        let pill_r = Rect::from_center_size(resp.rect.center(), Vec2::new(108.0, 26.0));
+                        let pill_r =
+                            Rect::from_center_size(resp.rect.center(), Vec2::new(108.0, 26.0));
                         ui.painter().rect_filled(
                             pill_r,
                             Rounding::same(13.0),
@@ -1617,7 +1650,8 @@ pub(super) fn render_message_body(
                 // Loading / Placeholder frame with visual image icon and loading feedback
                 let disp_w = max_text_width.clamp(200.0, 280.0);
                 let disp_h = 150.0_f32;
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(disp_w, disp_h), Sense::click());
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(disp_w, disp_h), Sense::click());
                 let is_hover = resp.hovered();
                 let bg_col = if is_hover {
                     text_col.linear_multiply(0.09)
@@ -1626,10 +1660,19 @@ pub(super) fn render_message_body(
                 };
                 let stroke_col = if is_hover { pal.primary } else { pal.border };
                 ui.painter().rect_filled(rect, Rounding::same(12.0), bg_col);
-                ui.painter().rect_stroke(rect, Rounding::same(12.0), Stroke::new(1.0_f32, stroke_col));
+                ui.painter().rect_stroke(
+                    rect,
+                    Rounding::same(12.0),
+                    Stroke::new(1.0_f32, stroke_col),
+                );
 
                 let icon_center = rect.center() - Vec2::new(0.0, 14.0);
-                draw_icon_image(ui.painter(), icon_center, 26.0, text_col.linear_multiply(0.45));
+                draw_icon_image(
+                    ui.painter(),
+                    icon_center,
+                    26.0,
+                    text_col.linear_multiply(0.45),
+                );
                 let label_text = if title_label != "Hình ảnh" {
                     title_label.clone()
                 } else {
@@ -1920,7 +1963,8 @@ pub(super) fn photo_primary_url(msg: &ChatMessage) -> Option<&str> {
     if let Some(pos) = t.find("https://").or_else(|| t.find("http://")) {
         let after = &t[pos..];
         let end = after.find(char::is_whitespace).unwrap_or(after.len());
-        let candidate = after[..end].trim_end_matches(|c: char| matches!(c, ')' | ']' | ',' | ';' | '>'));
+        let candidate =
+            after[..end].trim_end_matches(|c: char| matches!(c, ')' | ']' | ',' | ';' | '>'));
         if crate::chat::is_zalo_photo_cdn_url(candidate) {
             return Some(candidate);
         }
@@ -2308,9 +2352,10 @@ pub(super) fn render_chat_bubble(
                                         crate::message_model::DeliveryState::Pending => {
                                             (format!("{} · Đang gửi…", msg.time), pal.text_muted)
                                         }
-                                        crate::message_model::DeliveryState::Failed => {
-                                            (format!("{} · Lỗi gửi", msg.time), Color32::from_rgb(239, 68, 68))
-                                        }
+                                        crate::message_model::DeliveryState::Failed => (
+                                            format!("{} · Lỗi gửi", msg.time),
+                                            Color32::from_rgb(239, 68, 68),
+                                        ),
                                         _ => {
                                             (format!("{} · Đã nhận", msg.time), pal.bubble_out_meta)
                                         }
@@ -2318,9 +2363,7 @@ pub(super) fn render_chat_bubble(
                                 } else {
                                     (msg.time.clone(), pal.bubble_out_meta)
                                 };
-                                ui.label(
-                                    RichText::new(status_str).size(11.0).color(status_col),
-                                );
+                                ui.label(RichText::new(status_str).size(11.0).color(status_col));
                             }
                         });
                     });
@@ -2512,9 +2555,12 @@ pub(super) enum BubbleAction {
     Mention(String),
     JumpToQuoted(String),
     Forward,
+    /// Open the "who reacted" dialog for this message.
+    ShowReactions,
     React(&'static str),
     TogglePin,
     ToggleStar,
+    ScheduleReminder,
     DeleteForMe,
     RecallForEveryone,
     CallAgain {
@@ -2533,12 +2579,7 @@ pub(super) enum BubbleAction {
     },
 }
 
-fn menu_item(
-    ui: &mut egui::Ui,
-    icon: &str,
-    label: &str,
-    text_color: Color32,
-) -> egui::Response {
+fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) -> egui::Response {
     let text = RichText::new(format!("{icon}   {label}"))
         .size(13.0)
         .color(text_color);
@@ -2563,7 +2604,9 @@ pub(super) fn bubble_context_menu(
     let open_time_key = Id::new("bubble_context_menu_open_time");
     let this_key = format!("{}_{}", msg.id, msg.ts);
 
-    let pointer_pos = ui.ctx().input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
+    let pointer_pos = ui
+        .ctx()
+        .input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
     let in_bubble = pointer_pos.map_or(false, |p| bubble.rect.contains(p));
 
     let secondary_clicked = ui.ctx().input(|i| {
@@ -2584,7 +2627,9 @@ pub(super) fn bubble_context_menu(
     }
 
     let active_menu: Option<(String, Pos2, usize)> = ui.ctx().data(|d| d.get_temp(ctx_menu_key));
-    let is_this_active = active_menu.as_ref().map_or(false, |(k, _, _)| k == &this_key);
+    let is_this_active = active_menu
+        .as_ref()
+        .map_or(false, |(k, _, _)| k == &this_key);
 
     if !is_this_active {
         return None;
@@ -2598,8 +2643,14 @@ pub(super) fn bubble_context_menu(
     let menu_w = 190.0_f32;
     let menu_h = 280.0_f32;
     let pos = Pos2::new(
-        menu_pos.x.clamp(screen.left() + 8.0, (screen.right() - menu_w - 8.0).max(screen.left() + 8.0)),
-        menu_pos.y.clamp(screen.top() + 8.0, (screen.bottom() - menu_h - 8.0).max(screen.top() + 8.0)),
+        menu_pos.x.clamp(
+            screen.left() + 8.0,
+            (screen.right() - menu_w - 8.0).max(screen.left() + 8.0),
+        ),
+        menu_pos.y.clamp(
+            screen.top() + 8.0,
+            (screen.bottom() - menu_h - 8.0).max(screen.top() + 8.0),
+        ),
     );
 
     egui::Area::new(Id::new(("active_ctx_menu_area", idx, msg.ts, &msg.id)))
@@ -2665,10 +2716,19 @@ pub(super) fn bubble_context_menu(
                         close_menu = true;
                     }
 
+                    // 5b. Hẹn giờ / Nhắc hẹn cho tin nhắn này (#94)
+                    if menu_item(ui, lucide::BELL, "Hẹn giờ / Nhắc hẹn", pal.text_primary).clicked()
+                    {
+                        action = Some(BubbleAction::ScheduleReminder);
+                        close_menu = true;
+                    }
+
                     // 6. Nếu là ảnh: Xem ảnh phóng to
                     if is_zalo_photo_message(msg) {
                         if let Some(thumb_url) = photo_primary_url(msg) {
-                            if menu_item(ui, lucide::SEARCH, "Xem ảnh phóng to", pal.text_primary).clicked() {
+                            if menu_item(ui, lucide::SEARCH, "Xem ảnh phóng to", pal.text_primary)
+                                .clicked()
+                            {
                                 action = Some(BubbleAction::OpenImagePopup {
                                     tex_key: format!("thumb_{}", crate::crypto::md5_hex(thumb_url)),
                                     full_url: msg
@@ -2710,7 +2770,8 @@ pub(super) fn bubble_context_menu(
                             } else {
                                 format!("Lưu \"{resolved_name}\"")
                             };
-                            if menu_item(ui, lucide::PAPERCLIP, &label, pal.text_primary).clicked() {
+                            if menu_item(ui, lucide::PAPERCLIP, &label, pal.text_primary).clicked()
+                            {
                                 action = Some(BubbleAction::DownloadFile {
                                     url: url.to_string(),
                                     file_name: resolved_name,
@@ -2727,12 +2788,9 @@ pub(super) fn bubble_context_menu(
                         && msg.text.trim() != "[Tin nhắn đã thu hồi]"
                         && !msg.text.starts_with("[Đã thu hồi]")
                     {
-                        if menu_item(
-                            ui,
-                            lucide::BAN,
-                            "Thu hồi",
-                            Color32::from_rgb(249, 115, 22),
-                        ).clicked() {
+                        if menu_item(ui, lucide::BAN, "Thu hồi", Color32::from_rgb(249, 115, 22))
+                            .clicked()
+                        {
                             action = Some(BubbleAction::RecallForEveryone);
                             close_menu = true;
                         }
@@ -2744,14 +2802,19 @@ pub(super) fn bubble_context_menu(
                         lucide::TRASH_2,
                         "Xóa chỉ ở phía tôi",
                         Color32::from_rgb(239, 68, 68),
-                    ).clicked() {
+                    )
+                    .clicked()
+                    {
                         action = Some(BubbleAction::DeleteForMe);
                         close_menu = true;
                     }
 
                     let menu_rect = ui.min_rect();
-                    let pointer_pos = ui.ctx().input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
-                    let open_time: f64 = ui.ctx().data(|d| d.get_temp(open_time_key)).unwrap_or(0.0);
+                    let pointer_pos = ui
+                        .ctx()
+                        .input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
+                    let open_time: f64 =
+                        ui.ctx().data(|d| d.get_temp(open_time_key)).unwrap_or(0.0);
                     if ui.input(|i| i.time) > open_time + 0.05 {
                         let pressed = ui.ctx().input(|i| i.pointer.any_pressed());
                         if pressed {
@@ -2769,7 +2832,8 @@ pub(super) fn bubble_context_menu(
         });
 
     if close_menu {
-        ui.ctx().data_mut(|d| d.remove::<(String, Pos2, usize)>(ctx_menu_key));
+        ui.ctx()
+            .data_mut(|d| d.remove::<(String, Pos2, usize)>(ctx_menu_key));
         ui.ctx().request_repaint();
     }
 
@@ -2856,7 +2920,8 @@ pub(super) fn render_hover_reaction_bar(
 ) -> Option<BubbleAction> {
     // Suppress hover bar if any context menu is open
     let ctx_menu_open: bool = ui.ctx().data(|d| {
-        d.get_temp::<(String, Pos2, usize)>(Id::new("active_bubble_context_menu")).is_some()
+        d.get_temp::<(String, Pos2, usize)>(Id::new("active_bubble_context_menu"))
+            .is_some()
     });
     if ctx_menu_open || ui.memory(|m| m.any_popup_open()) {
         return None;
@@ -2889,21 +2954,44 @@ pub(super) fn render_hover_reaction_bar(
     let hover_id = Id::new("active_hover_reaction_bubble");
     let msg_key = format!("{}_{}", msg.id, msg.ts);
 
-    let pointer_pos = ui.ctx().input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
+    let pointer_pos = ui
+        .ctx()
+        .input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
     let in_hover_zone = pointer_pos.map_or(false, |p| hover_zone.contains(p));
-    let in_bubble = pointer_pos.map_or(false, |p| bubble_rect.expand2(Vec2::new(4.0, 4.0)).contains(p));
+    let in_bubble = pointer_pos.map_or(false, |p| {
+        bubble_rect.expand2(Vec2::new(4.0, 4.0)).contains(p)
+    });
 
+    // Active hover state: (message key, bar rect, frame it was last shown). The bar floats over the
+    // previous message, so without the rect a neighbour's bubble under the bar stole the hover and
+    // the bar vanished as soon as the pointer reached it.
+    let hover_state_id = hover_id.with("state");
+    let frame_now = ui.ctx().cumulative_pass_nr();
+    let active_state: Option<(String, Rect, u64)> = ui.ctx().data(|d| d.get_temp(hover_state_id));
     let active_key: Option<String> = ui.ctx().data(|d| d.get_temp(hover_id));
+
+    let pointer_on_other_bar = match (&active_state, pointer_pos) {
+        (Some((key, rect, seen)), Some(p)) => {
+            key != &msg_key
+                && frame_now.saturating_sub(*seen) <= 2
+                && rect.expand2(Vec2::new(10.0, 10.0)).contains(p)
+        }
+        _ => false,
+    };
 
     let should_show = if active_key.as_deref() == Some(&msg_key) {
         if in_hover_zone {
             true
         } else {
-            ui.ctx().data_mut(|d| d.remove::<String>(hover_id));
+            ui.ctx().data_mut(|d| {
+                d.remove::<String>(hover_id);
+                d.remove::<(String, Rect, u64)>(hover_state_id);
+            });
             false
         }
-    } else if in_bubble {
-        ui.ctx().data_mut(|d| d.insert_temp(hover_id, msg_key.clone()));
+    } else if in_bubble && !pointer_on_other_bar {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(hover_id, msg_key.clone()));
         true
     } else {
         false
@@ -2912,6 +3000,8 @@ pub(super) fn render_hover_reaction_bar(
     if !should_show {
         return None;
     }
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(hover_state_id, (msg_key.clone(), bar_rect, frame_now)));
 
     let mut action = None;
 
@@ -2940,16 +3030,14 @@ pub(super) fn render_hover_reaction_bar(
 
                         for &(code, key, tooltip) in &REACTION_LIST {
                             let btn_resp = if let Some(tex) = emoji_textures.get(key) {
-                                let img = egui::Image::new(tex).fit_to_exact_size(Vec2::splat(20.0));
-                                ui.add(
-                                    egui::ImageButton::new(img)
-                                        .rounding(Rounding::same(6.0))
-                                )
+                                let img =
+                                    egui::Image::new(tex).fit_to_exact_size(Vec2::splat(20.0));
+                                ui.add(egui::ImageButton::new(img).rounding(Rounding::same(6.0)))
                             } else {
                                 ui.add(
                                     egui::Button::new(RichText::new(code).size(16.0))
                                         .fill(Color32::TRANSPARENT)
-                                        .rounding(Rounding::same(6.0))
+                                        .rounding(Rounding::same(6.0)),
                                 )
                             };
 
@@ -3026,7 +3114,8 @@ pub(super) fn render_reactions(
         return None;
     }
 
-    let mut action = None;
+    // Clicking the summary pill opens the "who reacted" dialog.
+    let mut action: Option<BubbleAction> = None;
     ui.add_space(3.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
@@ -3084,62 +3173,74 @@ pub(super) fn render_reactions(
                     }
                 }
             }
+            // Most used first, so the pill shows the dominant icons.
+            items.sort_by(|a, b| b.1.cmp(&a.1));
+            let total: u64 = items.iter().map(|(_, c)| *c).sum();
 
-            for (pill_idx, (emoji, count)) in items.into_iter().enumerate() {
-                let key = emoji_to_tex_key(&emoji);
-                let h_pad = 6.0;
-                let fr = egui::Frame::none()
+            if total > 0 {
+                // One compact pill like Zalo: up to 3 icons + the total. Separate pills per icon
+                // grew wider than a sticker bubble and were clipped at the window edge.
+                let fr_resp = egui::Frame::none()
                     .fill(pal.bg_elevated)
                     .stroke(Stroke::new(1.0_f32, pal.border))
                     .rounding(Rounding::same(11.0))
-                    .inner_margin(Margin::symmetric(h_pad, 2.5));
-
-                let fr_resp = ui.push_id(pill_idx, |ui| {
-                    fr.show(ui, |ui| {
+                    .inner_margin(Margin::symmetric(6.0, 2.5))
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-                            if let Some(tex) = emoji_textures.get(key) {
-                                let img = egui::Image::new(tex).fit_to_exact_size(Vec2::splat(16.0));
-                                ui.add(img);
-                            } else {
-                                ui.label(RichText::new(&emoji).size(13.0));
+                            ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                            for (emoji, _) in items.iter().take(3) {
+                                let key = emoji_to_tex_key(emoji);
+                                if let Some(tex) = emoji_textures.get(key) {
+                                    ui.add(
+                                        egui::Image::new(tex).fit_to_exact_size(Vec2::splat(16.0)),
+                                    );
+                                } else {
+                                    ui.label(RichText::new(emoji).size(13.0));
+                                }
                             }
+                            ui.add_space(2.0);
                             ui.label(
-                                RichText::new(count.to_string())
+                                RichText::new(total.to_string())
                                     .size(11.5)
                                     .color(pal.text_primary)
                                     .strong(),
                             );
                         });
                     })
-                    .response
-                })
-                .inner;
-
-                let btn_resp = ui.interact(
+                    .response;
+                let pill_resp = ui.interact(
                     fr_resp.rect,
-                    Id::new(("react_pill", &msg.id, msg.ts, pill_idx, &emoji)),
+                    Id::new(("react_pill", &msg.id, msg.ts)),
                     Sense::click(),
                 );
-                if btn_resp.hovered() {
-                    ui.painter().rect_stroke(
-                        fr_resp.rect,
-                        Rounding::same(11.0),
-                        Stroke::new(1.2_f32, pal.primary),
-                    );
+                if pill_resp.clicked() {
+                    action = Some(BubbleAction::ShowReactions);
                 }
-                let clicked = btn_resp.clicked();
-                btn_resp
+                pill_resp
                     .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text(format!("Cảm xúc {emoji} ({count}) — Bấm để thả hoặc bỏ"));
-                if clicked {
-                    for &(code, k, _) in &REACTION_LIST {
-                        if k == key || code == emoji.as_str() {
-                            action = Some(BubbleAction::React(code));
-                            break;
-                        }
-                    }
-                }
+                    .on_hover_ui(|ui| {
+                        // Per-reaction breakdown with the real icons instead of plain text.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(10.0, 0.0);
+                            for (emoji, count) in &items {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
+                                    match emoji_textures.get(emoji_to_tex_key(emoji)) {
+                                        Some(tex) => {
+                                            ui.add(
+                                                egui::Image::new(tex)
+                                                    .fit_to_exact_size(Vec2::splat(18.0)),
+                                            );
+                                        }
+                                        None => {
+                                            ui.label(RichText::new(emoji).size(14.0));
+                                        }
+                                    }
+                                    ui.label(RichText::new(count.to_string()).size(12.5).strong());
+                                });
+                            }
+                        });
+                    });
             }
         }
     });
@@ -3313,7 +3414,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     let _ = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3343,7 +3445,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     let _ = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3373,7 +3476,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     let _ = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3397,7 +3501,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     let _ = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3442,7 +3547,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     let _ = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3473,7 +3579,8 @@ mod quote_navigation_tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let bubble_resp = ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
+                    let bubble_resp =
+                        ui.interact(bubble_rect, Id::new("dummy_bubble"), Sense::hover());
                     action = bubble_context_menu(
                         ui,
                         &bubble_resp,
@@ -3640,6 +3747,9 @@ mod quote_navigation_tests {
             text: "[Hình ảnh] Xem ảnh này nè".into(),
             ..Default::default()
         };
-        assert_eq!(extract_photo_user_caption(&real_caption_msg), Some("Xem ảnh này nè"));
+        assert_eq!(
+            extract_photo_user_caption(&real_caption_msg),
+            Some("Xem ảnh này nè")
+        );
     }
 }

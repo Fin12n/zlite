@@ -124,6 +124,9 @@ pub enum WorkerCmd {
         is_on_mic: bool,
         is_on_cam: bool,
     },
+    InviteGroupCallMembers {
+        user_ids: Vec<String>,
+    },
     EndCall,
     AddFriend {
         user_id: String,
@@ -514,6 +517,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     .await
                                     {
                                         Ok(Some(ev)) => {
+                                            crate::reactions::trace_ws_payload(
+                                                ev.cmd,
+                                                ev.sub_cmd,
+                                                &ev.payload,
+                                            );
                                             let data_node = ev
                                                 .payload
                                                 .get("data")
@@ -683,21 +691,56 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         });
                                                     }
                                                 }
+                                                if let Ok(known) = KNOWN_THREADS.lock() {
+                                                    for (id, name, is_group) in known.iter() {
+                                                        if !ws_threads.iter().any(|t| &t.id == id) {
+                                                            ws_threads.push(Thread {
+                                                                presentation: Default::default(),
+                                                                unread: Default::default(),
+                                                                id: id.clone(),
+                                                                name: name.clone(),
+                                                                preview: String::new(),
+                                                                time: String::new(),
+                                                                avatar: None,
+                                                                is_group: *is_group,
+                                                                messages: Vec::new(),
+                                                            });
+                                                        }
+                                                    }
+                                                }
                                                 crate::chat::merge_previews(
                                                     &mut ws_threads,
                                                     &ev.payload,
                                                 );
                                                 ws_threads.retain(|t| !t.messages.is_empty());
                                                 if !ws_threads.is_empty() {
-                                                    crate::chat::resolve_thread_names(
-                                                        &s_snap,
-                                                        &mut ws_threads,
-                                                    )
-                                                    .await;
+                                                    // Deliver incoming messages to UI immediately (0ms network wait)
                                                     let _ = gui_tx_ws.send(
-                                                        GuiEvent::ThreadsUpdated(ws_threads),
+                                                        GuiEvent::ThreadsUpdated(ws_threads.clone()),
                                                     );
                                                     ctx_ws.request_repaint();
+                                                    let needs_resolve = ws_threads.iter().any(|t| {
+                                                        t.name.is_empty()
+                                                            || t.name.starts_with("Người dùng ")
+                                                            || crate::chat::is_generic_thread_name(&t.name)
+                                                    });
+                                                    if needs_resolve {
+                                                        let s_bg = s_snap.clone();
+                                                        let gui_tx_bg = gui_tx_ws.clone();
+                                                        let ctx_bg = ctx_ws.clone();
+                                                        tokio::spawn(async move {
+                                                            let mut resolved = ws_threads;
+                                                            crate::chat::resolve_thread_names(
+                                                                &s_bg,
+                                                                &mut resolved,
+                                                            )
+                                                            .await;
+                                                            let _ = gui_tx_bg.send(
+                                                                GuiEvent::ThreadsUpdated(resolved),
+                                                            );
+                                                            ctx_bg.request_repaint();
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
@@ -1605,11 +1648,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         None => {
                                             temp_threads.retain(|t| !t.messages.is_empty());
                                             if !temp_threads.is_empty() {
-                                                crate::chat::resolve_thread_names(
-                                                    &s,
-                                                    &mut temp_threads,
-                                                )
-                                                .await;
+                                                // Deliver polled messages to UI immediately without blocking on profile HTTP
+                                                let _ = gui_tx_clone
+                                                    .send(GuiEvent::ThreadsUpdated(temp_threads.clone()));
+                                                ctx_clone.request_repaint();
+
+                                                let needs_resolve = temp_threads.iter().any(|t| {
+                                                    t.name.is_empty()
+                                                        || t.name.starts_with("Người dùng ")
+                                                        || crate::chat::is_generic_thread_name(&t.name)
+                                                });
+                                                if needs_resolve {
+                                                    crate::chat::resolve_thread_names(
+                                                        &s,
+                                                        &mut temp_threads,
+                                                    )
+                                                    .await;
+                                                    let _ = gui_tx_clone
+                                                        .send(GuiEvent::ThreadsUpdated(temp_threads.clone()));
+                                                    ctx_clone.request_repaint();
+                                                }
                                                 let rules = crate::api_mcp::load_autoreply_rules();
                                                 if rules.iter().any(|r| r.enabled) {
                                                     for t in &temp_threads {
@@ -1639,9 +1697,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         }
                                                     }
                                                 }
-                                                let _ = gui_tx_clone
-                                                    .send(GuiEvent::ThreadsUpdated(temp_threads));
-                                                ctx_clone.request_repaint();
                                             }
                                         }
                                     }
@@ -2814,6 +2869,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             call_bridge.set_media_state(is_on_mic, is_on_cam);
                             egui_ctx.request_repaint();
                         }
+                        WorkerCmd::InviteGroupCallMembers { user_ids } => {
+                            call_bridge.invite_group_members(user_ids);
+                            egui_ctx.request_repaint();
+                        }
                         WorkerCmd::EndCall => {
                             call_bridge.end_call();
                             let _ = gui_tx.send(GuiEvent::CallStateChanged("free".into()));
@@ -3763,10 +3822,7 @@ async fn download_attachment_with_original_name(
     .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
 }
 
-pub(crate) fn capture_screen_interactive(
-    gui_tx: crate::gui::GuiTx,
-    ctx: egui::Context,
-) {
+pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("powershell")
@@ -3839,7 +3895,9 @@ pub(crate) fn capture_screen_interactive(
             }
         }
         let _ = std::fs::remove_file(&temp_path);
-        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate("Đã huỷ chụp màn hình".into()));
+        let _ = gui_tx.send(crate::gui::GuiEvent::StatusUpdate(
+            "Đã huỷ chụp màn hình".into(),
+        ));
         ctx.request_repaint();
     }
 }

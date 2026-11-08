@@ -3151,7 +3151,7 @@ pub(super) fn render_chat_bubble(
                 .max(measure(desc, 12.3))
                 .max(measure(&dom, 12.6))
                 + 8.0;
-            w.clamp(135.0, max_text_width.min(340.0)).ceil()
+            w.clamp(135.0, max_text_width.min(340.0).max(135.0)).ceil()
         }
     } else {
         let display_str = if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
@@ -4098,12 +4098,16 @@ pub(super) fn render_hover_reaction_bar(
 
     let clip_right = ui.clip_rect().right();
     let clip_left = ui.clip_rect().left();
+    // Vùng hẹp hơn bar (drawer mở + cửa sổ nhỏ): min>max sẽ panic f32::clamp.
+    // Không đủ chỗ thì dính sát mép trái, bar tràn ra cũng không crash.
+    let lo = clip_left + 8.0;
+    let hi = (clip_right - bar_w - 8.0).max(lo);
 
     let x = if outgoing {
-        (bubble_rect.right() - bar_w).clamp(clip_left + 8.0, clip_right - bar_w - 8.0)
+        (bubble_rect.right() - bar_w).clamp(lo, hi)
     } else {
         let desired_x = (bubble_rect.right() - bar_w).max(bubble_rect.left());
-        desired_x.clamp(clip_left + 8.0, clip_right - bar_w - 8.0)
+        desired_x.clamp(lo, hi)
     };
 
     // If there is enough room above the bubble, place above; otherwise place below

@@ -7178,14 +7178,12 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
     }
     let sync_id = crate::param_cipher::random_hex(32);
     let temp_key = crate::history_sync::latest_mobile_temp_key();
-    // Sync V2 BẮT BUỘC có keypair thật từ Node+WASM. Trước đây fallback sinh
-    // khóa giả (sha256 + prefix 0x05, không có private key) khiến điện thoại mã
-    // hoá vào khóa vô chủ, PC không bao giờ giải mã được (#108, #116).
-    // Fail rõ ở đây thay vì gửi request rác.
+    // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
+    // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     let keys = crate::history_sync::generate_sync_v2_keys().map_err(|e| {
         anyhow::anyhow!(
-            "Không sinh được khóa Sync V2 (cần Node.js + file WASM Zalo): {e}. \
-             Cài Node.js và kiểm tra scripts/sync_v2_helper.js"
+            "Không sinh được khóa Sync V2: {e}. \
+             Cài Zalo PC hoặc đặt CTDOZLITE_ZPROTO_WASM trỏ tới file WASM"
         )
     })?;
     let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);

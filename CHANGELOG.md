@@ -19,6 +19,31 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 - **Sửa lỗi ký tự ô vuông (Tofu) và thiết kế lại popup thông báo:** Thay thế toàn bộ ký tự Unicode checkmark `✓` và dấu đóng `✕` không được font hỗ trợ bằng icon vector Lucide (`lucide::CHECK`, `lucide::X`). Mở rộng kích thước, padding và chiều cao thanh nhập liệu trong popup thông báo nổi góc màn hình.
 - **Hợp nhất cảm xúc tin nhắn (Reaction):** Gộp các phản ứng cùng loại emoji thành một biểu tượng duy nhất kèm số lượng tổng, bổ sung hộp thoại chi tiết xem danh sách người thả cảm xúc.
 
+## [0.0.9] - 2026-11-08
+
+### Added (Tính năng mới & Cập nhật)
+- **Họp nhóm Zavi SFU trực tiếp (`src/call.rs`, `src/gui/workspace.rs`):** Tích hợp nút gọi nhóm "Họp Zavi" trên header thanh công cụ nhóm, hỗ trợ báo hiệu và kết nối luồng hội nghị đa điểm Zavi.
+- **Popup thông báo nổi góc màn hình (Corner Notification) & Âm thanh báo (`src/gui/modals.rs`, `src/media.rs`):** Hiển thị thẻ thông báo tin nhắn mới ngoài desktop kèm nút mở chat nhanh, trả lời trực tiếp từ thông báo và phát âm thanh chuông báo tin nhắn (`play_notification_chime`).
+- **Nút cuộn nhanh xuống tin nhắn mới nhất (`src/gui/workspace.rs`):** Tự động hiển thị nút mũi tên trôi ở góc dưới bên phải khung chat khi cuộn lên xem tin nhắn cũ, bấm để nhảy tức thì về tin nhắn mới nhất và triệt tiêu hiện tượng giật hình (flicker).
+- **Hỗ trợ ghim tin nhắn cá nhân và đánh dấu sao cục bộ:** Bổ sung trường `is_pinned`, `is_starred` trong bong bóng tin nhắn và thanh thông báo tin ghim ở đầu cuộc trò chuyện.
+
+### Fixed (Sửa lỗi)
+- **Sửa lỗi đơ cuộc gọi video (Video call freeze):** Tinh chỉnh tiến trình bắt tay ZRTP và bộ đệm RTP/RTCP của luồng webcam/video, tự động đóng màn hình gọi khi đối phương đã nghe máy ở thiết bị khác.
+- **Bảo mật & Tránh lộ tên file tạm:** Sửa lỗi đặt tên ảnh dán từ clipboard (`clip_preview_*`), ngăn ngừa rủi ro SSRF và loại trừ tệp lưu khóa riêng tư `sync_v2_keys.json` khỏi kho Git.
+- **Tập tin đính kèm bất đồng bộ ([#85](https://github.com/ctdoteam1110/ctdozlite/issues/85)):** Đợi tín hiệu `file_done` trước khi hoàn tất gửi tệp đính kèm lớn, khắc phục lỗi HTTP 405 trên nút kẹp giấy.
+
+## [0.0.8] - 2026-11-04
+
+### Added (Tính năng mới & Cập nhật)
+- **Hoàn thiện đồng bộ dữ liệu di động Android (`src/history_sync.rs`):** Hỗ trợ giải nén và giải mã toàn diện các tệp container `.db.crypt` (RSA 2048 + AES-256-CBC + LZMA2) từ bản sao lưu Zalo Android.
+- **Nghiên cứu & Bắt tay Sync v2 iOS (Curve25519 / X25519 Double-Ratchet):** Triển khai giao thức bắt tay trao đổi khóa phiên cho việc đồng bộ từ thiết bị Apple iOS.
+- **Quản lý đa tài khoản (Multi-Profile) (`src/account_manager.rs`):** Cho phép lưu trữ và chuyển đổi nhanh giữa nhiều tài khoản Zalo trên cùng một máy, lưu cơ sở dữ liệu tách biệt theo định danh (`accounts/<uin>_history.db`).
+- **Xem Nhật ký mạng xã hội Zalo (`src/feed.rs`, `src/bin/view_feed.rs`):** Hỗ trợ nạp và đọc bảng tin nhật ký bạn bè từ cache SQLite cục bộ.
+
+### Fixed (Sửa lỗi)
+- **Khóa ô nhập liệu khi bị chặn chat trong nhóm ([#97](https://github.com/ctdoteam1110/ctdozlite/issues/97)):** Nhận diện cờ `posting_restricted` từ cấu hình nhóm Zalo và vô hiệu hóa thanh soạn thảo đối với thành viên không có quyền nhắn tin.
+- **Tối ưu hóa khởi động với lịch sử chat lớn ([#44](https://github.com/ctdoteam1110/ctdozlite/issues/44)):** Tăng tốc mở ứng dụng bằng cơ chế nạp lịch sử phân trang `PRELOAD_MSGS` thay vì nạp toàn bộ tin nhắn vào RAM.
+
 ## [0.0.7] - 2026-11-03
 
 ### Fixed (Sửa lỗi & Tinh chỉnh giao diện)

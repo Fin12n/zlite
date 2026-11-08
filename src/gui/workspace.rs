@@ -2957,7 +2957,7 @@ impl ZaloGuiApp {
                                     if vid_resp
                                         .on_hover_cursor(CursorIcon::PointingHand)
                                         .on_hover_text(if is_group {
-                                            "Họp nhóm Zavi SFU (Video / Lưới đa luồng)"
+                                            "Họp nhóm Zavi (Video)"
                                         } else {
                                             "Gọi Video"
                                         })
@@ -3034,7 +3034,7 @@ impl ZaloGuiApp {
                                     if aud_resp
                                         .on_hover_cursor(CursorIcon::PointingHand)
                                         .on_hover_text(if is_group {
-                                            "Gọi thoại nhóm (Zavi SFU)"
+                                            "Gọi thoại nhóm (Zavi)"
                                         } else {
                                             "Gọi thoại"
                                         })

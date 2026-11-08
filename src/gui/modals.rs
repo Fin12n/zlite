@@ -4518,7 +4518,7 @@ impl ZaloGuiApp {
             520.0
         };
         let win_title = if call.is_group {
-            format!("Họp nhóm Zavi SFU — {}", call.partner_name)
+            format!("Họp nhóm Zavi — {}", call.partner_name)
         } else if call.is_video {
             format!("Zalo Video Call — {}", call.partner_name)
         } else {
@@ -4710,7 +4710,7 @@ impl ZaloGuiApp {
                             Color32::from_rgb(110, 231, 183)
                         };
                         let badge_txt = if call.is_group {
-                            format!("{} Họp Zavi · SFU", lucide::VIDEO)
+                            format!("{} Họp Zavi", lucide::VIDEO)
                         } else if call.is_video {
                             format!("{} Zalo Video · ZRTP", lucide::VIDEO)
                         } else {

@@ -692,6 +692,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             avatar: None,
                                                             is_group: false,
                                                             messages: Vec::new(),
+                                                            vanish: None,
                                                         });
                                                     }
                                                 }
@@ -708,6 +709,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 avatar: None,
                                                                 is_group: *is_group,
                                                                 messages: Vec::new(),
+                                                                vanish: None,
                                                             });
                                                         }
                                                     }
@@ -1478,6 +1480,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             avatar: None,
                                             is_group,
                                             messages: Vec::new(),
+                                            vanish: None,
                                         })
                                         .collect();
 
@@ -1781,6 +1784,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         avatar: None,
                                         is_group: is_group && !is_send2me,
                                         messages: Vec::new(),
+                                        vanish: None,
                                     };
                                     let mut t_list = vec![t];
                                     let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();

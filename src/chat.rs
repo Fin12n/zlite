@@ -1390,6 +1390,7 @@ pub fn save_threads_cache(threads: &[Thread]) {
             avatar: t.avatar.clone(),
             is_group: t.is_group,
             messages: t.messages[t.messages.len().saturating_sub(keep)..].to_vec(),
+            vanish: t.vanish.clone(),
         })
         .collect();
     if let Ok(text) = serde_json::to_string(&slim) {
@@ -1468,6 +1469,7 @@ pub async fn get_friends(s: &Session) -> Result<Vec<Thread>> {
                     avatar: None,
                     is_group: false,
                     messages: Vec::new(),
+                    vanish: None,
                 },
             );
         }
@@ -1530,6 +1532,7 @@ fn parse_thread(v: &Value) -> Option<Thread> {
         avatar,
         is_group,
         messages: Vec::new(),
+        vanish: None,
     })
 }
 
@@ -4536,6 +4539,7 @@ pub async fn get_groups(s: &Session) -> Result<Vec<Thread>> {
                 avatar: None,
                 is_group: true,
                 messages: Vec::new(),
+                vanish: None,
             });
         }
         if !groups.is_empty() {
@@ -6032,6 +6036,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                         avatar: None,
                         is_group: false,
                         messages: Vec::new(),
+                        vanish: None,
                     });
                 }
             }
@@ -6213,6 +6218,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                     avatar: None,
                     is_group: thread_is_group,
                     messages: vec![parsed],
+                    vanish: None,
                 });
             }
         }

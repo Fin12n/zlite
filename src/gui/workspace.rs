@@ -2615,6 +2615,7 @@ impl ZaloGuiApp {
                         avatar: m.avatar.clone(),
                         is_group: false,
                         messages: Vec::new(),
+                        vanish: None,
                     },
                 );
                 self.selected_thread_index = 0;

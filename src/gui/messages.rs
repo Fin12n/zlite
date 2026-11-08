@@ -3342,7 +3342,21 @@ pub(super) fn render_chat_bubble(
                                 } else {
                                     (msg.time.clone(), pal.bubble_out_meta)
                                 };
-                                ui.label(RichText::new(status_str).size(11.0).color(status_col));
+                                // Nhãn "(đã sửa)": tooltip liệt kê bản cũ; click handled
+                                // qua menu "Xem lịch sử sửa" (BubbleAction::ShowEditHistory).
+                                let status_str = if msg.edited {
+                                    format!("{status_str} · (đã sửa)")
+                                } else {
+                                    status_str
+                                };
+                                ui.label(
+                                    RichText::new(status_str).size(11.0).color(status_col),
+                                )
+                                .on_hover_text(if msg.edited {
+                                    "Tin này đã được sửa (thu hồi + gửi lại). Mở menu chuột phải → Xem lịch sử sửa."
+                                } else {
+                                    ""
+                                });
                             }
                             if !vanished {
                                 if let Some(badge) = vanish_badge_label(vanish_remain) {
@@ -3499,8 +3513,13 @@ pub(super) fn render_chat_bubble(
                             }
                             if show_timestamp && !has_sticker && !is_frameless_photo {
                                 ui.add_space(3.5);
+                                let ts = if msg.edited {
+                                    format!("{} · (đã sửa)", msg.time)
+                                } else {
+                                    msg.time.clone()
+                                };
                                 ui.label(
-                                    RichText::new(&msg.time)
+                                    RichText::new(ts)
                                         .color(pal.bubble_in_meta)
                                         .size(11.0),
                                 );
@@ -3567,6 +3586,12 @@ pub(super) enum BubbleAction {
     TogglePin,
     ToggleStar,
     ScheduleReminder,
+    /// Mở editor sửa tin (chỉ text của mình, trong 15 phút).
+    EditMessage,
+    /// Mở modal lịch sử các bản cũ của tin đã sửa.
+    ShowEditHistory,
+    /// WaveA1: nhắc về tin này (modal chọn giờ). Xử lý ở workspace.
+    RemindMessage,
     DeleteForMe,
     RecallForEveryone,
     CallAgain {
@@ -3792,14 +3817,23 @@ pub(super) fn bubble_context_menu(
                         close_menu = true;
                     }
 
-                    // 5. Đánh dấu tin nhắn
+                    // 5. Lưu tin (đồng bộ 2 chiều với star) — WaveA2.
                     let star_label = if msg.is_starred {
-                        "Bỏ đánh dấu tin nhắn"
+                        "Bỏ lưu tin nhắn"
                     } else {
-                        "Đánh dấu tin nhắn"
+                        "Lưu tin nhắn"
                     };
                     if menu_item(ui, lucide::STAR, star_label, pal.text_primary).clicked() {
                         action = Some(BubbleAction::ToggleStar);
+                        close_menu = true;
+                    }
+
+                    // 5b. Nhắc tôi về tin này (WaveA1 nhắc hẹn trên tin nhắn).
+                    if !vanished
+                        && menu_item(ui, lucide::BELL, "Nhắc tôi về tin này", pal.text_primary)
+                            .clicked()
+                    {
+                        action = Some(BubbleAction::RemindMessage);
                         close_menu = true;
                     }
 
@@ -3885,7 +3919,36 @@ pub(super) fn bubble_context_menu(
 
                     ui.separator();
 
-                    // 8. Thu hồi tin nhắn (với mọi người)
+                    // 7b. Sửa tin (WaveA3): chỉ text của mình trong 15 phút.
+                    // recall + gửi mới (hạn chế: bên kia thấy thu hồi + tin mới).
+                    {
+                        let now_ms = crate::login::unix_now() * 1000;
+                        if crate::chat::can_edit_message(msg, now_ms)
+                            && menu_item(ui, "✎", "Sửa", pal.text_primary).clicked()
+                        {
+                            action = Some(BubbleAction::EditMessage);
+                            close_menu = true;
+                        }
+                        if msg.is_outgoing
+                            && (msg.edited
+                                || !crate::store::MessageStore::open_no_migrate("zalo_history.db")
+                                    .map(|s| s.list_message_edits(&msg.id))
+                                    .unwrap_or_default()
+                                    .is_empty())
+                            && menu_item(
+                                ui,
+                                "🕘",
+                                "Xem lịch sử sửa",
+                                pal.text_primary,
+                            )
+                            .clicked()
+                        {
+                            action = Some(BubbleAction::ShowEditHistory);
+                            close_menu = true;
+                        }
+                    }
+
+                    ui.separator();
                     if !vanished
                         && msg.is_outgoing
                         && msg.text.trim() != "[Tin nhắn đã thu hồi]"

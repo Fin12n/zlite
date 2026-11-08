@@ -73,6 +73,14 @@ pub enum WorkerCmd {
         is_group: bool,
         msg: ChatMessage,
     },
+    /// Sửa tin (WaveA3): recall tin cũ rồi gửi tin mới; worker báo
+    /// `GuiEvent::MessageEdited` để GUI gắn cờ + lưu bản cũ.
+    EditMessageCommit {
+        to_id: String,
+        is_group: bool,
+        old_msg: ChatMessage,
+        new_text: String,
+    },
     SendSticker {
         to_id: String,
         sticker_id: u64,
@@ -586,6 +594,59 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 });
                             }
                             ctx_vanish.request_repaint();
+                        }
+                    });
+                }
+                {
+                    // Reminder tick (WaveA1): ké nhịp 2s của vanish sweep — claim
+                    // message_reminders tới hạn qua mọi DB acc rồi bắn ReminderDue 1 lần.
+                    // Không early-return theo VANISH_THREADS (reminder độc lập vanish).
+                    let gui_tx_rem = gui_tx.clone();
+                    let ctx_rem = egui_ctx.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(2));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        loop {
+                            tick.tick().await;
+                            let now_sec = crate::login::unix_now() as i64;
+                            let due: Vec<crate::store::ReminderItem> =
+                                tokio::task::spawn_blocking(move || {
+                                    let mut out = Vec::new();
+                                    let mut seen: std::collections::HashSet<i64> =
+                                        std::collections::HashSet::new();
+                                    // DB mặc định + mọi DB acc (accounts/*_history.db).
+                                    let mut dbs = vec!["zalo_history.db".to_string()];
+                                    if let Ok(entries) = std::fs::read_dir("accounts") {
+                                        for e in entries.flatten() {
+                                            let p = e.path();
+                                            if p.extension().and_then(|x| x.to_str())
+                                                == Some("db")
+                                            {
+                                                dbs.push(p.to_string_lossy().into_owned());
+                                            }
+                                        }
+                                    }
+                                    for db in dbs {
+                                        if let Ok(mut store) =
+                                            crate::store::MessageStore::open(&db)
+                                        {
+                                            for r in store.claim_due_reminders(now_sec) {
+                                                if seen.insert(r.id) {
+                                                    out.push(r);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    out.sort_by_key(|r| r.due_at);
+                                    out
+                                })
+                                .await
+                                .unwrap_or_default();
+                            if due.is_empty() {
+                                continue;
+                            }
+                            let _ = gui_tx_rem.send(GuiEvent::ReminderDue(due));
+                            ctx_rem.request_repaint();
                         }
                     });
                 }
@@ -2577,6 +2638,78 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         crate::logger::log_error("gui::recall", &e.to_string());
                                         let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
                                             "Không thể thu hồi trên máy chủ: {e}"
+                                        )));
+                                    }
+                                }
+                                ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::EditMessageCommit {
+                            to_id,
+                            is_group,
+                            old_msg,
+                            new_text,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                let old_id = old_msg.id.clone();
+                                let old_text = old_msg.text.clone();
+                                // 1. Recall tin cũ (local-only thì bỏ qua gọi mạng).
+                                let local_only = old_id.is_empty()
+                                    || old_id.starts_with("out_")
+                                    || old_id.starts_with("local_");
+                                if !local_only {
+                                    let _ =
+                                        crate::chat::recall_message(&s, &to_id, is_group, &old_msg)
+                                            .await;
+                                }
+                                // 2. Gửi tin mới với text đã sửa.
+                                let client_id = crate::chat::next_client_message_id();
+                                let res = if is_group {
+                                    crate::chat::send_group_message_with_client_id(
+                                        &s, &to_id, &new_text, client_id,
+                                    )
+                                    .await
+                                } else {
+                                    crate::chat::send_message_with_client_id(
+                                        &s, &to_id, &new_text, client_id,
+                                    )
+                                    .await
+                                };
+                                match res {
+                                    Ok(resp) if resp_error_code(&resp).is_none() => {
+                                        let msg_id = extract_msg_id(&resp);
+                                        let final_id = if msg_id.is_empty() {
+                                            format!("out_{client_id}")
+                                        } else {
+                                            msg_id
+                                        };
+                                        let _ = gui_tx_clone.send(GuiEvent::MessageEdited {
+                                            thread_id: to_id,
+                                            old_msg_id: old_id,
+                                            old_text,
+                                            new_text,
+                                            new_msg_id: final_id,
+                                            new_ts: (crate::login::unix_now() * 1000) as i64,
+                                        });
+                                    }
+                                    Ok(resp) => {
+                                        let err_s = format!(
+                                            "server error {}",
+                                            resp_error_code(&resp).unwrap_or(0)
+                                        );
+                                        crate::logger::log_error("gui::edit", &err_s);
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
+                                            "Sửa tin nhắn thất bại: {err_s}"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        crate::logger::log_error("gui::edit", &e.to_string());
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
+                                            "Sửa tin nhắn thất bại: {e}"
                                         )));
                                     }
                                 }

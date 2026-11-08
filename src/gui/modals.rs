@@ -4605,6 +4605,359 @@ impl ZaloGuiApp {
             self.schedule_editing_id = None;
         }
     }
+    /// Lịch sử sửa tin (WaveA3): các bản text cũ theo thời gian + bản hiện tại.
+    pub(super) fn render_edit_history_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        let Some((msg_id, current)) = self.edit_history_open.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Lịch sử sửa")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([420.0, 320.0])
+            .show(ctx, |ui| {
+                let items = self.edit_history_cache.get(&msg_id).cloned().unwrap_or_default();
+                if items.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Không tìm thấy bản cũ (có thể DB đã xóa).")
+                            .size(12.5)
+                            .color(pal.text_muted),
+                    );
+                } else {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (i, rec) in items.iter().enumerate() {
+                            let when = crate::clock::message_time(rec.edited_at * 1000);
+                            ui.label(
+                                egui::RichText::new(format!("Bản {} · {}", i + 1, when))
+                                    .size(11.5)
+                                    .color(pal.text_muted)
+                                    .strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(&rec.old_text)
+                                    .size(13.0)
+                                    .color(pal.text_secondary),
+                            );
+                            ui.add_space(6.0);
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Bản hiện tại:")
+                        .size(11.5)
+                        .color(pal.text_muted)
+                        .strong(),
+                );
+                ui.label(egui::RichText::new(&current).size(13.0).color(pal.text_primary));
+            });
+        if !open {
+            self.edit_history_open = None;
+        }
+    }
+
+    /// Quản lý Chat Folders (WaveA3): thêm/xóa/đổi tên + rule lọc.
+    pub(super) fn render_folder_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.folder_modal_open {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        let mut delete_idx: Option<usize> = None;
+        egui::Window::new("Quản lý thư mục chat")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([440.0, 480.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Nhóm hội thoại thành tab lọc kiểu Telegram.")
+                        .size(11.5)
+                        .color(pal.text_secondary),
+                );
+                ui.add_space(6.0);
+                // Thêm folder mới.
+                ui.horizontal(|ui| {
+                    // Dùng buffer cục bộ qua egui memory để giữ text giữa các frame.
+                    let mut name = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp::<String>("folder_new_name".into()))
+                        .unwrap_or_default();
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .desired_width(220.0)
+                            .hint_text("Tên thư mục mới…"),
+                    );
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp("folder_new_name".into(), name.clone())
+                    });
+                    let name_trim = name.trim().to_string();
+                    let dup = self.settings.chat_folders.iter().any(|f| f.name == name_trim);
+                    if ui
+                        .add_enabled(!name_trim.is_empty() && !dup, egui::Button::new("＋ Thêm"))
+                        .clicked()
+                    {
+                        self.settings.chat_folders.push(ChatFolder {
+                            name: name_trim,
+                            ..Default::default()
+                        });
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp("folder_new_name".into(), String::new())
+                        });
+                        changed = true;
+                    }
+                    let _ = resp;
+                });
+                ui.add_space(4.0);
+                ui.separator();
+                if self.settings.chat_folders.is_empty() {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Chưa có thư mục nào.")
+                                .size(12.5)
+                                .color(pal.text_muted),
+                        );
+                    });
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let folders = self.settings.chat_folders.clone();
+                    for (i, f) in folders.iter().enumerate() {
+                        egui::Frame::none()
+                            .fill(pal.bg_input)
+                            .stroke(egui::Stroke::new(1.0_f32, pal.border))
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .outer_margin(egui::Margin::symmetric(2.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("📁 {}", f.name))
+                                            .size(13.0)
+                                            .strong()
+                                            .color(pal.text_primary),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("🗑 Xóa").clicked() {
+                                                delete_idx = Some(i);
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_space(2.0);
+                                // Rule editors.
+                                let mut fo = f.clone();
+                                let mut fo_changed = false;
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut fo.only_direct, "Chỉ 1-1").changed() {
+                                        fo_changed = true;
+                                    }
+                                    if ui.checkbox(&mut fo.only_groups, "Chỉ nhóm").changed() {
+                                        fo_changed = true;
+                                    }
+                                    if ui.checkbox(&mut fo.only_unread, "Chỉ chưa đọc").changed() {
+                                        fo_changed = true;
+                                    }
+                                });
+                                // Nhãn (cách nhau bởi dấu phẩy).
+                                let mut labels_str = fo.labels.join(", ");
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Nhãn:")
+                                            .size(11.5)
+                                            .color(pal.text_secondary),
+                                    );
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(&mut labels_str)
+                                                .desired_width(260.0)
+                                                .hint_text("vd: cong-viec, gia-dinh"),
+                                        )
+                                        .changed()
+                                    {
+                                        fo.labels = labels_str
+                                            .split(',')
+                                            .map(|s| s.trim().to_string())
+                                            .filter(|s| !s.is_empty())
+                                            .collect();
+                                        fo_changed = true;
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} thread gán tay · rule rỗng = hiện tất cả",
+                                        fo.thread_ids.len()
+                                    ))
+                                    .size(11.0)
+                                    .color(pal.text_muted),
+                                );
+                                if fo_changed {
+                                    if let Some(dst) =
+                                        self.settings.chat_folders.get_mut(i)
+                                    {
+                                        *dst = fo;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                    }
+                });
+            });
+        if delete_idx.is_some() {
+            if let Some(i) = delete_idx {
+                if i < self.settings.chat_folders.len() {
+                    let gone = self.settings.chat_folders.remove(i);
+                    if self.settings.active_chat_folder == gone.name {
+                        self.settings.active_chat_folder.clear();
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.settings.save();
+        }
+        if !open {
+            self.folder_modal_open = false;
+        }
+    }
+
+    pub(super) fn render_saved_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.saved_modal_open {
+            return;
+        }
+        let mut open = true;
+        let mut jump_to: Option<(usize, String)> = None;
+        let mut unsave: Option<String> = None;
+        let mut save_note: Option<(String, String, String, i64)> = None;
+        egui::Window::new("Đã lưu")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([460.0, 520.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Tin đã lưu (mọi hội thoại). Star = lưu, đồng bộ 2 chiều.")
+                        .size(11.5)
+                        .color(pal.text_secondary),
+                );
+                ui.add_space(6.0);
+                if self.saved_items.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(egui::RichText::new("Chưa có tin nào. Bấm ⋯ trên tin nhắn → Lưu tin nhắn.").size(13.0).color(pal.text_muted));
+                    });
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for item in self.saved_items.clone() {
+                        egui::Frame::none()
+                            .fill(pal.bg_input)
+                            .stroke(egui::Stroke::new(1.0_f32, pal.border))
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .outer_margin(egui::Margin::symmetric(2.0, 4.0))
+                            .show(ui, |ui| {
+                                let title = if item.thread_name.is_empty() { item.thread_id.clone() } else { item.thread_name.clone() };
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("★ {}", title)).size(12.5).strong().color(pal.text_primary));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("Bỏ lưu").clicked() {
+                                            unsave = Some(item.msg_id.clone());
+                                        }
+                                        if ui.small_button("Nhảy tới ➜").clicked() {
+                                            if let Some(idx) = self.threads.iter().position(|t| t.id == item.thread_id) {
+                                                jump_to = Some((idx, item.msg_id.clone()));
+                                            } else {
+                                                self.show_toast("Hội thoại chưa tải trong RAM");
+                                            }
+                                        }
+                                    });
+                                });
+                                let snippet = if item.text.chars().count() > 140 {
+                                    format!("{}…", item.text.chars().take(140).collect::<String>())
+                                } else { item.text.clone() };
+                                ui.label(egui::RichText::new(snippet).size(12.5).color(pal.text_primary));
+                                if !item.sender_name.is_empty() {
+                                    ui.label(egui::RichText::new(format!("— {}", item.sender_name)).size(10.5).color(pal.text_muted));
+                                }
+                                if !item.note.is_empty() {
+                                    ui.label(egui::RichText::new(format!("📝 {}", item.note)).size(11.5).color(pal.text_secondary));
+                                }
+                                if item.due_at > 0 {
+                                    let now = chrono::Local::now().timestamp();
+                                    let late = item.due_at <= now;
+                                    ui.label(egui::RichText::new(format!("⏰ {} {}", if late { "TỚI HẠN" } else { "Hạn" }, crate::scheduler::format_schedule_time(item.due_at))).size(11.0).color(if late { egui::Color32::RED } else { pal.primary_hover }));
+                                }
+                                ui.horizontal(|ui| {
+                                    let mut draft = self.saved_note_drafts.get(&item.msg_id).cloned().unwrap_or_else(|| item.note.clone());
+                                    let te = ui.add(egui::TextEdit::singleline(&mut draft).hint_text("Ghi chú…").desired_width(200.0));
+                                    if te.changed() {
+                                        self.saved_note_drafts.insert(item.msg_id.clone(), draft.clone());
+                                    }
+                                    let mut due_s = self.saved_due_drafts.get(&item.msg_id).cloned().unwrap_or_default();
+                                    let due_te = ui.add(egui::TextEdit::singleline(&mut due_s).hint_text("Hạn YYYY-MM-DD HH:MM").desired_width(150.0));
+                                    if due_te.changed() {
+                                        self.saved_due_drafts.insert(item.msg_id.clone(), due_s.clone());
+                                    }
+                                    if ui.small_button("Lưu").clicked() {
+                                        let note = self.saved_note_drafts.get(&item.msg_id).cloned().unwrap_or_else(|| item.note.clone());
+                                        let due_raw = self.saved_due_drafts.get(&item.msg_id).cloned().unwrap_or_default();
+                                        let due_at = if due_raw.trim().is_empty() { item.due_at } else { crate::scheduler::parse_custom_schedule_input(&due_raw, chrono::Local::now().timestamp()).unwrap_or(item.due_at) };
+                                        save_note = Some((item.msg_id.clone(), item.thread_id.clone(), note, due_at));
+                                    }
+                                });
+                            });
+                    }
+                });
+            });
+        if let Some(mid) = unsave {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                let _ = st.unsave_message_item(&mid);
+            }
+            // Đồng bộ star RAM: bỏ star tin tương ứng.
+            for t in self.threads.iter_mut() {
+                if let Some(m) = t.messages.iter_mut().find(|m| m.id == mid) {
+                    m.is_starred = false;
+                }
+            }
+            self.persist_threads_async();
+            self.refresh_saved_items();
+            self.show_toast("Đã bỏ lưu tin nhắn");
+        }
+        if let Some((mid, tid, note, due_at)) = save_note {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                let _ = st.set_saved_note_due(&mid, &tid, &note, due_at);
+            }
+            self.saved_note_drafts.remove(&mid);
+            self.saved_due_drafts.remove(&mid);
+            self.refresh_saved_items();
+            self.show_toast("Đã lưu ghi chú");
+        }
+        if let Some((idx, mid)) = jump_to {
+            self.selected_thread_index = idx;
+            self.filter_starred_only = false;
+            self.in_chat_search_open = false;
+            self.in_chat_search_query.clear();
+            self.quote_jump = Some(crate::gui::QuoteJump {
+                thread_id: self.threads.get(idx).map(|t| t.id.clone()).unwrap_or_default(),
+                reference: mid,
+                highlight_until: std::time::Instant::now() + std::time::Duration::from_secs(3),
+                scroll_pending: true,
+            });
+            self.saved_modal_open = false;
+            ctx.request_repaint();
+        }
+        if !open {
+            self.saved_modal_open = false;
+        }
+    }
 
     pub(super) fn render_call_overlay(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         let Some(mut call) = self.active_call.clone() else {

@@ -192,6 +192,16 @@ pub enum GuiEvent {
         msg_id: String,
         ts: i64,
     },
+    /// Sửa tin xong (WaveA3): tin cũ đã recall + tin mới đã gửi.
+    /// GUI: thay text cũ = text mới, gắn `edited`, lưu bản cũ vào SQLite.
+    MessageEdited {
+        thread_id: String,
+        old_msg_id: String,
+        old_text: String,
+        new_text: String,
+        new_msg_id: String,
+        new_ts: i64,
+    },
     /// Tin nhắn tự xoá đã hết hạn (worker sweep 2s) — apply text biến mất vào GUI.
     VanishExpired {
         thread_id: String,
@@ -329,6 +339,10 @@ pub enum GuiEvent {
         uin: String,
         stats: crate::group_stats::GroupStats,
     },
+    /// 1..n reminder tới giờ (worker tick claim) → toast + click nhảy tới tin (WaveA1).
+    ReminderDue(Vec<crate::store::ReminderItem>),
+    /// Danh sách reminder thay đổi (thêm/xoá) → refresh modal (WaveA1).
+    ReminderListUpdated,
 }
 
 fn phone_sync_completion_message(
@@ -447,6 +461,58 @@ fn settings_default_true() -> bool {
     true
 }
 
+/// Rule lọc của 1 Chat Folder (WaveA3, Telegram-style).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct ChatFolder {
+    /// Tên hiển thị (duy nhất, trim).
+    pub name: String,
+    /// Lọc theo nhãn phân loại (thread_labels). Rỗng = mọi nhãn.
+    pub labels: Vec<String>,
+    /// Chỉ thread 1-1 (cá nhân).
+    pub only_direct: bool,
+    /// Chỉ nhóm.
+    pub only_groups: bool,
+    /// Chỉ thread có tin chưa đọc.
+    pub only_unread: bool,
+    /// Gán tay theo thread id (chuột phải → thêm/bỏ).
+    pub thread_ids: Vec<String>,
+}
+
+impl ChatFolder {
+    /// `true` khi folder không có rule nào (hiện tất cả như tab Tất cả).
+    pub fn is_empty_rule(&self) -> bool {
+        self.labels.is_empty()
+            && self.thread_ids.is_empty()
+            && !self.only_direct
+            && !self.only_groups
+            && !self.only_unread
+    }
+
+    pub(crate) fn matches_label(
+        &self,
+        thread_id: &str,
+        labels: &HashMap<String, String>,
+    ) -> bool {
+        if self.labels.is_empty() {
+            return true;
+        }
+        labels
+            .get(thread_id)
+            .is_some_and(|l| self.labels.iter().any(|x| x == l))
+    }
+}
+
+/// Tin đang sửa (WaveA3): editor mở với text cũ; Enter = recall cũ + gửi mới.
+#[derive(Debug, Clone)]
+pub(crate) struct EditingMessage {
+    pub thread_id: String,
+    pub is_group: bool,
+    pub msg_id: String,
+    pub msg_ts: i64,
+    pub old_text: String,
+    pub draft: String,
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppSettings {
@@ -506,7 +572,14 @@ struct AppSettings {
     pinned_threads: Vec<String>,
     muted_threads: HashMap<String, i64>,
     hidden_threads: HashSet<String>,
+    // Nhãn phân loại thread (WaveA3 gán tay chuột phải). Sibling đang dùng nhưng thiếu khai báo.
+    #[serde(default)]
     thread_labels: HashMap<String, String>,
+    #[serde(default)]
+    chat_folders: Vec<ChatFolder>,
+    /// Folder đang active ("" = Tất cả). Lưu cùng settings.
+    #[serde(default)]
+    active_chat_folder: String,
     // 9. Cập nhật tự động qua GitHub Releases API
     auto_check_updates: bool,
     skipped_update_version: String,
@@ -573,6 +646,8 @@ impl Default for AppSettings {
             muted_threads: HashMap::new(),
             hidden_threads: HashSet::new(),
             thread_labels: HashMap::new(),
+            chat_folders: Vec::new(),
+            active_chat_folder: String::new(),
             auto_check_updates: true,
             skipped_update_version: String::new(),
             proxy_url: String::new(),
@@ -845,6 +920,34 @@ pub struct ZaloGuiApp {
     scheduled_items: Vec<crate::scheduler::ScheduledMessage>,
     phone_sync_progress: f32,
     phone_sync_status: String,
+    /// Hộp "Đã lưu" toàn cục (WaveA2): modal + cache + draft ghi chú/hạn.
+    pub(crate) saved_modal_open: bool,
+    pub(crate) saved_items: Vec<crate::store::SavedItem>,
+    pub(crate) saved_note_drafts: std::collections::HashMap<String, String>,
+    pub(crate) saved_due_drafts: std::collections::HashMap<String, String>,
+    /// Nháp composer theo hội thoại (WaveA1): thread_id → text. Persist SQLite bảng `drafts`.
+    draft_map: HashMap<String, String>,
+    /// reply_to đang treo theo hội thoại (WaveA1): thread_id → msg_id được trả lời.
+    draft_reply_map: HashMap<String, String>,
+    /// Thread đang có nháp (cache từ `list_draft_threads`, để vẽ badge "nháp") (WaveA1).
+    draft_threads: HashSet<String>,
+    /// Modal quản lý reminder + cache list (WaveA1).
+    reminder_modal_open: bool,
+    reminder_items: Vec<crate::store::ReminderItem>,
+    /// Reminder tới giờ chờ click nhảy tới tin (toast click → QuoteJump) (WaveA1).
+    reminder_due_pending: Vec<crate::store::ReminderItem>,
+    /// Tin đang chọn nhắc (picker nhanh: thread_id, msg_id, preview) (WaveA1).
+    remind_pick_msg: Option<(String, String, String)>,
+    remind_custom_open: bool,
+    remind_custom_input: String,
+    /// Tin đang sửa (WaveA3): None = không sửa; Some = editor mở với text cũ.
+    pub(crate) editing_message: Option<EditingMessage>,
+    /// Lịch sử bản cũ đã nạp (msg_id → records) để vẽ modal (WaveA3).
+    pub(crate) edit_history_cache: HashMap<String, Vec<crate::store::MessageEditRecord>>,
+    /// Modal lịch sử sửa đang mở (msg_id, text hiện tại) (WaveA3).
+    pub(crate) edit_history_open: Option<(String, String)>,
+    /// Modal quản lý Chat Folders (WaveA3).
+    pub(crate) folder_modal_open: bool,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
     // Background channels
@@ -1129,6 +1232,23 @@ impl ZaloGuiApp {
                 .unwrap_or_default(),
             phone_sync_progress: 0.0,
             phone_sync_status: String::new(),
+            saved_modal_open: false,
+            saved_items: Vec::new(),
+            saved_note_drafts: std::collections::HashMap::new(),
+            saved_due_drafts: std::collections::HashMap::new(),
+            draft_map: HashMap::new(),
+            draft_reply_map: HashMap::new(),
+            draft_threads: HashSet::new(),
+            reminder_modal_open: false,
+            reminder_items: Vec::new(),
+            reminder_due_pending: Vec::new(),
+            remind_pick_msg: None,
+            remind_custom_open: false,
+            remind_custom_input: String::new(),
+            editing_message: None,
+            edit_history_cache: HashMap::new(),
+            edit_history_open: None,
+            folder_modal_open: false,
             last_typing_sent_at: None,
             last_synced_icon_unread: None,
             event_rx: rx,
@@ -1198,6 +1318,182 @@ impl ZaloGuiApp {
     pub(super) fn refresh_scheduled_items(&mut self) {
         self.scheduled_items =
             crate::scheduler::list_pending_scheduled("zalo_history.db", None).unwrap_or_default();
+    }
+    /// Tải lại hộp Đã lưu từ DB acc hiện tại (WaveA2).
+    pub(super) fn refresh_saved_items(&mut self) {
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        self.saved_items = crate::store::MessageStore::open(&db)
+            .map(|st| st.list_saved_items())
+            .unwrap_or_default();
+    }
+
+    /// Bật/tắt lưu tin + đồng bộ star 2 chiều (WaveA2).
+    pub(super) fn toggle_saved_for(&mut self, thread_id: &str, msg_id: &str, starred: bool) {
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+            if starred {
+                let _ = st.save_message_item(msg_id, thread_id, now);
+            } else {
+                let _ = st.unsave_message_item(msg_id);
+            }
+        }
+        self.refresh_saved_items();
+    }
+    /// Toast các tin đã lưu tới hạn (WaveA2). Gọi mỗi lần mở hộp Đã lưu / tick 2s.
+    /// `due_at` nối scheduler: dùng format_schedule_time + toast, không gửi tin.
+    pub(super) fn toast_due_saved(&mut self) {
+        let now = chrono::Local::now().timestamp();
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        let due = crate::store::MessageStore::open(&db)
+            .map(|st| st.due_saved_items(now))
+            .unwrap_or_default();
+        for s in due {
+            self.show_toast(format!("⏰ Đã lưu tới hạn ({}): {}", crate::scheduler::format_schedule_time(s.due_at), s.text.chars().take(60).collect::<String>()));
+        }
+    }
+    /// Lưu nháp composer hiện tại của thread cũ vào RAM + SQLite (WaveA1).
+    /// Gọi trước mọi đổi thread. Text rỗng + không reply → xoá row.
+    pub(super) fn save_current_draft(&mut self) {
+        let old_tid = match self.threads.get(self.selected_thread_index) {
+            Some(t) => t.id.clone(),
+            None => return,
+        };
+        let text = self.input_message.clone();
+        let reply_ref = self
+            .replying_to
+            .as_ref()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        if text.trim().is_empty() && reply_ref.trim().is_empty() {
+            self.draft_map.remove(&old_tid);
+            self.draft_reply_map.remove(&old_tid);
+            self.draft_threads.remove(&old_tid);
+        } else {
+            if !text.trim().is_empty() {
+                self.draft_map.insert(old_tid.clone(), text.clone());
+            } else {
+                self.draft_map.remove(&old_tid);
+            }
+            if !reply_ref.trim().is_empty() {
+                self.draft_reply_map.insert(old_tid.clone(), reply_ref.clone());
+            } else {
+                self.draft_reply_map.remove(&old_tid);
+            }
+            self.draft_threads.insert(old_tid.clone());
+        }
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        let now = crate::login::unix_now() as i64;
+        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+            let _ = st.set_draft(&old_tid, &text, &reply_ref, now);
+        }
+    }
+
+    /// Nạp nháp của thread mới vào composer + reply banner (WaveA1).
+    pub(super) fn load_draft_for(&mut self, thread_id: &str) {
+        if let Some(text) = self.draft_map.get(thread_id).cloned() {
+            self.input_message = text;
+        } else {
+            self.input_message.clear();
+        }
+        if let Some(ref_id) = self.draft_reply_map.get(thread_id).cloned() {
+            let found = self
+                .threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .and_then(|t| t.messages.iter().find(|m| m.id == ref_id).cloned());
+            self.replying_to = found;
+            if self.replying_to.is_none() {
+                self.draft_reply_map.remove(thread_id);
+            }
+        } else {
+            self.replying_to = None;
+        }
+        self.dismissed_sticker_suggest_for.clear();
+        self.composer_sticker_selected = None;
+        self.composer_focus_pending = false;
+    }
+
+    /// Đổi thread có giữ nháp: lưu cũ → đổi index → nạp mới (WaveA1).
+    pub(super) fn switch_thread_with_draft(&mut self, new_index: usize) {
+        if new_index >= self.threads.len() {
+            return;
+        }
+        let old_tid = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let new_tid = self.threads[new_index].id.clone();
+        if old_tid == new_tid {
+            self.selected_thread_index = new_index;
+            return;
+        }
+        self.save_current_draft();
+        self.selected_thread_index = new_index;
+        self.load_draft_for(&new_tid);
+        self.filter_starred_only = false;
+        self.force_scroll_to_bottom = true;
+        self.chat_render_window = (new_tid, CHAT_RENDER_STEP);
+    }
+
+    /// Tải lại badge nháp + list reminder từ DB acc hiện tại (WaveA1).
+    pub(super) fn refresh_draft_reminder_cache(&mut self) {
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        if let Ok(store) = crate::store::MessageStore::open(&db) {
+            self.draft_threads = store.list_draft_threads().into_iter().collect();
+            self.reminder_items = store.list_reminders();
+        } else {
+            self.draft_threads.clear();
+            self.reminder_items.clear();
+        }
+        // Nạp nháp RAM từ DB cho các thread chưa có (mở app lại vẫn giữ nháp).
+        if let Ok(store) = crate::store::MessageStore::open(&db) {
+            for tid in self.draft_threads.clone() {
+                if !self.draft_map.contains_key(&tid) {
+                    if let Some(d) = store.get_draft(&tid) {
+                        if !d.text.is_empty() {
+                            self.draft_map.insert(tid.clone(), d.text);
+                        }
+                        if !d.reply_ref.is_empty() {
+                            self.draft_reply_map.insert(tid, d.reply_ref);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Nhảy tới tin của reminder (đổi thread giữ nháp + QuoteJump highlight) (WaveA1).
+    pub(super) fn jump_to_reminder(&mut self, thread_id: &str, msg_id: &str) {
+        let idx = match self.threads.iter().position(|t| t.id == thread_id) {
+            Some(i) => i,
+            None => {
+                self.show_toast("Hội thoại của tin nhắc không còn trong danh sách");
+                return;
+            }
+        };
+        let reference = msg_id.to_string();
+        let has_msg = self.threads[idx]
+            .messages
+            .iter()
+            .any(|m| crate::message_navigation::message_matches_reference(m, &reference));
+        self.switch_thread_with_draft(idx);
+        self.reminder_due_pending
+            .retain(|r| !(r.thread_id == thread_id && r.msg_id == msg_id));
+        if has_msg {
+            self.filter_starred_only = false;
+            self.in_chat_search_open = false;
+            self.in_chat_search_query.clear();
+            self.quote_jump = Some(QuoteJump {
+                thread_id: thread_id.to_string(),
+                reference,
+                highlight_until: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                scroll_pending: true,
+            });
+        } else {
+            self.show_toast("Chưa tải tin nhắn gốc — hãy tải thêm lịch sử rồi thử lại.");
+        }
     }
 
     /// Hand the worker's poll timer the thread ids/names it maps incoming messages onto.
@@ -1736,6 +2032,17 @@ impl ZaloGuiApp {
                     self.group_stats_loading.clear();
                     self.group_summary_pending = None;
                     self.group_jump_pending = None;
+                    // Nháp + reminder theo acc cũ → xoá để nạp lại từ DB mới.
+                    self.draft_map.clear();
+                    self.draft_reply_map.clear();
+                    self.draft_threads.clear();
+                    self.reminder_items.clear();
+                    self.reminder_due_pending.clear();
+                    self.remind_pick_msg = None;
+                    self.remind_custom_open = false;
+                    self.remind_custom_input.clear();
+                    self.input_message.clear();
+                    self.replying_to = None;
                 }
                 GuiEvent::MessageSent {
                     client_message_id,
@@ -1766,6 +2073,16 @@ impl ZaloGuiApp {
                             },
                         );
                         self.persist_threads_async();
+                    }
+                    // Gửi xong → xoá nháp thread này (RAM + SQLite).
+                    self.draft_map.remove(&thread_id);
+                    self.draft_reply_map.remove(&thread_id);
+                    self.draft_threads.remove(&thread_id);
+                    {
+                        let db = crate::store::db_path_for_account(&self.user_uin);
+                        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                            let _ = st.delete_draft(&thread_id);
+                        }
                     }
                     self.status_msg = format!("Đã gửi tin nhắn lúc {}", crate::ui::clock());
                 }
@@ -1848,6 +2165,15 @@ impl ZaloGuiApp {
                             },
                         );
                         self.persist_threads_async();
+                    }
+                    self.draft_map.remove(&thread_id);
+                    self.draft_reply_map.remove(&thread_id);
+                    self.draft_threads.remove(&thread_id);
+                    {
+                        let db = crate::store::db_path_for_account(&self.user_uin);
+                        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                            let _ = st.delete_draft(&thread_id);
+                        }
                     }
                     self.status_msg = format!("Đã gửi trả lời lúc {}", crate::ui::clock());
                 }
@@ -2031,6 +2357,41 @@ impl ZaloGuiApp {
                         self.persist_threads_async();
                     }
                     self.status_msg = "Có tin nhắn vừa bị thu hồi (đã lưu lại)".into();
+                }
+                GuiEvent::MessageEdited {
+                    thread_id,
+                    old_msg_id,
+                    old_text,
+                    new_text,
+                    new_msg_id,
+                    new_ts,
+                } => {
+                    // Sửa tin xong (WaveA3): thay text ngay tại chỗ, gắn cờ edited,
+                    // lưu bản cũ vào SQLite. Hạn chế đã nói rõ: bên kia thấy
+                    // thu hồi + tin mới (không phải edit liền mạch).
+                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                        if let Some(m) = t.messages.iter_mut().find(|m| {
+                            (!old_msg_id.is_empty() && m.id == old_msg_id)
+                                || (old_msg_id.is_empty() && m.ts == new_ts)
+                        }) {
+                            m.text = new_text.clone();
+                            m.edited = true;
+                            m.id = new_msg_id.clone();
+                            m.ts = new_ts;
+                        }
+                        if let Some(last) = t.messages.last() {
+                            t.preview = last.text.clone();
+                        }
+                        self.persist_threads_async();
+                    }
+                    // Lưu bản cũ vào bảng message_edits (không block UI khi lỗi).
+                    {
+                        let db = crate::store::db_path_for_account(&self.user_uin);
+                        if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                            let _ = st.save_message_edit(&old_msg_id, &thread_id, &old_text, new_ts);
+                        }
+                    }
+                    self.status_msg = format!("Đã sửa tin nhắn lúc {}", crate::ui::clock());
                 }
                 GuiEvent::VanishSettingChanged {
                     thread_id,
@@ -2552,6 +2913,33 @@ impl ZaloGuiApp {
                         }
                         self.show_toast("⏰ Đã gửi tự động tin nhắn hẹn giờ / nhắc hẹn");
                     }
+                }
+                GuiEvent::ReminderDue(items) => {
+                    if items.is_empty() {
+                        return;
+                    }
+                    if self.settings.enable_notifications && self.settings.play_notification_sound {
+                        crate::media::play_notification_chime();
+                    }
+                    for r in &items {
+                        if !self.reminder_due_pending.iter().any(|p| {
+                            p.thread_id == r.thread_id && p.msg_id == r.msg_id && p.due_at == r.due_at
+                        }) {
+                            self.reminder_due_pending.push(r.clone());
+                        }
+                    }
+                    self.refresh_draft_reminder_cache();
+                    let first = &items[0];
+                    let preview: String = first.text_preview.chars().take(80).collect();
+                    let extra = if items.len() > 1 {
+                        format!(" (+{} nhắc khác)", items.len() - 1)
+                    } else {
+                        String::new()
+                    };
+                    self.show_toast(format!("⏰ Nhắc tin: {preview}{extra} — bấm vào đây để xem"));
+                }
+                GuiEvent::ReminderListUpdated => {
+                    self.refresh_draft_reminder_cache();
                 }
                 GuiEvent::SyncFinished {
                     added,

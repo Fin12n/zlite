@@ -72,6 +72,10 @@ pub struct ChatMessage {
     /// Bản dịch hiển thị dưới tin gốc (session-only, không persist).
     #[serde(skip)]
     pub translation: Option<String>,
+    /// Tin đã qua sửa (recall + gửi lại). Lịch sử các bản cũ nằm ở SQLite
+    /// bảng `message_edits`; RAM chỉ giữ cờ để vẽ nhãn "(đã sửa)".
+    #[serde(default)]
+    pub edited: bool,
 }
 
 impl ChatMessage {
@@ -419,6 +423,88 @@ impl ChatMessage {
         }
         let cid = self.sticker_cate_id.unwrap_or(0);
         Some(format!("stk_{cid}_{sid}"))
+    }
+}
+
+/// Sửa tin đã gửi: Zalo không có endpoint edit-in-place nên ctdozlite
+/// recall tin cũ + gửi tin mới. Hạn chế PHẢI nói rõ với user: phía bên kia
+/// thấy "tin bị thu hồi" + một tin mới, không phải edit liền mạch như Telegram.
+/// Giới hạn 15 phút kể từ `msg.ts` (ms) — giống Zalo Web thu hồi có giới hạn thời gian.
+pub const EDIT_WINDOW_SECS: i64 = 15 * 60;
+
+/// `true` khi tin của mình, là text thuần (không sticker/link/file/quote),
+/// chưa thu hồi, và còn trong 15 phút.
+pub fn can_edit_message(msg: &ChatMessage, now_ms: i64) -> bool {
+    if !msg.is_outgoing {
+        return false;
+    }
+    if msg.sticker_id.is_some() {
+        return false;
+    }
+    if msg.link_url.as_deref().is_some_and(|u| !u.is_empty()) {
+        return false;
+    }
+    if msg.reply_to_id.is_some() {
+        return false;
+    }
+    let text = msg.text.trim();
+    if text.is_empty()
+        || text == "[Tin nhắn đã thu hồi]"
+        || text.starts_with("[Đã thu hồi]")
+        || text == VANISH_EXPIRED_TEXT
+    {
+        return false;
+    }
+    if msg.ts <= 0 {
+        return false;
+    }
+    let age_ms = now_ms.saturating_sub(msg.ts);
+    age_ms >= 0 && age_ms <= EDIT_WINDOW_SECS * 1000
+}
+
+#[cfg(test)]
+mod edit_window_tests {
+    use super::*;
+
+    #[test]
+    fn edit_window_allows_own_text_within_15m() {
+        let msg = ChatMessage {
+            is_outgoing: true,
+            text: "hello".into(),
+            ts: 1_000_000,
+            ..Default::default()
+        };
+        assert!(can_edit_message(&msg, 1_000_000 + 14 * 60 * 1000));
+    }
+
+    #[test]
+    fn edit_window_rejects_after_15m() {
+        let msg = ChatMessage {
+            is_outgoing: true,
+            text: "hello".into(),
+            ts: 1_000_000,
+            ..Default::default()
+        };
+        assert!(!can_edit_message(&msg, 1_000_000 + 16 * 60 * 1000));
+    }
+
+    #[test]
+    fn edit_window_rejects_others_and_rich() {
+        let incoming = ChatMessage {
+            is_outgoing: false,
+            text: "hi".into(),
+            ts: 1_000_000,
+            ..Default::default()
+        };
+        assert!(!can_edit_message(&incoming, 1_000_001));
+        let sticker = ChatMessage {
+            is_outgoing: true,
+            text: "[Nhãn dán]".into(),
+            ts: 1_000_000,
+            sticker_id: Some(1),
+            ..Default::default()
+        };
+        assert!(!can_edit_message(&sticker, 1_000_001));
     }
 }
 

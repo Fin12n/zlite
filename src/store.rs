@@ -20,6 +20,145 @@ pub struct StoredMessage {
     pub is_outgoing: bool,
     pub raw_json: String,
 }
+/// 1 tin trong hộp "Đã lưu" toàn cục (WaveA2). `due_at` epoch giây, 0 = không hẹn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SavedItem {
+    pub msg_id: String,
+    pub thread_id: String,
+    pub note: String,
+    pub due_at: i64,
+    pub created_at: i64,
+    pub text: String,
+    pub sender_name: String,
+    pub ts: i64,
+    pub thread_name: String,
+    pub is_group: bool,
+}
+
+/// 1 bản cũ của tin đã sửa (WaveA3). `edited_at`: epoch ms lúc sửa.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MessageEditRecord {
+    pub msg_id: String,
+    pub thread_id: String,
+    pub old_text: String,
+    pub edited_at: i64,
+}
+/// Nháp composer theo hội thoại (WaveA1). `reply_ref`: id tin đang trả lời, "" = không.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DraftEntry {
+    pub thread_id: String,
+    pub text: String,
+    pub reply_ref: String,
+    pub updated_at: i64,
+}
+
+/// 1 lần nhắc về tin nhắn (WaveA1). `due_at`/`created_at`: epoch giây.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ReminderItem {
+    pub id: i64,
+    pub thread_id: String,
+    pub msg_id: String,
+    pub due_at: i64,
+    pub text_preview: String,
+    pub created_at: i64,
+}
+/// Loại `has:` trong search nâng cao (WaveA2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchHas { Link, File, Image, Voice }
+
+/// Kết quả parse query search: operators + từ tự do (WaveA2, thuần, có test).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub from: Option<String>,
+    pub in_thread: Option<String>,
+    pub has: Vec<SearchHas>,
+    pub before_ms: Option<i64>,
+    pub after_ms: Option<i64>,
+    pub is_starred: bool,
+    pub is_pinned: bool,
+    pub phrases: Vec<String>,
+    pub hashtags: Vec<String>,
+    pub words: Vec<String>,
+}
+
+/// Ngày `YYYY-MM-DD` → epoch ms biên ngày (local). `end` = cuối ngày, else đầu ngày.
+fn search_day_bound_ms(day: &str, end: bool) -> Option<i64> {
+    use chrono::TimeZone;
+    let mut it = day.split('-');
+    let (y, mo, d): (i32, u32, u32) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    if it.next().is_some() { return None; }
+    let date = chrono::NaiveDate::from_ymd_opt(y, mo, d)?;
+    let dt = if end { date.and_hms_opt(23, 59, 59)? } else { date.and_hms_opt(0, 0, 0)? };
+    let local = chrono::Local.from_local_datetime(&dt).single()?;
+    Some(local.timestamp_millis())
+}
+
+/// Parser operator search.
+pub fn parse_search_query(raw: &str) -> SearchQuery {
+    let mut q = SearchQuery::default();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    for ch in raw.chars() {
+        if ch == '"' { in_q = !in_q; cur.push(ch); }
+        else if ch.is_whitespace() && !in_q {
+            if !cur.is_empty() { tokens.push(std::mem::take(&mut cur)); }
+        } else { cur.push(ch); }
+    }
+    if !cur.is_empty() { tokens.push(cur); }
+    for tok in tokens {
+        if tok.len() >= 2 && tok.starts_with('"') && tok.ends_with('"') {
+            let p = tok[1..tok.len()-1].trim();
+            if !p.is_empty() { q.phrases.push(p.to_string()); }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("from:") {
+            let v = v.trim(); if !v.is_empty() { q.from = Some(v.to_string()); }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("in:") {
+            let v = v.trim(); if !v.is_empty() { q.in_thread = Some(v.to_string()); }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("has:") {
+            match v.trim().to_lowercase().as_str() {
+                "link" => q.has.push(SearchHas::Link),
+                "file" => q.has.push(SearchHas::File),
+                "image" | "img" | "photo" => q.has.push(SearchHas::Image),
+                "voice" | "audio" => q.has.push(SearchHas::Voice),
+                _ => q.words.push(tok.clone()),
+            }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("before:") {
+            if let Some(ms) = search_day_bound_ms(v.trim(), true) { q.before_ms = Some(ms); }
+            else { q.words.push(tok.clone()); }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("after:") {
+            if let Some(ms) = search_day_bound_ms(v.trim(), false) { q.after_ms = Some(ms); }
+            else { q.words.push(tok.clone()); }
+            continue;
+        }
+        if let Some(v) = tok.strip_prefix("is:") {
+            match v.trim().to_lowercase().as_str() {
+                "starred" | "star" | "saved" => q.is_starred = true,
+                "pinned" | "pin" | "ghim" => q.is_pinned = true,
+                _ => q.words.push(tok.clone()),
+            }
+            continue;
+        }
+        if let Some(tag) = tok.strip_prefix('#') {
+            let t = tag.trim_matches(|c: char| ".,;:!?()[]".contains(c));
+            if !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                q.hashtags.push(t.to_string());
+            } else { q.words.push(tok.clone()); }
+            continue;
+        }
+        q.words.push(tok);
+    }
+    q
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredThread {
@@ -112,7 +251,12 @@ impl MessageStore {
         Self::ensure_vanish_schema(&conn)?;
         // Group workspace tables (notes + keyword watch): safe re-run on old DBs.
         Self::ensure_group_workspace_schema(&conn)?;
-        // Migration 1: one-time cleanup of placeholder rows. This DELETE used to run (a full
+        // Saved items (WaveA2) → draft/reminder (WaveA1) → edit history (WaveA3).
+        Self::ensure_saved_schema(&conn)?;
+        // Nháp theo hội thoại + nhắc tin (WaveA1): bảng drafts, message_reminders.
+        Self::ensure_draft_reminder_schema(&conn)?;
+        // Lịch sử bản cũ của tin đã sửa (WaveA3): bảng message_edits.
+        Self::ensure_edit_history_schema(&conn)?;
         if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
             conn.execute_batch(
                 "BEGIN;
@@ -183,6 +327,106 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Tạo bảng tin đã lưu toàn cục (#saved). `msg_id` PK; `due_at` epoch giây, 0 = không hẹn.
+    /// Chạy an toàn nhiều lần. Bảng `saved_items` sở hữu bởi WaveA2.
+    fn ensure_saved_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS saved_items (
+                msg_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                due_at INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_thread ON saved_items(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_saved_due ON saved_items(due_at);",
+         )?;
+         Ok(())
+     }
+    /// Tạo bảng nháp + nhắc tin (WaveA1). `drafts`: 1 row/thread; `message_reminders`:
+    /// 1 row/lần nhắc, `due_at` epoch giây. Chạy an toàn nhiều lần.
+    fn ensure_draft_reminder_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS drafts (
+                thread_id TEXT PRIMARY KEY,
+                text TEXT NOT NULL DEFAULT '',
+                reply_ref TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS message_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL DEFAULT '',
+                msg_id TEXT NOT NULL DEFAULT '',
+                due_at INTEGER NOT NULL DEFAULT 0,
+                text_preview TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_reminders_due ON message_reminders(due_at);",
+        )?;
+        Ok(())
+    }
+
+
+    /// Tạo bảng lịch sử bản cũ của tin đã sửa (WaveA3). Mỗi lần sửa append 1 row
+    /// `(msg_id, thread_id, old_text, edited_at)`. Chạy an toàn nhiều lần.
+    fn ensure_edit_history_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message_edits (
+                msg_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL DEFAULT '',
+                old_text TEXT NOT NULL DEFAULT '',
+                edited_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (msg_id, edited_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_edits_msg ON message_edits(msg_id);",
+        )?;
+        Ok(())
+    }
+
+    /// Lưu 1 bản cũ trước khi thay text mới. `edited_at`: epoch ms.
+    pub fn save_message_edit(
+        &mut self,
+        msg_id: &str,
+        thread_id: &str,
+        old_text: &str,
+        edited_at: i64,
+    ) -> Result<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let _ = Self::ensure_edit_history_schema(&self.conn);
+        self.conn.execute(
+            "INSERT OR IGNORE INTO message_edits (msg_id, thread_id, old_text, edited_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![msg_id, thread_id, old_text, edited_at],
+        )?;
+        Ok(())
+    }
+
+    /// Liệt kê các bản cũ của 1 tin, cũ → mới. DB thiếu bảng → vec rỗng.
+    pub fn list_message_edits(&self, msg_id: &str) -> Vec<MessageEditRecord> {
+        if msg_id.is_empty() {
+            return Vec::new();
+        }
+        let mut stmt = match self.conn.prepare(
+            "SELECT msg_id, thread_id, old_text, edited_at FROM message_edits
+             WHERE msg_id = ?1 ORDER BY edited_at ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![msg_id], |r| {
+            Ok(MessageEditRecord {
+                msg_id: r.get(0).unwrap_or_default(),
+                thread_id: r.get(1).unwrap_or_default(),
+                old_text: r.get(2).unwrap_or_default(),
+                edited_at: r.get(3).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
     /// Đọc ghi chú của 1 nhóm. Chưa có → `""`.
     pub fn get_group_note(&self, thread_id: &str) -> String {
         if thread_id.is_empty() {
@@ -210,6 +454,321 @@ impl MessageStore {
             params![thread_id, note, updated_at],
         )?;
         Ok(())
+    }
+
+    // ── Saved items toàn cục (WaveA2) ─────────────────────────────
+    /// Lưu tin (star = saved, không note). Trả `true` nếu thêm mới.
+    pub fn save_message_item(&mut self, msg_id: &str, thread_id: &str, created_at: i64) -> Result<bool> {
+        if msg_id.is_empty() { return Ok(false); }
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO saved_items (msg_id, thread_id, note, due_at, created_at)
+             VALUES (?1, ?2, '', 0, ?3)",
+            params![msg_id, thread_id, created_at],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Bỏ lưu tin. Trả `true` nếu đã xoá.
+    pub fn unsave_message_item(&mut self, msg_id: &str) -> Result<bool> {
+        if msg_id.is_empty() { return Ok(false); }
+        let rows = self.conn.execute("DELETE FROM saved_items WHERE msg_id = ?1", params![msg_id])?;
+        Ok(rows > 0)
+    }
+
+    /// Tin có đang lưu không?
+    pub fn is_message_saved(&self, msg_id: &str) -> bool {
+        if msg_id.is_empty() { return false; }
+        self.conn.query_row(
+            "SELECT 1 FROM saved_items WHERE msg_id = ?1",
+            params![msg_id],
+            |_| Ok(()),
+        ).is_ok()
+    }
+
+    /// Ghi chú / hạn cho tin đã lưu. Tin chưa lưu → upsert luôn.
+    pub fn set_saved_note_due(&mut self, msg_id: &str, thread_id: &str, note: &str, due_at: i64) -> Result<()> {
+        if msg_id.is_empty() { return Ok(()); }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        self.conn.execute(
+            "INSERT INTO saved_items (msg_id, thread_id, note, due_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(msg_id) DO UPDATE SET note = excluded.note, due_at = excluded.due_at,
+                 thread_id = CASE WHEN excluded.thread_id != '' THEN excluded.thread_id ELSE saved_items.thread_id END",
+            params![msg_id, thread_id, note, due_at, now],
+        )?;
+        Ok(())
+    }
+
+    /// Liệt kê tin đã lưu (mới lưu trước), kèm text/tên thread qua JOIN messages/threads.
+    pub fn list_saved_items(&self) -> Vec<SavedItem> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT s.msg_id, s.thread_id, s.note, s.due_at, s.created_at,
+                    COALESCE(m.text, ''), COALESCE(m.sender_name, ''), COALESCE(m.ts, 0),
+                    COALESCE(t.name, ''), COALESCE(t.is_group, 0)
+             FROM saved_items s
+             LEFT JOIN messages m ON m.msg_id = s.msg_id
+             LEFT JOIN threads t ON t.thread_id = s.thread_id
+             ORDER BY s.created_at DESC, s.msg_id DESC",
+        ) { Ok(s) => s, Err(_) => return Vec::new() };
+        stmt.query_map([], |r| {
+            let is_group: i64 = r.get(9).unwrap_or(0);
+            Ok(SavedItem {
+                msg_id: r.get(0)?, thread_id: r.get(1)?, note: r.get(2)?,
+                due_at: r.get(3)?, created_at: r.get(4)?,
+                text: r.get(5)?, sender_name: r.get(6)?, ts: r.get(7)?,
+                thread_name: r.get(8)?, is_group: is_group != 0,
+            })
+        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Tin đã lưu tới hạn (`due_at > 0 && due_at <= now`).
+    pub fn due_saved_items(&self, now_sec: i64) -> Vec<SavedItem> {
+        self.list_saved_items().into_iter().filter(|s| s.due_at > 0 && s.due_at <= now_sec).collect()
+    }
+    // ── Drafts + message reminders (WaveA1) ─────────────────────────
+    /// Lấy nháp composer của 1 thread. DB thiếu bảng → `None` (không crash tick nền).
+    pub fn get_draft(&self, thread_id: &str) -> Option<DraftEntry> {
+        if thread_id.is_empty() {
+            return None;
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT thread_id, text, reply_ref, updated_at FROM drafts WHERE thread_id = ?1")
+            .ok()?;
+        stmt.query_row(params![thread_id], |r| {
+            Ok(DraftEntry {
+                thread_id: r.get(0).unwrap_or_default(),
+                text: r.get(1).unwrap_or_default(),
+                reply_ref: r.get(2).unwrap_or_default(),
+                updated_at: r.get(3).unwrap_or(0),
+            })
+        })
+        .ok()
+    }
+
+    /// Lưu/đè nháp composer của 1 thread (text rỗng + không reply → xoá row).
+    pub fn set_draft(&mut self, thread_id: &str, text: &str, reply_ref: &str, updated_at: i64) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
+        let _ = Self::ensure_draft_reminder_schema(&self.conn);
+        if text.trim().is_empty() && reply_ref.trim().is_empty() {
+            let _ = self
+                .conn
+                .execute("DELETE FROM drafts WHERE thread_id = ?1", params![thread_id]);
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO drafts (thread_id, text, reply_ref, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(thread_id) DO UPDATE SET text = excluded.text,
+                 reply_ref = excluded.reply_ref, updated_at = excluded.updated_at",
+            params![thread_id, text, reply_ref, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Xoá nháp của 1 thread (gửi xong).
+    pub fn delete_draft(&mut self, thread_id: &str) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
+        let _ = Self::ensure_draft_reminder_schema(&self.conn);
+        let _ = self
+            .conn
+            .execute("DELETE FROM drafts WHERE thread_id = ?1", params![thread_id]);
+        Ok(())
+    }
+
+    /// Liệt kê mọi thread đang có nháp (để vẽ badge "nháp" ở sidebar).
+    pub fn list_draft_threads(&self) -> Vec<String> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT thread_id FROM drafts WHERE TRIM(text) != '' OR TRIM(reply_ref) != ''",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Tạo 1 lần nhắc về tin nhắn. `due_at` phải > `now_sec`.
+    pub fn add_reminder(
+        &mut self,
+        thread_id: &str,
+        msg_id: &str,
+        due_at: i64,
+        text_preview: &str,
+        now_sec: i64,
+    ) -> Result<ReminderItem> {
+        if thread_id.is_empty() || msg_id.is_empty() {
+            anyhow::bail!("Thiếu thread_id/msg_id");
+        }
+        if due_at <= now_sec {
+            anyhow::bail!("Thời điểm nhắc phải nằm trong tương lai");
+        }
+        let _ = Self::ensure_draft_reminder_schema(&self.conn);
+        let preview: String = text_preview.chars().take(140).collect();
+        self.conn.execute(
+            "INSERT INTO message_reminders (thread_id, msg_id, due_at, text_preview, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![thread_id, msg_id, due_at, preview, now_sec],
+        )?;
+        Ok(ReminderItem {
+            id: self.conn.last_insert_rowid(),
+            thread_id: thread_id.to_string(),
+            msg_id: msg_id.to_string(),
+            due_at,
+            text_preview: preview,
+            created_at: now_sec,
+        })
+    }
+
+    /// Liệt kê mọi reminder, tới hạn trước (QL list).
+    pub fn list_reminders(&self) -> Vec<ReminderItem> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, thread_id, msg_id, due_at, text_preview, created_at
+             FROM message_reminders ORDER BY due_at ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |r| {
+            Ok(ReminderItem {
+                id: r.get(0).unwrap_or(0),
+                thread_id: r.get(1).unwrap_or_default(),
+                msg_id: r.get(2).unwrap_or_default(),
+                due_at: r.get(3).unwrap_or(0),
+                text_preview: r.get(4).unwrap_or_default(),
+                created_at: r.get(5).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Claim + xoá atomically các reminder tới hạn (`due_at <= now`) để worker bắn toast đúng 1 lần.
+    pub fn claim_due_reminders(&mut self, now_sec: i64) -> Vec<ReminderItem> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, thread_id, msg_id, due_at, text_preview, created_at
+             FROM message_reminders WHERE due_at > 0 AND due_at <= ?1 ORDER BY due_at ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let due: Vec<ReminderItem> = stmt
+            .query_map(params![now_sec], |r| {
+                Ok(ReminderItem {
+                    id: r.get(0).unwrap_or(0),
+                    thread_id: r.get(1).unwrap_or_default(),
+                    msg_id: r.get(2).unwrap_or_default(),
+                    due_at: r.get(3).unwrap_or(0),
+                    text_preview: r.get(4).unwrap_or_default(),
+                    created_at: r.get(5).unwrap_or(0),
+                })
+            })
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        if due.is_empty() {
+            return due;
+        }
+        let ids: Vec<i64> = due.iter().map(|r| r.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM message_reminders WHERE id IN ({placeholders})");
+        let _ = self.conn.execute(
+            &sql,
+            rusqlite::params_from_iter(ids.iter()),
+        );
+        due
+    }
+
+    /// Xoá 1 reminder theo id. Trả `true` nếu có row bị xoá.
+    pub fn delete_reminder(&mut self, id: i64) -> Result<bool> {
+        let _ = Self::ensure_draft_reminder_schema(&self.conn);
+        let rows = self
+            .conn
+            .execute("DELETE FROM message_reminders WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    // ── Search operators (WaveA2) ─────────────────────────────────
+    /// Query SQLite messages với operators: from:, in:, has:link|file|image|voice,
+    /// before:/after: (YYYY-MM-DD), is:starred|pinned, "cụm chính xác", #hashtag.
+    pub fn search_messages_advanced(&self, query: &crate::store::SearchQuery, limit: usize) -> Result<Vec<StoredMessage>> {
+        let mut sql = String::from(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json FROM messages WHERE 1 = 1",
+        );
+        // Mỗi điều kiện thêm 1 placeholder `?` để rusqlite bind đúng thứ tự.
+        enum P { S(String), I(i64) }
+        let mut args: Vec<P> = Vec::new();
+        let like = |s: &str| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_"));
+        if let Some(f) = &query.from {
+            sql.push_str(" AND (LOWER(sender_name) LIKE LOWER(?) ESCAPE '\\')");
+            args.push(P::S(like(f)));
+        }
+        if let Some(t) = &query.in_thread {
+            sql.push_str(" AND thread_id = ?");
+            args.push(P::S(t.clone()));
+        }
+        for h in &query.has {
+            match h {
+                crate::store::SearchHas::Link => sql.push_str(" AND (LOWER(text) LIKE 'http://%' ESCAPE '\\' OR LOWER(text) LIKE 'https://%' ESCAPE '\\' OR INSTR(LOWER(COALESCE(raw_json,'')), 'link_url') > 0)"),
+                crate::store::SearchHas::File => sql.push_str(" AND (LOWER(text) LIKE '[tập tin%' ESCAPE '\\' OR LOWER(text) LIKE '[tep tin%' ESCAPE '\\' OR LOWER(COALESCE(msg_type,'')) LIKE '%file%')"),
+                crate::store::SearchHas::Image => sql.push_str(" AND (LOWER(text) LIKE '[hình ảnh%' ESCAPE '\\' OR LOWER(text) LIKE '[hinh anh%' ESCAPE '\\' OR LOWER(COALESCE(msg_type,'')) LIKE '%photo%')"),
+                crate::store::SearchHas::Voice => sql.push_str(" AND (LOWER(text) LIKE '[tin nhắn thoại%' ESCAPE '\\' OR LOWER(text) LIKE '%thoai%' ESCAPE '\\' OR LOWER(COALESCE(msg_type,'')) LIKE '%voice%')"),
+            }
+        }
+        if let Some(b) = query.before_ms {
+            sql.push_str(" AND ts < ?");
+            args.push(P::I(b));
+        }
+        if let Some(a) = query.after_ms {
+            sql.push_str(" AND ts > ?");
+            args.push(P::I(a));
+        }
+        if query.is_starred {
+            sql.push_str(" AND INSTR(COALESCE(raw_json,''), '\"is_starred\"') > 0");
+        }
+        if query.is_pinned {
+            sql.push_str(" AND INSTR(COALESCE(raw_json,''), '\"is_pinned\"') > 0");
+        }
+        for ph in &query.phrases {
+            sql.push_str(" AND LOWER(text) LIKE LOWER(?) ESCAPE '\\'");
+            args.push(P::S(like(ph)));
+        }
+        for tag in &query.hashtags {
+            sql.push_str(" AND LOWER(text) LIKE LOWER(?) ESCAPE '\\'");
+            args.push(P::S(like(&format!("#{tag}"))));
+        }
+        for w in &query.words {
+            sql.push_str(" AND LOWER(text) LIKE LOWER(?) ESCAPE '\\'");
+            args.push(P::S(like(w)));
+        }
+        sql.push_str(" ORDER BY ts DESC LIMIT ?");
+        args.push(P::I(limit as i64));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(args.iter().map(|a| match a {
+            P::S(s) => s as &dyn rusqlite::ToSql,
+            P::I(i) => i as &dyn rusqlite::ToSql,
+        })))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let is_outgoing_num: i64 = row.get(7)?;
+            out.push(StoredMessage {
+                msg_id: row.get(0)?, thread_id: row.get(1)?,
+                sender_id: row.get(2).unwrap_or_default(),
+                sender_name: row.get(3).unwrap_or_default(),
+                text: row.get(4).unwrap_or_default(),
+                msg_type: row.get(5).unwrap_or_default(),
+                ts: row.get(6)?, is_outgoing: is_outgoing_num != 0,
+                raw_json: row.get(8).unwrap_or_default(),
+            });
+        }
+        Ok(out)
     }
 
     /// Thêm từ khóa theo dõi cho 1 nhóm (chuẩn hoá trim + lowercase, bỏ trống).
@@ -778,6 +1337,7 @@ impl MessageStore {
                 let mut reaction_summaries = Vec::new();
                 let mut is_pinned = false;
                 let mut is_starred = false;
+                let mut is_edited = false;
                 let mut link_url = None;
                 let mut link_title = None;
                 let mut link_desc = None;
@@ -889,6 +1449,10 @@ impl MessageStore {
                             .get("is_starred")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        is_edited = val
+                            .get("is_edited")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         link_url = val
                             .get("link_url")
                             .and_then(|v| v.as_str())
@@ -932,6 +1496,7 @@ impl MessageStore {
                     reaction_summaries,
                     is_pinned,
                     is_starred,
+                    edited: is_edited,
                     link_url,
                     link_title,
                     link_desc,
@@ -983,6 +1548,7 @@ impl MessageStore {
                     }
                     existing.is_pinned = existing.is_pinned || cm.is_pinned;
                     existing.is_starred = existing.is_starred || cm.is_starred;
+                    existing.edited = existing.edited || cm.edited;
                 } else {
                     t.messages.push(cm);
                     loaded_count += 1;
@@ -1041,6 +1607,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if m.is_starred {
             meta.insert("is_starred".into(), serde_json::json!(true));
+        }
+        if m.edited {
+            meta.insert("is_edited".into(), serde_json::json!(true));
         }
         if let Some(lurl) = &m.link_url {
             meta.insert("link_url".into(), serde_json::json!(lurl));
@@ -2102,6 +2671,55 @@ mod tests {
         store.remove_group_watch("g1", "  DEADLINE  ").unwrap();
         assert!(store.list_group_watch("g1").is_empty());
     }
+    #[test]
+    fn saved_items_crud_and_note_due() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        assert!(store.save_message_item("m1", "t1", 100).unwrap());
+        assert!(!store.save_message_item("m1", "t1", 100).unwrap());
+        assert!(store.is_message_saved("m1"));
+        store.set_saved_note_due("m1", "t1", "xem lại", 200).unwrap();
+        let items = store.list_saved_items();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].note, "xem lại");
+        assert_eq!(items[0].due_at, 200);
+        assert_eq!(store.due_saved_items(150).len(), 0);
+        assert_eq!(store.due_saved_items(200).len(), 1);
+        assert!(store.unsave_message_item("m1").unwrap());
+        assert!(!store.is_message_saved("m1"));
+        assert!(store.list_saved_items().is_empty());
+    }
+
+    #[test]
+    fn parse_search_query_operators() {
+        let q = parse_search_query("from:Long has:image \"cụm chính xác\" #hashtag hello is:starred before:2026-01-01 after:2025-01-01");
+        assert_eq!(q.from.as_deref(), Some("Long"));
+        assert_eq!(q.has, vec![SearchHas::Image]);
+        assert_eq!(q.phrases, vec!["cụm chính xác".to_string()]);
+        assert_eq!(q.hashtags, vec!["hashtag".to_string()]);
+        assert_eq!(q.words, vec!["hello".to_string()]);
+        assert!(q.is_starred);
+        assert!(q.before_ms.is_some() && q.after_ms.is_some());
+    }
+
+    #[test]
+    fn search_advanced_from_has_image() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        for (id, sender, text, mt) in [
+            ("a1", "Long", "[Hình ảnh] beach", "chat.photo"),
+            ("a2", "Nam", "hello world", "chat.text"),
+        ] {
+            store.upsert_message(&StoredMessage {
+                msg_id: id.into(), thread_id: "t1".into(),
+                sender_id: sender.into(), sender_name: sender.into(),
+                text: text.into(), msg_type: mt.into(), ts: 1700000000000,
+                is_outgoing: false, raw_json: String::new(),
+            }).unwrap();
+        }
+        let q = parse_search_query("from:Long has:image");
+        let hits = store.search_messages_advanced(&q, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].msg_id, "a1");
+    }
 
 
     #[test]
@@ -2629,5 +3247,50 @@ mod tests {
             decode_zalo_cipher_payload(&enc, key),
             "Này bố kiểm tra mail xem ạ"
         );
+    }
+    #[test]
+    fn draft_roundtrip_and_empty_clears() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        assert!(store.get_draft("t1").is_none());
+        store.set_draft("t1", "đang gõ dở", "", 1000).unwrap();
+        let d = store.get_draft("t1").unwrap();
+        assert_eq!(d.text, "đang gõ dở");
+        assert_eq!(d.reply_ref, "");
+        store.set_draft("t1", "", "m9", 1001).unwrap();
+        let d2 = store.get_draft("t1").unwrap();
+        assert_eq!(d2.text, "");
+        assert_eq!(d2.reply_ref, "m9");
+        assert_eq!(store.list_draft_threads(), vec!["t1".to_string()]);
+        // Text rỗng + không reply → xoá row.
+        store.set_draft("t1", "   ", "", 1002).unwrap();
+        assert!(store.get_draft("t1").is_none());
+        assert!(store.list_draft_threads().is_empty());
+        store.set_draft("t2", "nháp 2", "", 1003).unwrap();
+        store.delete_draft("t2").unwrap();
+        assert!(store.get_draft("t2").is_none());
+    }
+
+    #[test]
+    fn reminder_claim_once_and_list_ordered() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        // Quá khứ → từ chối.
+        assert!(store.add_reminder("t1", "m1", 900, "tin 1", 1000).is_err());
+        store.add_reminder("t1", "m1", 1100, "tin 1", 1000).unwrap();
+        store.add_reminder("t1", "m2", 1050, "tin 2", 1000).unwrap();
+        let listed = store.list_reminders();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].msg_id, "m2");
+        // Chưa tới giờ → claim rỗng.
+        assert!(store.claim_due_reminders(1049).is_empty());
+        // Tới giờ → claim đúng 1 tin, đúng 1 lần (xoá sau claim).
+        let due = store.claim_due_reminders(1050);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].msg_id, "m2");
+        assert!(store.claim_due_reminders(1060).is_empty());
+        assert_eq!(store.list_reminders().len(), 1);
+        let id = store.list_reminders()[0].id;
+        assert!(store.delete_reminder(id).unwrap());
+        assert!(!store.delete_reminder(id).unwrap());
+        assert!(store.list_reminders().is_empty());
     }
 }

@@ -2428,6 +2428,8 @@ impl ZaloGuiApp {
                         let msg = format!("✅ Đã lưu tập tin \"{fname}\" tại {path}");
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
+                        // Mở thư mục chứa file để user khỏi mất công tìm (#102).
+                        reveal_in_file_manager(&path);
                     }
                     Err(e) => {
                         let msg = format!("⚠️ Lỗi lưu tập tin: {e}");
@@ -2437,6 +2439,29 @@ impl ZaloGuiApp {
                 },
             }
         }
+    }
+}
+
+/// Hiện file trong trình quản lý file của OS (Finder/Explorer/xdg-open cha).
+/// Fire-and-forget: lỗi mở bị bỏ qua, không bao giờ panic UI (#102).
+fn reveal_in_file_manager(path: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").args(["-R", path]).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{path}"))
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let parent = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.as_os_str())
+            .unwrap_or(std::ffi::OsStr::new("."));
+        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
     }
 }
 

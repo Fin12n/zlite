@@ -606,6 +606,7 @@ pub struct ZaloGuiApp {
     search_query: String,
     input_message: String,
     status_msg: String,
+    pub(crate) voice_recorder: Option<crate::audio::VoiceRecorder>,
 
     // Reply / forward state
     replying_to: Option<ChatMessage>,
@@ -871,6 +872,7 @@ impl ZaloGuiApp {
             thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
+            voice_recorder: None,
             replying_to: None,
             forward_msg: None,
             forward_filter: String::new(),

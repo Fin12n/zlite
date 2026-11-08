@@ -4594,6 +4594,83 @@ impl ZaloGuiApp {
                             self.replying_to = None;
                         }
                     }
+                    // 3b-1b. Voice recording strip (hiện khi đang thu mic).
+                    if self.voice_recorder.is_some() {
+                        let mut voice_cancel = false;
+                        let mut voice_send = false;
+                        let elapsed_s = self
+                            .voice_recorder
+                            .as_ref()
+                            .map(|r| r.elapsed().as_secs())
+                            .unwrap_or(0);
+                        let level = crate::media::mic_level_permille();
+                        egui::Frame::none()
+                            .fill(pal.danger.linear_multiply(0.1))
+                            .inner_margin(Margin::symmetric(14.0, 6.0))
+                            .rounding(Rounding::same(8.0))
+                            .stroke(Stroke::new(1.0_f32, pal.danger.linear_multiply(0.4)))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("🔴")
+                                            .size(14.0),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Đang thu {:02}:{:02}",
+                                            elapsed_s / 60,
+                                            elapsed_s % 60
+                                        ))
+                                        .size(12.5)
+                                        .color(pal.text_primary)
+                                        .strong(),
+                                    );
+                                    // Meter đơn giản theo mic level (0..1000 permille).
+                                    let bars = (level / 125).min(8) as usize;
+                                    let meter: String = (0..8)
+                                        .map(|i| if i < bars { '▮' } else { '▯' })
+                                        .collect();
+                                    ui.label(
+                                        RichText::new(meter)
+                                            .size(12.0)
+                                            .color(pal.danger),
+                                    );
+                                    ui.with_layout(
+                                        Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .button("Gửi thoại")
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                voice_send = true;
+                                            }
+                                            if ui
+                                                .small_button(lucide::X)
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Hủy ghi âm")
+                                                .clicked()
+                                            {
+                                                voice_cancel = true;
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        if voice_cancel {
+                            if let Some(rec) = self.voice_recorder.take() {
+                                rec.cancel();
+                            }
+                            self.show_toast("Đã hủy ghi âm");
+                        }
+                        if voice_send {
+                            self.finish_voice_recording(&thread_id, is_group);
+                        }
+                        // Repaint liên tục để timer/meter chạy mượt khi đang thu.
+                        ui.ctx().request_repaint_after(
+                            std::time::Duration::from_millis(200),
+                        );
+                    }
                     // 3b-2. Live Typing Indicator Banner
                     if self.settings.show_typing_indicator {
                         if let Some((typing_who, until)) = self.typing_map.get(&thread_id) {
@@ -5041,6 +5118,54 @@ impl ZaloGuiApp {
                                                 if let Some(tx) = WORKER_TX.get() {
                                                     let _ = tx.send(WorkerCmd::TriggerScreenshot);
                                                     self.show_toast("Đang bật chế độ chụp màn hình… Kéo chuột để chọn vùng cần chụp");
+                                                }
+                                            }
+                                            // 5) Mic Icon Button (ghi âm tin nhắn thoại)
+                                            let (mic_rect, mic_resp) = ui.allocate_exact_size(
+                                                Vec2::new(34.0, 34.0),
+                                                Sense::click(),
+                                            );
+                                            let mic_active = self.voice_recorder.is_some();
+                                            if mic_resp.hovered() || mic_active {
+                                                ui.painter().rect_filled(
+                                                    mic_rect,
+                                                    Rounding::same(8.0),
+                                                    if mic_active {
+                                                        pal.danger.linear_multiply(0.2)
+                                                    } else {
+                                                        pal.bg_hover
+                                                    },
+                                                );
+                                            }
+                                            ui.painter().text(
+                                                mic_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "🎤",
+                                                FontId::proportional(17.0),
+                                                if mic_active {
+                                                    pal.danger
+                                                } else if mic_resp.hovered() {
+                                                    pal.primary_hover
+                                                } else {
+                                                    pal.text_secondary
+                                                },
+                                            );
+                                            if mic_resp
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text(if mic_active {
+                                                    "Đang thu — bấm để dừng và gửi"
+                                                } else {
+                                                    "Ghi âm tin nhắn thoại"
+                                                })
+                                                .clicked()
+                                            {
+                                                if mic_active {
+                                                    self.finish_voice_recording(
+                                                        &thread_id,
+                                                        is_group,
+                                                    );
+                                                } else {
+                                                    self.toggle_voice_recording();
                                                 }
                                             }
 
@@ -5662,6 +5787,48 @@ pub(crate) fn extract_active_mention_query(text: &str) -> Option<(usize, &str)> 
 }
 
 impl ZaloGuiApp {
+    /// Bắt đầu thu mic (nút 🎤). Lỗi mic/quyền → toast thân thiện, không crash.
+    pub(super) fn toggle_voice_recording(&mut self) {
+        if self.voice_recorder.is_some() {
+            return;
+        }
+        match crate::audio::VoiceRecorder::start() {
+            Ok(rec) => {
+                self.voice_recorder = Some(rec);
+                self.show_toast("🔴 Đang thu — bấm Gửi thoại để gửi, X để hủy");
+            }
+            Err(e) => {
+                self.show_toast(format!("Không thu được: {e}"));
+            }
+        }
+    }
+
+    /// Dừng thu, encode MP3 rồi gửi qua worker (nút Gửi thoại / bấm mic lần nữa).
+    pub(super) fn finish_voice_recording(&mut self, thread_id: &str, is_group: bool) {
+        let Some(rec) = self.voice_recorder.take() else {
+            return;
+        };
+        match rec.stop_and_encode() {
+            Ok(record) => {
+                self.show_toast(format!(
+                    "⏳ Đang gửi thoại ({}s)…",
+                    record.duration_secs
+                ));
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::SendVoice {
+                        to_id: thread_id.to_string(),
+                        is_group,
+                        mp3_path: record.path,
+                        duration_secs: record.duration_secs,
+                    });
+                }
+            }
+            Err(e) => {
+                self.show_toast(format!("Không gửi được thoại: {e}"));
+            }
+        }
+    }
+
     pub(super) fn render_mention_suggestion_popover(
         &mut self,
         ctx: &egui::Context,

@@ -89,6 +89,12 @@ pub enum WorkerCmd {
         original_hd: bool,
     },
     TriggerScreenshot,
+    SendVoice {
+        to_id: String,
+        is_group: bool,
+        mp3_path: std::path::PathBuf,
+        duration_secs: u64,
+    },
     SendTyping {
         thread_id: String,
         is_group: bool,
@@ -2977,6 +2983,52 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let ctx_clone = egui_ctx.clone();
                             tokio::task::spawn_blocking(move || {
                                 capture_screen_interactive(gui_tx_clone, ctx_clone);
+                            });
+                        }
+                        WorkerCmd::SendVoice {
+                            to_id,
+                            is_group,
+                            mp3_path,
+                            duration_secs,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                    "⏳ Đang tải lên và gửi tin nhắn thoại…".into(),
+                                ));
+                                ctx_clone.request_repaint();
+                                // send_voice_message tự đọc file mp3 + trả (resp, ChatMessage).
+                                let s = session_clone.lock().await.clone();
+                                let path_clone = mp3_path.clone();
+                                match crate::chat::send_voice_message(
+                                    &s,
+                                    &to_id,
+                                    is_group,
+                                    &path_clone,
+                                    duration_secs,
+                                )
+                                .await
+                                {
+                                    Ok((_resp, cm)) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::AttachmentSent {
+                                            thread_id: to_id,
+                                            msg: cm,
+                                        });
+                                        let _ = std::fs::remove_file(&mp3_path);
+                                    }
+                                    Err(e) => {
+                                        let err_s = e.to_string();
+                                        crate::logger::log_error("gui::send_voice", &err_s);
+                                        let _ = gui_tx_clone.send(GuiEvent::SendFailed {
+                                            thread_id: to_id,
+                                            text: "[Tin nhắn thoại]".into(),
+                                            error: format!("Lỗi gửi thoại: {err_s}"),
+                                        });
+                                    }
+                                }
+                                ctx_clone.request_repaint();
                             });
                         }
                         WorkerCmd::StartCall {

@@ -1052,16 +1052,21 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    // On session refresh under the same account, keep thread list & unread counts.
+                    // Clearing + re-fetching counts all existing history as brand-new unread (#119).
+                    let is_refresh = self.is_logged_in;
                     self.is_logged_in = true;
                     self.user_name = name;
                     self.user_uin = uin;
                     if avatar.is_some() {
                         self.user_avatar = avatar;
                     }
-                    self.threads.clear();
-                    self.unread_counts.clear();
-                    self.history_reached_start.clear();
-                    self.selected_thread_index = 0;
+                    if !is_refresh {
+                        self.threads.clear();
+                        self.unread_counts.clear();
+                        self.history_reached_start.clear();
+                        self.selected_thread_index = 0;
+                    }
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
                     self.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
@@ -1233,6 +1238,29 @@ impl ZaloGuiApp {
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
+                                // Brand-new thread: only count incoming messages newer than the
+                                // persisted read-point (#119). Without this, reopening the app
+                                // counts the entire loaded history of every thread as unread.
+                                let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
+                                let inc_cnt = nt
+                                    .messages
+                                    .iter()
+                                    .filter(|m| {
+                                        if m.is_outgoing {
+                                            return false;
+                                        }
+                                        if seen.is_empty() {
+                                            return true;
+                                        }
+                                        matches!(
+                                            crate::unread::compare_ids(&m.id, seen),
+                                            Some(std::cmp::Ordering::Greater) | None
+                                        )
+                                    })
+                                    .count();
+                                if inc_cnt > 0 {
+                                    self.unread_counts.insert(nt.id.clone(), inc_cnt);
+                                }
                                 self.threads.push(nt);
                             }
                         }

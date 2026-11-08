@@ -27,6 +27,8 @@ pub struct StoredThread {
     pub name: String,
     pub is_group: bool,
     pub last_ts: i64,
+    #[serde(default)]
+    pub last_read_msg_id: String,
 }
 
 pub struct MessageStore {
@@ -74,9 +76,24 @@ impl MessageStore {
                 thread_id TEXT PRIMARY KEY,
                 name TEXT,
                 is_group INTEGER,
-                last_ts INTEGER
+                last_ts INTEGER,
+                last_read_msg_id TEXT NOT NULL DEFAULT ''
             );",
         )?;
+
+        // Ensure `last_read_msg_id` column exists for databases created before this migration (#119).
+        let cols = conn
+            .prepare("PRAGMA table_info(threads)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(std::result::Result::ok)
+            .collect::<Vec<_>>();
+        if !cols.iter().any(|c| c == "last_read_msg_id") {
+            let _ = conn.execute(
+                "ALTER TABLE threads ADD COLUMN last_read_msg_id TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
+
         // Migration 1: one-time cleanup of placeholder rows. This DELETE used to run (a full
         // table scan) on every hydrate; new rows are filtered in `persist_threads` instead.
         if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
@@ -188,8 +205,8 @@ impl MessageStore {
     /// Insert or update thread metadata.
     pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO threads (thread_id, name, is_group, last_ts)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO threads (thread_id, name, is_group, last_ts, last_read_msg_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = CASE
                      WHEN excluded.name IS NOT NULL AND excluded.name != ''
@@ -200,13 +217,31 @@ impl MessageStore {
                      ELSE COALESCE(NULLIF(threads.name, ''), excluded.name)
                  END,
                  is_group = excluded.is_group,
-                 last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts)",
+                 last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
+                 last_read_msg_id = CASE
+                     WHEN excluded.last_read_msg_id IS NOT NULL AND excluded.last_read_msg_id != ''
+                     THEN excluded.last_read_msg_id
+                     ELSE threads.last_read_msg_id
+                 END",
             params![
                 t.thread_id,
                 t.name,
                 if t.is_group { 1 } else { 0 },
                 t.last_ts,
+                t.last_read_msg_id,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Persist the read-point (last read message ID) of a thread (#119).
+    /// Upserts safely even if the thread does not have a row yet.
+    pub fn set_thread_read(&mut self, thread_id: &str, last_msg_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO threads (thread_id, last_read_msg_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET last_read_msg_id = excluded.last_read_msg_id",
+            params![thread_id, last_msg_id],
         )?;
         Ok(())
     }
@@ -264,11 +299,28 @@ impl MessageStore {
 
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
     pub fn all_threads(&self) -> Result<Vec<StoredThread>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT thread_id, name, is_group, last_ts
+        let has_read_col = self
+            .conn
+            .prepare("PRAGMA table_info(threads)")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(1))
+                    .ok()
+                    .map(|rows| rows.flatten().any(|c| c == "last_read_msg_id"))
+            })
+            .unwrap_or(false);
+
+        let sql = if has_read_col {
+            "SELECT thread_id, name, is_group, last_ts, last_read_msg_id
              FROM threads
-             ORDER BY last_ts DESC",
-        )?;
+             ORDER BY last_ts DESC"
+        } else {
+            "SELECT thread_id, name, is_group, last_ts, ''
+             FROM threads
+             ORDER BY last_ts DESC"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             let is_group_num: i64 = row.get(2).unwrap_or(0);
             Ok(StoredThread {
@@ -276,6 +328,7 @@ impl MessageStore {
                 name: row.get(1).unwrap_or_default(),
                 is_group: is_group_num != 0,
                 last_ts: row.get(3).unwrap_or(0),
+                last_read_msg_id: row.get(4).unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -304,6 +357,10 @@ impl MessageStore {
                     existing.name = st.name;
                 }
                 existing.is_group = existing.is_group || st.is_group;
+                // Restore persisted read-point (#119) so read messages are not recounted as unread.
+                if !st.last_read_msg_id.is_empty() {
+                    existing.unread.last_seen_id = Some(st.last_read_msg_id.clone());
+                }
             } else if !st.is_group
                 && st.name.contains("Cloud của tôi")
                 && threads
@@ -327,9 +384,13 @@ impl MessageStore {
                     );
                 }
             } else {
+                let mut unread = crate::unread::UnreadState::default();
+                if !st.last_read_msg_id.is_empty() {
+                    unread.last_seen_id = Some(st.last_read_msg_id.clone());
+                }
                 threads.push(Thread {
                     presentation: Default::default(),
-                    unread: Default::default(),
+                    unread,
                     id: st.thread_id.clone(),
                     name: if st.name.is_empty() {
                         format!("Người dùng {}", st.thread_id)
@@ -663,6 +724,7 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             name: t.name.clone(),
             is_group: t.is_group,
             last_ts,
+            last_read_msg_id: t.unread.last_seen_id.clone().unwrap_or_default(),
         };
         store.upsert_thread(&st)?;
 
@@ -1119,6 +1181,7 @@ fn import_message_table(
         name: thread_name.to_string(),
         is_group,
         last_ts,
+        last_read_msg_id: String::new(),
     })?;
 
     dst.conn.execute_batch("BEGIN")?;
@@ -1600,6 +1663,7 @@ mod tests {
                 name: "Example".into(),
                 is_group: false,
                 last_ts: 1793467800000,
+                last_read_msg_id: String::new(),
             })
             .unwrap();
         for (id, ts) in [("msg-0001", 1793467800), ("msg-0002", 1793467800000)] {
@@ -1736,6 +1800,7 @@ mod tests {
             name: "Nhóm".into(),
             is_group: true,
             last_ts,
+            last_read_msg_id: String::new(),
         };
         store.upsert_thread(&st(300)).unwrap();
         store.upsert_thread(&st(100)).unwrap();
@@ -1800,6 +1865,31 @@ mod tests {
     }
 
     #[test]
+    fn thread_read_point_roundtrips_and_survives_reupsert() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store.set_thread_read("t1", "msg-100").unwrap();
+        let got = store.all_threads().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].last_read_msg_id, "msg-100");
+
+        // Re-upserting without read-point preserves existing read-point (#119).
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "A".into(),
+                is_group: false,
+                last_ts: 1,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-100");
+
+        // Explicit new read-point updates.
+        store.set_thread_read("t1", "msg-200").unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
+    }
+
+    #[test]
     fn delete_thread_and_search_messages_work() {
         let mut store = MessageStore::open(":memory:").unwrap();
         store
@@ -1808,6 +1898,7 @@ mod tests {
                 name: "Nhóm Kỹ Thuật".into(),
                 is_group: true,
                 last_ts: 500,
+                last_read_msg_id: String::new(),
             })
             .unwrap();
         store
@@ -1850,6 +1941,7 @@ mod tests {
                     name: "Migrated Group".into(),
                     is_group: true,
                     last_ts: 999,
+                    last_read_msg_id: String::new(),
                 })
                 .unwrap();
             src_store

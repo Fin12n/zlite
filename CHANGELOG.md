@@ -5,9 +5,19 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
-### Fixed (Sửa lỗi)
-- **Clipboard Windows:** nhận thêm `CF_DIBV5`, giới hạn kích thước trước khi cấp phát và giải mã đúng bit mask màu/alpha của DIB 24/32-bit; nhả clipboard trước khi chuyển pixel.
-- **Gửi tập tin / video đính kèm thất bại với HTTP 405 ([#75](https://github.com/ctdoteam1110/ctdozlite/issues/75)):** `send_attachment` (`src/chat.rs`) chờ sự kiện điều khiển `file_done` (WebSocket `cmd 601`/`603` hoặc `lp_control`) để lấy `fileUrl` trước khi gọi `asyncfile/msg`, thay vì gửi thiếu `fileUrl` rồi rơi vào endpoint `sharefile_full` đã bị khai tử. Lỗi tải lên từng phần (chunk) nay được báo rõ thay vì bị bỏ qua.
+## [0.1.0] - 2026-11-09
+
+### Added (Tính năng mới & Cập nhật)
+- **Đồng bộ tin nhắn Sync v2 di động bằng Wasmtime (`src/zproto_host.rs`, `src/history_sync.rs`):** Nhúng trực tiếp engine WASM `libzproto_wasm` của Zalo PC thông qua runtime Wasmtime thuần Rust, loại bỏ hoàn toàn việc phụ thuộc vào Node.js bên ngoài khi thực hiện đồng bộ tin nhắn từ thiết bị di động (hỗ trợ bắt tay Curve25519/X25519, giải mã session key và streaming gói tin).
+- **Giao thức ghim và bỏ ghim tin nhắn qua API máy chủ (`src/chat.rs`, `src/endpoints.rs`):** Tích hợp reverse-engineering các endpoint bảng tin Zalo (`friendboard-wpa` cho chat 1-1 và `groupboard-wpa` cho nhóm), cấu trúc hóa dữ liệu `MSG_TOPIC` với đầy đủ định danh tin nhắn (`global_msg_id`, `client_msg_id`).
+- **Ghi nhận đóng góp từ cộng đồng:** Bổ sung các đóng góp tiêu biểu từ @gr219 (xử lý `file_done`, spawn helper ETXTBSY), @Leoaxo098 (khóa composer nhóm bị giới hạn), và @hoanglong149 (nghiên cứu WASM Sync v2) vào danh sách vinh danh và cập nhật quy mô codebase lên hơn 73.300+ dòng.
+
+### Fixed (Sửa lỗi & Tinh chỉnh giao diện)
+- **Sửa lỗi gửi lại thông báo và đếm lại tin nhắn chưa đọc khi mở lại ứng dụng ([#122](https://github.com/ctdoteam1110/ctdozlite/issues/122)):** Khi khởi động ứng dụng, nạp trực tiếp điểm đọc từ đúng cơ sở dữ liệu tài khoản (`accounts/<uin>_history.db`) thay vì file mặc định. Bổ sung bộ lọc so sánh `last_seen_id` khi đồng bộ nền để không bao giờ đếm lại các tin nhắn đã đọc thành tin chưa đọc.
+- **Tối ưu hóa layout Responsive & ngăn vỡ khung chat trên màn hình nhỏ ([#123](https://github.com/ctdoteam1110/ctdozlite/issues/123)):** Khôi phục các điểm ngắt responsive (`is_compact_w`, `is_narrow_w`), tự động ẩn thanh thông tin drawer bên phải khi cửa sổ quá hẹp. Cho phép co giãn sidebar hội thoại linh hoạt theo tỷ lệ (tối đa 42% chiều rộng màn hình). Thêm cơ chế `.truncate()` ở tiêu đề chat để ngăn tràn chữ đè lên cụm nút gọi điện/video.
+- **Ẩn các liên hệ chưa có tin nhắn trong danh sách chat chính:** Chỉ hiển thị những người dùng đã có phát sinh tin nhắn qua lại trong danh sách hội thoại bên trái (chuẩn hành vi Zalo gốc), ẩn các tài khoản danh bạ trống giúp sidebar gọn gàng hơn.
+- **Sửa lỗi ký tự ô vuông (Tofu) và thiết kế lại popup thông báo:** Thay thế toàn bộ ký tự Unicode checkmark `✓` và dấu đóng `✕` không được font hỗ trợ bằng icon vector Lucide (`lucide::CHECK`, `lucide::X`). Mở rộng kích thước, padding và chiều cao thanh nhập liệu trong popup thông báo nổi góc màn hình.
+- **Hợp nhất cảm xúc tin nhắn (Reaction):** Gộp các phản ứng cùng loại emoji thành một biểu tượng duy nhất kèm số lượng tổng, bổ sung hộp thoại chi tiết xem danh sách người thả cảm xúc.
 
 ## [0.0.7] - 2026-11-03
 

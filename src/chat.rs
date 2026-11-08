@@ -53,6 +53,9 @@ pub struct ChatMessage {
     pub client_message_id: String,
     #[serde(default)]
     pub is_pinned: bool,
+    /// Group-board topic id backing a remote pin (`/api/board/topic/createv2`), needed to unpin.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub board_topic_id: String,
     #[serde(default)]
     pub is_starred: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6536,6 +6539,390 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
         friendship,
     })
 }
+/// Board topic type for a pinned chat message (`MSG_TOPIC` = 2 in Zalo's topic enum:
+/// `TEXT_TOPIC=0`, `LINK_TOPIC=1`, `MSG_TOPIC=2`, `POLL_TOPIC=3`, `REMINDER_TOPIC=4`).
+pub const MSG_TOPIC: i32 = 2;
+
+/// Group id as the board API expects it: no `g`/`group_` prefix.
+fn board_grid(thread_id: &str) -> String {
+    thread_id
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G')
+        .trim()
+        .to_string()
+}
+
+/// Zalo answers HTTP 200 with `error_code` in the body; non-zero means the board call was refused
+/// (permissions, stale grid, unsupported thread) and nothing changed server-side.
+fn board_reject_nonzero(resp: Value) -> Result<Value> {
+    let code = resp.get("error_code").and_then(Value::as_i64).unwrap_or(0);
+    if code != 0 {
+        let msg = resp
+            .get("error_message")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or("board request rejected");
+        anyhow::bail!("mã lỗi {code}: {msg}");
+    }
+    Ok(resp)
+}
+
+/// Topic `params` object for a pinned message, using the field names Zalo reads back
+/// (`params.global_msg_id`, `params.client_msg_id`, `params.senderUid`, `params.msg_type`,
+/// `params.title` — `getTopicDataFromMessage` in `compact-app-pc.js`).
+fn message_topic_params(msg: &ChatMessage, thread_id: &str) -> Value {
+    let title = if msg.sticker_id.is_some() {
+        "[Nhãn dán]".to_string()
+    } else {
+        let trimmed = msg.text.trim();
+        let mut s: String = trimmed.chars().take(120).collect();
+        if trimmed.chars().count() > 120 {
+            s.push('…');
+        }
+        if s.is_empty() {
+            "[Tin nhắn]".to_string()
+        } else {
+            s
+        }
+    };
+    let sender = if msg.is_outgoing {
+        "0".to_string()
+    } else {
+        sidebar_sender_id(msg).unwrap_or_else(|| thread_id.to_string())
+    };
+    json!({
+        "global_msg_id": msg.id,
+        "client_msg_id": msg.client_message_id,
+        "senderUid": sender,
+        "title": title,
+        "createTime": msg.ts,
+    })
+}
+
+fn board_topic_body(grid: &str, thread_id: &str, msg: &ChatMessage, imei: &str) -> Value {
+    json!({
+        "grid": grid,
+        "type": MSG_TOPIC,
+        "color": -16777216,
+        "emoji": "",
+        "startTime": -1,
+        "duration": -1,
+        "params": message_topic_params(msg, thread_id).to_string(),
+        "needPin": true,
+        "pinAct": 1,
+        "repeat": 0,
+        "src": 0,
+        "imei": imei,
+    })
+}
+
+/// Pin one chat message.
+///
+/// Zalo stores a pinned message as a *board topic* of type `MSG_TOPIC` and pins it in the same
+/// call. Groups: POST `groupboard-wpa` `/api/board/topic/createv2` (cmd `12007`). 1-1 chats:
+/// GET `friendboard-wpa` `/api/friendboard/create` (cmd `12067`, confirmed by a live web capture).
+pub async fn pin_message(
+    s: &Session,
+    thread_id: &str,
+    is_group: bool,
+    msg: &ChatMessage,
+) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let grid = board_grid(thread_id);
+    let body = if is_group {
+        board_topic_body(&grid, thread_id, msg, &s.imei)
+    } else {
+        // 1-1 uses the friend board: same topic fields, keyed by the peer uid.
+        let mut v = board_topic_body(&grid, thread_id, msg, &s.imei);
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("grid");
+            obj.insert("uid".into(), json!(grid));
+        }
+        v
+    };
+    let params = s.encoded_params(&body)?;
+    if is_group {
+        let url = format!(
+            "{}/api/board/topic/createv2?{}",
+            crate::endpoints::GROUP_BOARD,
+            s.common_params()
+        );
+        let resp = s.post_form(&url, format!("params={params}")).await?;
+        board_reject_nonzero(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    } else {
+        let url = format!(
+            "{}/api/friendboard/create?{}&params={params}",
+            crate::endpoints::FRIEND_BOARD,
+            s.common_params()
+        );
+        let resp = s.get(&url).await?;
+        board_reject_nonzero(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    }
+}
+
+/// Unpin a chat message previously pinned with [`pin_message`].
+pub async fn unpin_message(
+    s: &Session,
+    thread_id: &str,
+    is_group: bool,
+    topic_id: &str,
+) -> Result<Value> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    if topic_id.trim().is_empty() {
+        // Without the board topic id the server has nothing to address; say so instead of letting
+        // it answer with the opaque 114 "invalid parameter".
+        anyhow::bail!("chưa có mã bảng tin (topic id) của tin nhắn này");
+    }
+    let grid = board_grid(thread_id);
+    // Zalo unpins topics through the multi_unpin GET endpoint. Its `topics` array carries
+    // `{topicId, topicType}` objects (module `L()` in `compact-app-pc.js`), not bare id strings —
+    // sending strings is rejected with error 114 "invalid parameter".
+    let topic_entry = json!({ "topicId": topic_id, "topicType": MSG_TOPIC });
+    let body = if is_group {
+        json!({ "grid": grid, "topics": [topic_entry], "boardVersion": 0 })
+    } else {
+        json!({ "uid": grid, "topics": [topic_entry], "boardVersion": 0 })
+    };
+    let params = s.encoded_params(&body)?;
+    let url = if is_group {
+        format!(
+            "{}/api/board/multi_unpin?{}&params={params}",
+            crate::endpoints::GROUP_BOARD,
+            s.common_params()
+        )
+    } else {
+        format!(
+            "{}/api/friendboard/multi_unpin?{}&params={params}",
+            crate::endpoints::FRIEND_BOARD,
+            s.common_params()
+        )
+    };
+    let resp = s.get(&url).await?;
+    board_reject_nonzero(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+}
+
+/// One pinned board item as the server reports it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoardTopic {
+    pub id: String,
+    /// Message ids from `topic.params` (`global_msg_id` / `client_msg_id`), used to match the
+    /// pinned message back to a loaded bubble.
+    pub msg_ids: Vec<String>,
+}
+
+fn collect_msg_ids(params: &Value, out: &mut Vec<String>) {
+    for key in ["global_msg_id", "client_msg_id", "msgId", "cliMsgId"] {
+        if let Some(v) = params.get(key) {
+            let s = match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            };
+            if !s.is_empty() && s != "0" && !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+}
+
+/// Parse a board list response into topics. `data` is normally a JSON object, but some endpoints
+/// hand it back as a JSON string.
+pub fn parse_board_topics(resp: &Value) -> Vec<BoardTopic> {
+    let mut data = resp.get("data").cloned().unwrap_or(Value::Null);
+    if let Value::String(txt) = &data {
+        data = serde_json::from_str::<Value>(txt).unwrap_or(Value::Null);
+    }
+    let mut raw: Vec<Value> = Vec::new();
+    match &data {
+        Value::Array(items) => raw.extend(items.iter().cloned()),
+        Value::Object(map) => {
+            for key in ["topics", "topic", "items", "data", "boards"] {
+                match map.get(key) {
+                    Some(Value::Array(items)) => raw.extend(items.iter().cloned()),
+                    Some(v @ Value::Object(_)) => raw.push(v.clone()),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut out: Vec<BoardTopic> = Vec::new();
+    for item in raw {
+        let id = ["id", "topicId"]
+            .iter()
+            .find_map(|k| item.get(*k))
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let mut msg_ids: Vec<String> = Vec::new();
+        if let Some(params) = item.get("params") {
+            let params = match params {
+                Value::String(txt) => {
+                    serde_json::from_str::<Value>(txt).unwrap_or(Value::Null)
+                }
+                other => other.clone(),
+            };
+            collect_msg_ids(&params, &mut msg_ids);
+        }
+        out.push(BoardTopic { id, msg_ids });
+    }
+    out
+}
+
+fn board_trace(label: &str, detail: &str) {
+    // Opt-in diagnostics: `CTDOZLITE_BOARD_TRACE=1` appends the board calls to `board_trace.log`
+    // (gitignored). Off by default: payloads carry conversation content.
+    if std::env::var("CTDOZLITE_BOARD_TRACE").ok().as_deref() != Some("1") {
+        return;
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("board_trace.log")
+    {
+        let _ = writeln!(f, "{label} | {detail}");
+    }
+}
+
+async fn board_get_json(s: &Session, url: &str) -> Result<Value> {
+    let resp = s.get(url).await?;
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    board_reject_nonzero(dec)
+}
+
+#[allow(dead_code)]
+async fn board_post_json(s: &Session, url: &str, body: &Value) -> Result<Value> {
+    let params = s.encoded_params(body)?;
+    let resp = s.post_form(url, format!("params={params}")).await?;
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    board_reject_nonzero(dec)
+}
+
+/// Fetch the pinned board items of a conversation, so pins made elsewhere show up here too.
+///
+/// Zalo has two generations of this API and which one answers depends on the account/session, so
+/// both are tried in order and the first accepted reply wins:
+/// - 1-1: `GET /api/friendboard/list` (cmd `12065`), then `POST /api/board/oneone/list` (cmd `12432`).
+/// - group: `GET /api/board/pin/list` (cmd `12001`), then `GET /api/board/list` (cmd `12140`).
+pub async fn list_board_topics(
+    s: &Session,
+    thread_id: &str,
+    is_group: bool,
+) -> Result<Vec<BoardTopic>> {
+    if s.login.is_none() {
+        anyhow::bail!("chưa đăng nhập");
+    }
+    let grid = board_grid(thread_id);
+    let mut errors: Vec<String> = Vec::new();
+
+    if is_group {
+        let body = json!({ "groupId": grid, "boardVersion": 0, "imei": s.imei });
+        if let Ok(params) = s.encoded_params(&body) {
+            let url = format!(
+                "{}/api/board/pin/list?{}&params={params}",
+                crate::endpoints::GROUP_BOARD,
+                s.common_params()
+            );
+            match board_get_json(s, &url).await {
+                Ok(v) => {
+                    let topics = parse_board_topics(&v);
+                    board_trace("pin/list", &format!("ok topics={}", topics.len()));
+                    return Ok(topics);
+                }
+                Err(e) => {
+                    board_trace("pin/list", &format!("err {e}"));
+                    errors.push(format!("pin/list: {e}"));
+                }
+            }
+        }
+        let body = json!({
+            "group_id": grid, "board_type": 0, "page": 0, "count": 50,
+            "last_id": 0, "last_type": 0, "imei": s.imei,
+        });
+        if let Ok(params) = s.encoded_params(&body) {
+            let url = format!(
+                "{}/api/board/list?{}&params={params}",
+                crate::endpoints::GROUP_BOARD,
+                s.common_params()
+            );
+            match board_get_json(s, &url).await {
+                Ok(v) => {
+                    let topics = parse_board_topics(&v);
+                    board_trace("board/list", &format!("ok topics={}", topics.len()));
+                    return Ok(topics);
+                }
+                Err(e) => {
+                    board_trace("board/list", &format!("err {e}"));
+                    errors.push(format!("board/list: {e}"));
+                }
+            }
+        }
+    } else {
+        let body = json!({
+            "uid": grid, "page": 0, "count": 50, "boardVersion": 0, "imei": s.imei,
+        });
+        if let Ok(params) = s.encoded_params(&body) {
+            let url = format!(
+                "{}/api/friendboard/list?{}&params={params}",
+                crate::endpoints::FRIEND_BOARD,
+                s.common_params()
+            );
+            match board_get_json(s, &url).await {
+                Ok(v) => {
+                    let topics = parse_board_topics(&v);
+                    board_trace("friendboard/list", &format!("ok topics={}", topics.len()));
+                    return Ok(topics);
+                }
+                Err(e) => {
+                    board_trace("friendboard/list", &format!("err {e}"));
+                    errors.push(format!("friendboard/list: {e}"));
+                }
+            }
+        }
+        // `getListBoardOneOne`: GET, and everything except `objectData` sits inside that JSON
+        // string — sending it as a POST body is what returned a generic -1.
+        let object = json!({
+            "uid": grid, "board_type": 0, "page": 0, "count": 50,
+            "last_id": 0, "last_type": 0,
+        });
+        let body = json!({ "objectData": object.to_string() });
+        if let Ok(params) = s.encoded_params(&body) {
+            let url = format!(
+                "{}/api/board/oneone/list?{}&params={params}",
+                crate::endpoints::GROUP_BOARD,
+                s.common_params()
+            );
+            match board_get_json(s, &url).await {
+                Ok(v) => {
+                    let topics = parse_board_topics(&v);
+                    board_trace("oneone/list", &format!("ok topics={}", topics.len()));
+                    return Ok(topics);
+                }
+                Err(e) => {
+                    board_trace("oneone/list", &format!("err {e}"));
+                    errors.push(format!("oneone/list: {e}"));
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("{}", errors.join(" · "))
+}
+
+
 
 /// Pin or unpin a conversation (`updatePinnedConversationsV2` @ `compact-app-pc.js:14354215`, cmd `12122`).
 pub async fn update_pinned_conversation(
@@ -8818,6 +9205,34 @@ mod send_identity_tests {
             parse_pinned_conversations(&v4),
             vec!["u999".to_string(), "g888".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_board_topics_reads_ids_and_message_keys_from_object_and_string_data() {
+        // `data` as an object with a `topics` array; `params` as a JSON string (server shape).
+        let v1 = json!({
+            "error_code": 0,
+            "data": { "topics": [
+                { "id": 111, "type": 2, "params": "{\"global_msg_id\":\"m-1\",\"client_msg_id\":\"c-1\"}" }
+            ]}
+        });
+        let got = parse_board_topics(&v1);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "111");
+        assert_eq!(got[0].msg_ids, vec!["m-1".to_string(), "c-1".to_string()]);
+
+        // `data` as a JSON string, single topic object, numeric ids.
+        let v2 = json!({
+            "error_code": 0,
+            "data": "{\"topic\":{\"topicId\":\"222\",\"params\":{\"global_msg_id\":777}}}"
+        });
+        let got = parse_board_topics(&v2);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "222");
+        assert_eq!(got[0].msg_ids, vec!["777".to_string()]);
+
+        // Empty board.
+        assert!(parse_board_topics(&json!({ "error_code": 0, "data": {} })).is_empty());
     }
 
     #[test]

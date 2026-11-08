@@ -33,9 +33,9 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         let screen_rect = ctx.screen_rect();
         let screen_w = screen_rect.width();
-        let is_compact_w = false;
-        let is_narrow_w = false;
-        let left_rail_w = 62.0;
+        let is_compact_w = screen_w < 880.0;
+        let is_narrow_w = screen_w < 620.0;
+        let left_rail_w = if is_narrow_w { 52.0 } else { 62.0 };
 
         // -------------------------------------------------------------------
         // 1. LEFT NAVIGATION RAIL (Replaces top bar & bottom bar)
@@ -465,19 +465,30 @@ impl ZaloGuiApp {
         // -------------------------------------------------------------------
         // 2. CONVERSATION LIST SIDEBAR (Responsive width, auto-adapts on resize)
         // -------------------------------------------------------------------
-        let sidebar_exact_w = 300.0_f32;
-        let sidebar_id = "conversation_sidebar_fixed";
+        let (sidebar_id, sidebar_min_w, sidebar_max_w) = if is_narrow_w {
+            ("conversation_sidebar_narrow", 68.0_f32, 68.0_f32)
+        } else {
+            (
+                "conversation_sidebar",
+                180.0_f32,
+                (screen_w * 0.42).clamp(240.0, 420.0),
+            )
+        };
+        let sidebar_default_w = if is_narrow_w {
+            68.0_f32
+        } else {
+            280.0_f32.min(screen_w * 0.35).max(sidebar_min_w)
+        };
         egui::SidePanel::left(sidebar_id)
-            .resizable(false)
-            .exact_width(sidebar_exact_w)
+            .resizable(!is_narrow_w)
+            .default_width(sidebar_default_w)
+            .width_range(sidebar_min_w..=sidebar_max_w)
             .frame(
                 egui::Frame::none()
                     .fill(pal.bg_sidebar)
                     .stroke(Stroke::new(1.0_f32, pal.border)),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(sidebar_exact_w);
-                ui.set_max_width(sidebar_exact_w);
                 egui::Frame::none()
                     .inner_margin(Margin {
                         left: if is_narrow_w { 4.0 } else { 14.0 },
@@ -515,7 +526,7 @@ impl ZaloGuiApp {
                             ui.add_space(6.0);
                         } else {
                             // Search Box + Quick Phone Lookup (`+👤`) Button
-                            let avail_row_w = sidebar_exact_w - 28.0;
+                            let avail_row_w = ui.available_width();
                             let mut trigger_phone_lookup: Option<String> = None;
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -884,7 +895,7 @@ impl ZaloGuiApp {
                         .threads
                         .iter()
                         .enumerate()
-                        .filter(|(_, t)| {
+                        .filter(|(idx, t)| {
                             if query.is_empty() && self.settings.hidden_threads.contains(&t.id) {
                                 return false;
                             }
@@ -894,8 +905,18 @@ impl ZaloGuiApp {
                                 ThreadFilter::Groups => t.is_group,
                             };
                             let not_hidden = !t.presentation.hidden || !query.is_empty();
+                            // Like official Zalo: hide contacts that have never had any messages unless
+                            // actively searching, explicitly enabled in settings, or currently selected.
+                            let has_messages = !t.messages.is_empty()
+                                || !t.preview.trim().is_empty()
+                                || t.name.contains("Cloud của tôi")
+                                || self.settings.show_all_contacts
+                                || !query.is_empty()
+                                || *idx == self.selected_thread_index;
+
                             pass_filter
                                 && not_hidden
+                                && has_messages
                                 && (query.is_empty()
                                     || matches_vn_query(&t.name, &query, &query_folded)
                                     || t.id.contains(&query))
@@ -990,14 +1011,11 @@ impl ZaloGuiApp {
                 }
                 let mut pending_ctx_action: Option<ThreadCtxAction> = None;
                 let now_unix = crate::login::unix_now() as i64;
-                let row_target_w = (sidebar_exact_w - 14.0).max(44.0);
+                let row_target_w = (ui.available_width() - 8.0).max(44.0);
                 egui::ScrollArea::vertical()
                     .id_salt("threads_list_scroll")
-                    .max_width(sidebar_exact_w)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.set_min_width(sidebar_exact_w - 6.0);
-                        ui.set_max_width(sidebar_exact_w - 6.0);
                         ui.add_space(4.0);
                         for &i in &filtered_indices {
                             let t = &self.threads[i];
@@ -1336,7 +1354,7 @@ impl ZaloGuiApp {
                                         for (cat_name, dot_col) in categories {
                                             let is_cur = cur_label.as_deref() == Some(cat_name);
                                             let txt = if is_cur {
-                                                format!("● {cat_name}  ✓")
+                                                format!("● {cat_name}  {}", lucide::CHECK)
                                             } else {
                                                 format!("● {cat_name}")
                                             };
@@ -2020,14 +2038,14 @@ impl ZaloGuiApp {
                                         match d_fr_status {
                                             crate::chat::FriendshipStatus::Friend => match d_onl {
                                                 Some((true, lbl)) if !lbl.is_empty() => (
-                                                    format!("✓ Đã kết bạn · {lbl}"),
+                                                    format!("{} Đã kết bạn · {lbl}", lucide::CHECK),
                                                     pal.accent_online,
                                                 ),
                                                 Some((false, lbl)) if !lbl.is_empty() => (
-                                                    format!("✓ Đã kết bạn · {lbl}"),
+                                                    format!("{} Đã kết bạn · {lbl}", lucide::CHECK),
                                                     pal.text_secondary,
                                                 ),
-                                                _ => ("✓ Đã kết bạn".into(), pal.text_secondary),
+                                                _ => (format!("{} Đã kết bạn", lucide::CHECK), pal.text_secondary),
                                             },
                                             crate::chat::FriendshipStatus::IncomingPending => (
                                                 "📩 Đã gửi lời mời kết bạn cho bạn".into(),
@@ -2688,37 +2706,37 @@ impl ZaloGuiApp {
                                                 let (tag_lbl, tag_fg, tag_bg) =
                                                     if is_cloud_thread {
                                                         (
-                                                            "Đám mây",
+                                                            "Đám mây".to_string(),
                                                             pal.primary_hover,
                                                             pal.primary.linear_multiply(0.14),
                                                         )
                                                     } else if is_group {
-                                                        ("Nhóm", pal.text_secondary, pal.bg_elevated)
+                                                        ("Nhóm".to_string(), pal.text_secondary, pal.bg_elevated)
                                                     } else {
                                                         match cur_friendship {
                                                             crate::chat::FriendshipStatus::Friend => (
-                                                                "✓ Bạn bè",
+                                                                format!("{} Bạn bè", lucide::CHECK),
                                                                 pal.accent_online,
                                                                 pal.accent_online.linear_multiply(0.14),
                                                             ),
                                                             crate::chat::FriendshipStatus::IncomingPending => (
-                                                                "Chờ đồng ý kết bạn",
+                                                                "Chờ đồng ý kết bạn".to_string(),
                                                                 pal.primary_hover,
                                                                 pal.primary.linear_multiply(0.16),
                                                             ),
                                                             crate::chat::FriendshipStatus::OutgoingPending => (
-                                                                "Đã gửi lời mời",
+                                                                "Đã gửi lời mời".to_string(),
                                                                 pal.warning,
                                                                 pal.warning.linear_multiply(0.15),
                                                             ),
                                                             crate::chat::FriendshipStatus::Stranger => (
-                                                                "Người lạ",
+                                                                "Người lạ".to_string(),
                                                                 Color32::from_rgb(249, 115, 22),
                                                                 Color32::from_rgb(249, 115, 22)
                                                                     .linear_multiply(0.15),
                                                             ),
                                                             crate::chat::FriendshipStatus::Unknown => (
-                                                                "Đang kiểm tra…",
+                                                                "Đang kiểm tra…".to_string(),
                                                                 pal.text_muted,
                                                                 pal.bg_elevated,
                                                             ),
@@ -2815,6 +2833,7 @@ impl ZaloGuiApp {
                                                     .size(11.6)
                                                     .color(sub_status_col),
                                             )
+                                            .truncate()
                                             .sense(if is_group { egui::Sense::click() } else { egui::Sense::hover() }),
                                         );
                                         if is_group {
@@ -3270,33 +3289,8 @@ impl ZaloGuiApp {
                                 });
                             });
                     }
-                    // 1b. Pinned Message Banner (if any message is pinned in this thread)
-                    let pinned_msg_info = self
-                        .threads
-                        .get(self.selected_thread_index)
-                        .and_then(|t| {
-                            t.messages
-                                .iter()
-                                .enumerate()
-                                .find(|(_, m)| m.is_pinned)
-                                .map(|(idx, m)| {
-                                    (
-                                        idx,
-                                        if m.is_outgoing {
-                                            "Tôi".to_string()
-                                        } else if !m.sender.is_empty() && m.sender != "0" {
-                                            m.sender.clone()
-                                        } else {
-                                            thread_name.clone()
-                                        },
-                                        if m.sticker_id.is_some() {
-                                            "[Nhãn dán]".to_string()
-                                        } else {
-                                            truncate_chars(&m.text, 80).into_owned()
-                                        },
-                                    )
-                                })
-                        });
+                    // 1b. Pinned Message Banner (hidden: parked until server sync is fully supported to avoid mock display)
+                    let pinned_msg_info: Option<(usize, String, String)> = None;
 
                     let mut unpin_idx: Option<usize> = None;
                     if let Some((pidx, psender, ptext)) = pinned_msg_info {
@@ -4205,6 +4199,8 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::TogglePin | BubbleAction::ToggleStar => {
+                                    let mut pin_now = false;
+                                    let mut topic_id = String::new();
                                     if let Some(real) = self
                                         .threads
                                         .get_mut(self.selected_thread_index)
@@ -4212,10 +4208,12 @@ impl ZaloGuiApp {
                                     {
                                         if action == BubbleAction::TogglePin {
                                             real.is_pinned = !real.is_pinned;
+                                            pin_now = real.is_pinned;
+                                            topic_id = real.board_topic_id.clone();
                                             self.status_msg = if real.is_pinned {
-                                                "Đã ghim tin nhắn lên đầu hội thoại".into()
+                                                "Đang ghim tin nhắn lên bảng tin nhóm…".into()
                                             } else {
-                                                "Đã bỏ ghim tin nhắn".into()
+                                                "Đang bỏ ghim tin nhắn…".into()
                                             };
                                         } else {
                                             real.is_starred = !real.is_starred;
@@ -4224,6 +4222,19 @@ impl ZaloGuiApp {
                                             } else {
                                                 "Đã bỏ đánh dấu sao".into()
                                             };
+                                        }
+                                    }
+                                    // Remote pin goes through the group-board API; the local flag is
+                                    // optimistic and rolled back by `GuiEvent::MessagePinResult`.
+                                    if action == BubbleAction::TogglePin {
+                                        if let Some(tx) = WORKER_TX.get() {
+                                            let _ = tx.send(WorkerCmd::PinMessage {
+                                                thread_id: thread_id.clone(),
+                                                is_group,
+                                                msg: m,
+                                                pin: pin_now,
+                                                topic_id,
+                                            });
                                         }
                                     }
                                     self.persist_threads_async();

@@ -224,6 +224,20 @@ pub enum GuiEvent {
         cancelled: bool,
         error: Option<String>,
     },
+    /// Result of pinning/unpinning a single chat message through the group-board API.
+    MessagePinResult {
+        thread_id: String,
+        msg_id: String,
+        pin: bool,
+        topic_id: String,
+        error: Option<String>,
+    },
+    /// Server-side pinned board items for one conversation.
+    BoardPinsUpdated {
+        thread_id: String,
+        topics: Vec<crate::chat::BoardTopic>,
+        error: Option<String>,
+    },
     ProxyUpdated(Result<Option<String>, String>),
     FileDownloaded(Result<(String, String), String>),
     LoggedOut,
@@ -824,8 +838,8 @@ impl ZaloGuiApp {
             qr_status: "Đang tạo mã QR đăng nhập…".into(),
             threads,
             reaction_inbox: crate::reactions::ReactionInbox::default(),
-            selected_thread_index,
-            thread_filter: ThreadFilter::All,
+
+            selected_thread_index,            thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
             replying_to: None,
@@ -1027,6 +1041,13 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Re-read the pinned board of the open thread, throttled.
+    ///
+    /// Parked for now: `friendboard/list` rejects the request shapes we can build (error 114), so
+    /// polling only produced a toast on every thread switch. The read-back will come from the
+    /// socket control events (`pin_message` / `unpin_topic`) instead.
+    fn maybe_refresh_board_pins(&mut self) {}
+
     fn persist_threads_async(&self) {
         self.publish_known_threads();
         let snapshot = self.threads.clone();
@@ -1132,12 +1153,24 @@ impl ZaloGuiApp {
                                 }
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
+                                    let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
                                     let inc_cnt = existing
                                         .messages
                                         .iter()
                                         .rev()
                                         .take(added)
-                                        .filter(|m| !m.is_outgoing)
+                                        .filter(|m| {
+                                            if m.is_outgoing {
+                                                return false;
+                                            }
+                                            if seen.is_empty() {
+                                                return true;
+                                            }
+                                            matches!(
+                                                crate::unread::compare_ids(&m.id, seen),
+                                                Some(std::cmp::Ordering::Greater) | None
+                                            )
+                                        })
                                         .count();
                                     if inc_cnt > 0 {
                                         if !is_thread_muted {
@@ -1307,6 +1340,9 @@ impl ZaloGuiApp {
                             }
                         }
                         self.persist_threads_async();
+                        // A pin/unpin from another device arrives only as an event message, so the
+                        // board has to be re-read before the banner/chips can match the server.
+                        self.maybe_refresh_board_pins();
                     }
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
@@ -2173,6 +2209,85 @@ impl ZaloGuiApp {
                     self.phone_sync_status = msg.clone();
                     self.status_msg = msg.clone();
                     self.show_toast(msg);
+                }
+                GuiEvent::MessagePinResult {
+                    thread_id,
+                    msg_id,
+                    pin,
+                    topic_id,
+                    error,
+                } => {
+                    if let Some(err) = error {
+                        // The server refused the board call: roll the optimistic flip back.
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                                m.is_pinned = !pin;
+                                if !pin {
+                                    m.board_topic_id.clear();
+                                }
+                            }
+                        }
+                        let msg = format!("⚠️ Không ghim được tin nhắn: {err}");
+                        self.status_msg = msg.clone();
+                        self.show_toast(msg);
+                    } else if !topic_id.is_empty() {
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                                m.board_topic_id = topic_id;
+                            }
+                        }
+                        self.persist_threads_async();
+                    }
+                }
+                GuiEvent::BoardPinsUpdated {
+                    thread_id,
+                    topics,
+                    error,
+                } => {
+                    if let Some(_err) = error {
+                        // Board read-back is parked (the list API rejects every shape we can build),
+                        // so stay completely silent: a toast on each thread switch is unacceptable.
+                    } else {
+                        // The server is authoritative: match each topic back to its bubble and drop
+                        // stale local pin flags inside this thread.
+                        let pinned_ids: Vec<String> =
+                            topics.iter().map(|t| t.id.clone()).collect();
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            let mut changed = false;
+                            for m in t.messages.iter_mut() {
+                                let mut found: Option<&crate::chat::BoardTopic> = None;
+                                for topic in &topics {
+                                    if topic.msg_ids.iter().any(|id| {
+                                        id == &m.id
+                                            || (!m.client_message_id.is_empty()
+                                                && id == &m.client_message_id)
+                                    }) {
+                                        found = Some(topic);
+                                        break;
+                                    }
+                                }
+                                match found {
+                                    Some(topic) => {
+                                        if !m.is_pinned || m.board_topic_id != topic.id {
+                                            m.is_pinned = true;
+                                            m.board_topic_id = topic.id.clone();
+                                            changed = true;
+                                        }
+                                    }
+                                    None => {
+                                        if m.is_pinned && !pinned_ids.contains(&m.board_topic_id) {
+                                            m.is_pinned = false;
+                                            m.board_topic_id.clear();
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if changed {
+                                self.persist_threads_async();
+                            }
+                        }
+                    }
                 }
                 GuiEvent::ProxyUpdated(res) => match res {
                     Ok(Some(url)) => {

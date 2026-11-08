@@ -2075,7 +2075,6 @@ pub(super) fn render_chat_bubble(
             || is_latest_outgoing
             || has_interactive_card
             || !msg.reactions.is_empty()
-            || msg.is_pinned
             || msg.is_starred);
 
     let photo_caption = if is_photo_card {
@@ -2236,7 +2235,7 @@ pub(super) fn render_chat_bubble(
         } else {
             0.0_f32
         };
-        let marks_w = if !msg.reactions.is_empty() || msg.is_pinned || msg.is_starred {
+        let marks_w = if !msg.reactions.is_empty() || msg.is_starred {
             78.0_f32
         } else {
             0.0_f32
@@ -2369,17 +2368,6 @@ pub(super) fn render_chat_bubble(
                     });
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
-                }
-                if let Some(act) = render_hover_reaction_bar(
-                    ui,
-                    fr.response.rect,
-                    msg,
-                    idx,
-                    true,
-                    pal,
-                    emoji_textures,
-                ) {
-                    return Some(act);
                 }
                 reaction_action
                     .or(quote_action)
@@ -2515,17 +2503,6 @@ pub(super) fn render_chat_bubble(
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
                 }
-                if let Some(act) = render_hover_reaction_bar(
-                    ui,
-                    fr.response.rect,
-                    msg,
-                    idx,
-                    false,
-                    pal,
-                    emoji_textures,
-                ) {
-                    return Some(act);
-                }
                 reaction_action
                     .or(quote_action)
                     .or(card_action)
@@ -2585,7 +2562,7 @@ fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) ->
         .color(text_color);
     let btn = egui::Button::new(text)
         .fill(Color32::TRANSPARENT)
-        .min_size(Vec2::new(175.0, 26.0));
+        .min_size(Vec2::new(ui.available_width(), 26.0));
     ui.add(btn)
 }
 
@@ -2596,7 +2573,7 @@ pub(super) fn bubble_context_menu(
     msg: &ChatMessage,
     idx: usize,
     pal: &ThemePalette,
-    _emoji_textures: &HashMap<String, TextureHandle>,
+    emoji_textures: &HashMap<String, TextureHandle>,
     _has_interactive_card: bool,
     _display_sender: &str,
 ) -> Option<BubbleAction> {
@@ -2640,7 +2617,7 @@ pub(super) fn bubble_context_menu(
     let mut close_menu = false;
 
     let screen = ui.ctx().screen_rect();
-    let menu_w = 190.0_f32;
+    let menu_w = 180.0_f32;
     let menu_h = 280.0_f32;
     let pos = Pos2::new(
         menu_pos.x.clamp(
@@ -2671,10 +2648,35 @@ pub(super) fn bubble_context_menu(
                     spread: 0.0,
                     color: Color32::from_black_alpha(if pal.is_dark { 130 } else { 45 }),
                 })
-                .inner_margin(Margin::symmetric(6.0, 6.0))
+                .inner_margin(Margin::symmetric(10.0, 10.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(menu_w);
+                    ui.set_width(menu_w);
                     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
+
+                    // 0. Hàng emoji thả cảm xúc (giống Zalo gốc khi chuột phải)
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+                        for &(code, key, tooltip) in &REACTION_LIST {
+                            let btn_resp = if let Some(tex) = emoji_textures.get(key) {
+                                let img =
+                                    egui::Image::new(tex).fit_to_exact_size(Vec2::splat(18.0));
+                                ui.add(egui::ImageButton::new(img).rounding(Rounding::same(4.0)))
+                            } else {
+                                ui.add(
+                                    egui::Button::new(RichText::new(code).size(15.0))
+                                        .fill(Color32::TRANSPARENT)
+                                        .rounding(Rounding::same(4.0)),
+                                )
+                            };
+                            let clicked = btn_resp.clicked();
+                            btn_resp.on_hover_text(tooltip);
+                            if clicked {
+                                action = Some(BubbleAction::React(code));
+                                close_menu = true;
+                            }
+                        }
+                    });
+                    ui.separator();
 
                     // 1. Trả lời (Quote)
                     if menu_item(ui, lucide::QUOTE, "Trả lời", pal.text_primary).clicked() {
@@ -2909,195 +2911,17 @@ pub(super) fn render_quote_block(
     clicked.then(|| BubbleAction::JumpToQuoted(reference.unwrap_or_default()))
 }
 
+#[allow(dead_code)]
 pub(super) fn render_hover_reaction_bar(
-    ui: &mut egui::Ui,
-    bubble_rect: Rect,
-    msg: &ChatMessage,
-    idx: usize,
-    outgoing: bool,
-    pal: &ThemePalette,
-    emoji_textures: &HashMap<String, TextureHandle>,
+    _ui: &mut egui::Ui,
+    _bubble_rect: Rect,
+    _msg: &ChatMessage,
+    _idx: usize,
+    _outgoing: bool,
+    _pal: &ThemePalette,
+    _emoji_textures: &HashMap<String, TextureHandle>,
 ) -> Option<BubbleAction> {
-    // Suppress hover bar if any context menu is open
-    let ctx_menu_open: bool = ui.ctx().data(|d| {
-        d.get_temp::<(String, Pos2, usize)>(Id::new("active_bubble_context_menu"))
-            .is_some()
-    });
-    if ctx_menu_open || ui.memory(|m| m.any_popup_open()) {
-        return None;
-    }
-
-    let bar_w = 236.0_f32;
-    let bar_h = 32.0_f32;
-
-    let clip_right = ui.clip_rect().right();
-    let clip_left = ui.clip_rect().left();
-
-    let x = if outgoing {
-        (bubble_rect.right() - bar_w).clamp(clip_left + 8.0, clip_right - bar_w - 8.0)
-    } else {
-        let desired_x = (bubble_rect.right() - bar_w).max(bubble_rect.left());
-        desired_x.clamp(clip_left + 8.0, clip_right - bar_w - 8.0)
-    };
-
-    // If there is enough room above the bubble, place above; otherwise place below
-    let y = if bubble_rect.top() >= bar_h + 6.0 {
-        bubble_rect.top() - bar_h - 4.0
-    } else {
-        bubble_rect.bottom() + 4.0
-    };
-
-    let bar_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(bar_w, bar_h));
-    // The unified hover zone covers both the message bubble and the floating bar + 10px buffer
-    let hover_zone = bubble_rect.union(bar_rect).expand2(Vec2::new(10.0, 10.0));
-
-    let hover_id = Id::new("active_hover_reaction_bubble");
-    let msg_key = format!("{}_{}", msg.id, msg.ts);
-
-    let pointer_pos = ui
-        .ctx()
-        .input(|i| i.pointer.hover_pos().or(i.pointer.interact_pos()));
-    let in_hover_zone = pointer_pos.map_or(false, |p| hover_zone.contains(p));
-    let in_bubble = pointer_pos.map_or(false, |p| {
-        bubble_rect.expand2(Vec2::new(4.0, 4.0)).contains(p)
-    });
-
-    // Active hover state: (message key, bar rect, frame it was last shown). The bar floats over the
-    // previous message, so without the rect a neighbour's bubble under the bar stole the hover and
-    // the bar vanished as soon as the pointer reached it.
-    let hover_state_id = hover_id.with("state");
-    let frame_now = ui.ctx().cumulative_pass_nr();
-    let active_state: Option<(String, Rect, u64)> = ui.ctx().data(|d| d.get_temp(hover_state_id));
-    let active_key: Option<String> = ui.ctx().data(|d| d.get_temp(hover_id));
-
-    let pointer_on_other_bar = match (&active_state, pointer_pos) {
-        (Some((key, rect, seen)), Some(p)) => {
-            key != &msg_key
-                && frame_now.saturating_sub(*seen) <= 2
-                && rect.expand2(Vec2::new(10.0, 10.0)).contains(p)
-        }
-        _ => false,
-    };
-
-    let should_show = if active_key.as_deref() == Some(&msg_key) {
-        if in_hover_zone {
-            true
-        } else {
-            ui.ctx().data_mut(|d| {
-                d.remove::<String>(hover_id);
-                d.remove::<(String, Rect, u64)>(hover_state_id);
-            });
-            false
-        }
-    } else if in_bubble && !pointer_on_other_bar {
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(hover_id, msg_key.clone()));
-        true
-    } else {
-        false
-    };
-
-    if !should_show {
-        return None;
-    }
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(hover_state_id, (msg_key.clone(), bar_rect, frame_now)));
-
-    let mut action = None;
-
-    egui::Area::new(Id::new(("hover_reaction_bar", idx, msg.ts, &msg.id)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::new(x, y))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::none()
-                .fill(if pal.is_dark {
-                    Color32::from_rgb(33, 37, 43)
-                } else {
-                    Color32::WHITE
-                })
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .rounding(Rounding::same(16.0))
-                .shadow(egui::epaint::Shadow {
-                    offset: Vec2::new(0.0, 3.0),
-                    blur: 10.0,
-                    spread: 0.0,
-                    color: Color32::from_black_alpha(if pal.is_dark { 110 } else { 35 }),
-                })
-                .inner_margin(Margin::symmetric(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
-
-                        for &(code, key, tooltip) in &REACTION_LIST {
-                            let btn_resp = if let Some(tex) = emoji_textures.get(key) {
-                                let img =
-                                    egui::Image::new(tex).fit_to_exact_size(Vec2::splat(20.0));
-                                ui.add(egui::ImageButton::new(img).rounding(Rounding::same(6.0)))
-                            } else {
-                                ui.add(
-                                    egui::Button::new(RichText::new(code).size(16.0))
-                                        .fill(Color32::TRANSPARENT)
-                                        .rounding(Rounding::same(6.0)),
-                                )
-                            };
-
-                            let clicked = btn_resp.clicked();
-                            btn_resp.on_hover_text(tooltip);
-                            if clicked {
-                                action = Some(BubbleAction::React(code));
-                            }
-                        }
-
-                        let (sep_rect, _) =
-                            ui.allocate_exact_size(Vec2::new(6.0, 16.0), Sense::hover());
-                        ui.painter().line_segment(
-                            [sep_rect.center_top(), sep_rect.center_bottom()],
-                            Stroke::new(1.0_f32, pal.border),
-                        );
-
-                        // Quick Reply (Quote)
-                        let reply_btn = egui::Button::new(
-                            RichText::new(lucide::QUOTE)
-                                .size(13.5)
-                                .color(pal.text_secondary),
-                        )
-                        .fill(Color32::TRANSPARENT)
-                        .min_size(Vec2::splat(22.0))
-                        .rounding(Rounding::same(6.0));
-
-                        let r_resp = ui.add(reply_btn);
-                        let r_clicked = r_resp.clicked();
-                        r_resp.on_hover_text("Trả lời");
-                        if r_clicked {
-                            action = Some(BubbleAction::Reply);
-                        }
-
-                        // Quick Forward / Share
-                        let fwd_btn = egui::Button::new(
-                            RichText::new(lucide::FORWARD)
-                                .size(13.5)
-                                .color(pal.text_secondary),
-                        )
-                        .fill(Color32::TRANSPARENT)
-                        .min_size(Vec2::splat(22.0))
-                        .rounding(Rounding::same(6.0));
-
-                        let f_resp = ui.add(fwd_btn);
-                        let f_clicked = f_resp.clicked();
-                        f_resp.on_hover_text("Chia sẻ");
-                        if f_clicked {
-                            action = Some(BubbleAction::Forward);
-                        }
-                    });
-                });
-        });
-
-    if action.is_some() {
-        ui.ctx().data_mut(|d| d.remove::<String>(hover_id));
-        ui.ctx().request_repaint();
-    }
-
-    action
+    None
 }
 
 pub(super) fn render_reactions(
@@ -3106,7 +2930,8 @@ pub(super) fn render_reactions(
     pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
 ) -> Option<BubbleAction> {
-    let has_pin = msg.is_pinned;
+    // Pin badge display parked until server-side pinning is fully integrated (avoid showing mock data).
+    let has_pin = false;
     let has_star = msg.is_starred;
     let has_react = !msg.reactions.is_empty() || !msg.reaction_summaries.is_empty();
 
@@ -3120,22 +2945,6 @@ pub(super) fn render_reactions(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
 
-        if has_pin {
-            egui::Frame::none()
-                .fill(pal.primary.linear_multiply(0.18))
-                .stroke(Stroke::new(1.0_f32, pal.primary))
-                .rounding(Rounding::same(8.0))
-                .inner_margin(Margin::symmetric(5.0, 2.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} Đã ghim", lucide::PIN))
-                            .size(11.0)
-                            .color(pal.primary)
-                            .strong(),
-                    );
-                });
-        }
-
         if has_star {
             egui::Frame::none()
                 .fill(Color32::from_rgb(234, 179, 8).linear_multiply(0.2))
@@ -3143,12 +2952,17 @@ pub(super) fn render_reactions(
                 .rounding(Rounding::same(8.0))
                 .inner_margin(Margin::symmetric(5.0, 2.0))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} Đã lưu", lucide::STAR))
-                            .size(11.0)
-                            .color(Color32::from_rgb(234, 179, 8))
-                            .strong(),
-                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(lucide::STAR)
+                                .size(11.0)
+                                .color(Color32::from_rgb(234, 179, 8))
+                                .strong(),
+                        )
+                        .selectable(false)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    )
+                    .on_hover_text("Tin nhắn đã đánh dấu");
                 });
         }
 
@@ -3598,136 +3412,6 @@ mod quote_navigation_tests {
         assert!(matches!(action, Some(BubbleAction::Reply)));
     }
 
-    #[test]
-    fn bubble_hover_reaction_bar_emits_react_action() {
-        let ctx = egui::Context::default();
-        let msg = ChatMessage {
-            id: "msg-hover-test".into(),
-            text: "Hello hover react".into(),
-            sender: "Tester".into(),
-            is_outgoing: false,
-            ts: 987654321,
-            ..Default::default()
-        };
-
-        let bubble_rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(150.0, 40.0));
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)));
-
-        // Frame 0: Hover over bubble -> triggers hover bar
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![egui::Event::PointerMoved(Pos2::new(120.0, 110.0))],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Frame 1: Second frame so Area is painted
-        let output = ctx.run(
-            egui::RawInput {
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Find first reaction emoji text from output shapes
-        let mut emoji_pos = None;
-        for shape in &output.shapes {
-            if let egui::Shape::Text(text) = &shape.shape {
-                if text.galley.job.text == "👍" {
-                    emoji_pos = Some(text.pos + Vec2::new(4.0, 4.0));
-                    break;
-                }
-            }
-        }
-        let emoji_pos = emoji_pos.expect("Reaction bar should be rendered with 👍 emoji");
-
-        // Frame 1: Move mouse to emoji and press Primary
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![
-                    egui::Event::PointerMoved(emoji_pos),
-                    egui::Event::PointerButton {
-                        pos: emoji_pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Frame 2: Release Primary -> React action emitted!
-        let mut action = None;
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![egui::Event::PointerButton {
-                    pos: emoji_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    action = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        assert!(matches!(action, Some(BubbleAction::React("👍"))));
-    }
 
     #[test]
     fn extract_photo_user_caption_filters_raw_image_filenames() {

@@ -7891,6 +7891,7 @@ mod tests {
             avatar: None,
             is_group: false,
             messages: Vec::new(),
+            vanish: None,
         }
     }
 
@@ -7922,6 +7923,7 @@ mod tests {
                 m("1", "chào", 1_000_000, false),
                 m("out_9", "ok", 2_000_000, true),
             ],
+            vanish: None,
         };
         let incoming = Thread {
             messages: vec![
@@ -8311,6 +8313,7 @@ mod tests {
                 ts: 1792578088952,
                 ..Default::default()
             }],
+            vanish: None,
         };
         let new_dtc = Thread {
             presentation: Default::default(),
@@ -8322,6 +8325,7 @@ mod tests {
             avatar: Some("https://s160-26-ava-talk.zadn.vn/5/00000000000000000000000000000001.jpg?key=xyz&time=1797876325".into()),
             is_group: false,
             messages: Vec::new(),
+            vanish: None,
         };
         let mut threads = vec![old_dtc, new_dtc];
         deduplicate_threads(&mut threads, None);
@@ -8343,6 +8347,7 @@ mod tests {
             avatar: None,
             is_group: false,
             messages: Vec::new(),
+            vanish: None,
         };
         let raw_cloud_resp = json!({
             "error_code": 0,
@@ -8416,6 +8421,7 @@ mod tests {
             avatar: None,
             is_group: false,
             messages: Vec::new(),
+            vanish: None,
         };
         let raw_cloud_resp = json!({
             "error_code": 0,
@@ -8452,6 +8458,7 @@ mod tests {
                 ts: 1700000000002,
                 ..Default::default()
             }],
+            vanish: None,
         };
         let polluted_contact = Thread {
             presentation: Default::default(),
@@ -8471,6 +8478,7 @@ mod tests {
                 ts: 1700000000002,
                 ..Default::default()
             }],
+            vanish: None,
         };
         let mut list = vec![cloud, polluted_contact];
         deduplicate_threads(&mut list, None);
@@ -8501,6 +8509,7 @@ mod tests {
                 ts: 1700000001000,
                 ..Default::default()
             }],
+            vanish: None,
         };
         // Second contact has the exact same Zalo display name and no avatar URL yet (e.g., from incoming poll)
         let contact_b = Thread {
@@ -8521,6 +8530,7 @@ mod tests {
                 ts: 1700000002000,
                 ..Default::default()
             }],
+            vanish: None,
         };
         assert!(!threads_represent_same_contact(&contact_a, &contact_b));
         let mut threads = vec![contact_a, contact_b];

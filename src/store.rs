@@ -1775,6 +1775,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            vanish: None,
         };
 
         let count1 = persist_threads(&mut store, &[thread.clone()]).unwrap();

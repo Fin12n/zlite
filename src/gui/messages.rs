@@ -472,6 +472,78 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
     }
 }
 
+/// Native OS folder-picker dialog. Dùng cho chọn thư mục (download dir, data
+/// dir, migrate cả thư mục) — khác `pick_native_file_dialog` chỉ chọn được file
+/// (#106: nút Open xám vì OFN_FILEMUSTEXIST / `choose file` không cho chọn folder).
+pub(super) fn pick_native_folder_dialog(title: &str) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        // IFileDialog với FOS_PICKFOLDERS qua PowerShell (tránh COM-FFI tay):
+        // mở dialog chọn thư mục, in ra FullName khi OK.
+        let title_esc = title.replace('\'', "''");
+        let ps = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $d = New-Object System.Windows.Forms.FolderBrowserDialog; \
+             $d.Description = '{title_esc}'; $d.ShowNewFolderButton = $true; \
+             if ($d.ShowDialog() -eq 'OK') {{ $d.SelectedPath }}"
+        );
+        if let Ok(out) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let prompt = format!("POSIX path of (choose folder with prompt \"{title}\")");
+        if let Ok(out) = std::process::Command::new("osascript")
+            .args(["-e", &prompt])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(out) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title", title])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("kdialog")
+            .args(["--getexistingdirectory", "."])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Detect `Ctrl+V` or `Shift+Insert` reliably on Windows even when `egui-winit` swallows `Key::V`
 /// because the system clipboard contains an image instead of UTF-8 text.
 pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {

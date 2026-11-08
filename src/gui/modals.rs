@@ -1380,6 +1380,7 @@ impl ZaloGuiApp {
         let mut pick_dl_dir = false;
         let mut open_dl_dir = false;
         let mut pick_migrate_file = false;
+        let mut pick_migrate_dir = false;
         let mut export_theme_tpl = false;
         let mut reload_theme_json = false;
         let mut export_sticker_tpl = false;
@@ -2313,6 +2314,10 @@ impl ZaloGuiApp {
                                                         ui.add_space(8.0);
                                                         if ui.button(RichText::new("Chọn file lịch sử (.db / .sqlite / .json) để nhập…").size(12.8).strong()).clicked() {
                                                             pick_migrate_file = true;
+                                                        }
+                                                        ui.add_space(4.0);
+                                                        if ui.button(RichText::new("…hoặc chọn cả thư mục dữ liệu Zalo để nhập").size(12.5)).clicked() {
+                                                            pick_migrate_dir = true;
                                                         }
                                                     });
                                                 });
@@ -3574,8 +3579,7 @@ impl ZaloGuiApp {
             }
         }
         if pick_dl_dir {
-            if let Some(folder) = pick_native_file_dialog(false) {
-                let dir_path = folder.parent().unwrap_or(&folder).to_path_buf();
+            if let Some(dir_path) = pick_native_folder_dialog("Chọn thư mục lưu file tải về") {
                 self.settings.download_dir = dir_path.display().to_string();
                 self.settings.save();
                 self.show_toast(format!(
@@ -3604,6 +3608,29 @@ impl ZaloGuiApp {
         if pick_migrate_file {
             if let Some(src_path) = pick_native_file_dialog(false) {
                 match crate::store::import_history_from_path(&src_path, "zalo_history.db") {
+                    Ok(summary) => {
+                        let t_cnt = summary.threads_imported;
+                        let m_cnt = summary.messages_imported;
+                        crate::store::load_history_into_threads(
+                            "zalo_history.db",
+                            &mut self.threads,
+                            crate::store::MessageStore::PRELOAD_MSGS,
+                        );
+                        self.persist_threads_async();
+                        self.show_toast(format!(
+                            "✅ Đã nhập {m_cnt} tin nhắn từ {t_cnt} hội thoại vào zalo_history.db"
+                        ));
+                    }
+                    Err(e) => {
+                        self.show_toast(format!("⚠️ Lỗi nhập lịch sử: {e}"));
+                    }
+                }
+            }
+        }
+
+        if pick_migrate_dir {
+            if let Some(src_dir) = pick_native_folder_dialog("Chọn thư mục dữ liệu Zalo để nhập") {
+                match crate::store::import_history_from_path(&src_dir, "zalo_history.db") {
                     Ok(summary) => {
                         let t_cnt = summary.threads_imported;
                         let m_cnt = summary.messages_imported;

@@ -1707,73 +1707,25 @@ pub(super) fn render_message_body(
             return body_action;
         }
     }
-    // Dedicated File / Video Attachment Card (#74)
-    let is_zalo_file_or_video = is_zalo_file_or_video_message(msg);
-    if is_zalo_file_or_video {
-        let is_vid =
-            msg.link_src.as_deref() == Some("Video Zalo") || trimmed_text.starts_with("[Video]");
+    // Classified File / Video / Voice / Doc Attachment Card (#74 follow-up)
+    if let Some(kind) = classify_attachment(msg) {
         let url_str = msg.link_url.as_deref().unwrap_or_default();
         let resolved_file_name = crate::chat::resolve_attachment_file_name(
             msg.link_title.as_deref(),
             trimmed_text,
             url_str,
         );
-        let title_str = if is_vid {
-            msg.link_title
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(trimmed_text)
-                .to_string()
-        } else {
-            resolved_file_name.clone()
-        };
-        let sub_str = if is_vid {
-            "Video đính kèm · Bấm để mở"
-        } else {
-            "Tập tin Zalo · Bấm để lưu về máy"
-        };
-        let link_col = if pal.is_dark {
-            Color32::from_rgb(97, 175, 239)
-        } else {
-            pal.primary
-        };
-        let resp = ui
-            .add(
-                egui::Label::new(
-                    RichText::new(&title_str)
-                        .size(13.8)
-                        .color(text_col)
-                        .strong(),
-                )
-                .wrap()
-                .sense(Sense::click()),
-            )
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text(if is_vid {
-                "Bấm để mở video"
-            } else {
-                "Bấm để tải và lưu tập tin với tên gốc"
-            });
-        ui.add_space(2.0);
-        let dom_resp = ui
-            .add(
-                egui::Label::new(RichText::new(sub_str).size(12.5).color(link_col))
-                    .sense(Sense::click()),
-            )
-            .on_hover_cursor(CursorIcon::PointingHand);
-        if resp.clicked() || dom_resp.clicked() {
-            if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
-                if is_vid && !url.to_ascii_lowercase().contains("/renewmedia") {
-                    open_external_url(url);
-                } else {
-                    return Some(BubbleAction::DownloadFile {
-                        url: url.to_string(),
-                        file_name: resolved_file_name,
-                    });
-                }
-            }
-        }
-        return None;
+        return render_attachment_card(
+            ui,
+            msg,
+            kind,
+            &resolved_file_name,
+            text_col,
+            pal,
+            max_text_width,
+            sticker_textures,
+            loading_stickers,
+        );
     }
 
     let Some((caption, url, domain)) = extract_message_link_view(msg) else {
@@ -1926,6 +1878,469 @@ pub(super) fn render_message_body(
 
     body_action
 }
+
+/// Classified attachment kind for the file/video/voice/doc bubble (#74 follow-up).
+/// Pure filename + `link_src`/text-prefix heuristics; unknown extensions stay `GenericFile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttachmentKind {
+    Video,
+    Voice,
+    Audio,
+    Pdf,
+    Word,
+    Excel,
+    PowerPoint,
+    Archive,
+    Text,
+    GenericFile,
+}
+
+pub(super) fn classify_attachment(msg: &crate::chat::ChatMessage) -> Option<AttachmentKind> {
+    if !is_zalo_file_or_video_message(msg) {
+        return None;
+    }
+    let trimmed = msg.text.trim();
+    if msg.link_src.as_deref() == Some("Video Zalo") || trimmed.starts_with("[Video]") {
+        return Some(AttachmentKind::Video);
+    }
+    if msg.kind == crate::message_model::MessageKind::Voice
+        || trimmed.starts_with("[Tin nhắn thoại]")
+    {
+        return Some(AttachmentKind::Voice);
+    }
+    let name = crate::chat::resolve_attachment_file_name(
+        msg.link_title.as_deref(),
+        trimmed,
+        msg.link_url.as_deref().unwrap_or_default(),
+    );
+    let ext = name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if ext.is_empty() || ext == name.to_ascii_lowercase() {
+        return Some(AttachmentKind::GenericFile);
+    }
+    Some(match ext.as_str() {
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => AttachmentKind::Video,
+        "amr" | "awb" | "opus" => AttachmentKind::Voice,
+        "mp3" | "m4a" | "wav" | "ogg" | "flac" | "aac" => AttachmentKind::Audio,
+        "pdf" => AttachmentKind::Pdf,
+        "doc" | "docx" | "odt" | "rtf" => AttachmentKind::Word,
+        "xls" | "xlsx" | "csv" | "ods" => AttachmentKind::Excel,
+        "ppt" | "pptx" | "odp" | "key" => AttachmentKind::PowerPoint,
+        "zip" | "rar" | "7z" | "tar" | "gz" => AttachmentKind::Archive,
+        "txt" | "md" | "log" => AttachmentKind::Text,
+        _ => AttachmentKind::GenericFile,
+    })
+}
+
+pub(super) fn attachment_kind_label(kind: AttachmentKind) -> (&'static str, &'static str) {
+    match kind {
+        AttachmentKind::Video => (crate::gui::lucide::FILM, "Video"),
+        AttachmentKind::Voice => (crate::gui::lucide::MIC, "Tin nhắn thoại"),
+        AttachmentKind::Audio => (crate::gui::lucide::MIC, "Âm thanh"),
+        AttachmentKind::Pdf => (crate::gui::lucide::FILE_TEXT, "Tài liệu PDF"),
+        AttachmentKind::Word => (crate::gui::lucide::FILE_TEXT, "Tài liệu Word"),
+        AttachmentKind::Excel => (crate::gui::lucide::FILE_TEXT, "Bảng tính Excel"),
+        AttachmentKind::PowerPoint => (crate::gui::lucide::FILE_TEXT, "Bài thuyết trình"),
+        AttachmentKind::Archive => (crate::gui::lucide::FILE_TEXT, "Tập tin nén"),
+        AttachmentKind::Text => (crate::gui::lucide::FILE_TEXT, "Tập tin văn bản"),
+        AttachmentKind::GenericFile => (crate::gui::lucide::PAPERCLIP, "Tập tin"),
+    }
+}
+
+/// Cache key for a video-bubble thumbnail derived from the attachment URL.
+pub(super) fn video_thumb_key(url: &str) -> String {
+    format!("vid_{}", crate::crypto::md5_hex(url))
+}
+/// Render one classified attachment bubble: video w/ thumbnail, voice w/ play, doc/file card.
+#[allow(clippy::too_many_arguments)]
+fn render_attachment_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    kind: AttachmentKind,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+    sticker_textures: &HashMap<String, TextureHandle>,
+    loading_stickers: &mut HashSet<String>,
+) -> Option<BubbleAction> {
+    match kind {
+        AttachmentKind::Video => render_video_card(
+            ui,
+            msg,
+            file_name,
+            text_col,
+            pal,
+            max_text_width,
+            sticker_textures,
+            loading_stickers,
+        ),
+        AttachmentKind::Voice | AttachmentKind::Audio => {
+            render_voice_card(ui, msg, kind, file_name, text_col, pal)
+        }
+        _ => render_doc_card(ui, msg, kind, file_name, text_col, pal),
+    }
+}
+
+/// Video bubble: inline thumbnail (Zalo `link_thumb`, photo CDN, or ffmpeg frame) + play overlay.
+/// Missing ffmpeg or missing thumbnail falls back to the plain clickable card, never a crash.
+#[allow(clippy::too_many_arguments)]
+fn render_video_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+    sticker_textures: &HashMap<String, TextureHandle>,
+    loading_stickers: &mut HashSet<String>,
+) -> Option<BubbleAction> {
+    let title_str = msg
+        .link_title
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file_name)
+        .to_string();
+    let thumb_url = msg
+        .link_thumb
+        .as_deref()
+        .filter(|u| {
+            !u.is_empty()
+                && (u.starts_with("http://") || u.starts_with("https://"))
+                && !u.to_ascii_lowercase().contains("/renewmedia")
+        })
+        .or_else(|| {
+            msg.link_url
+                .as_deref()
+                .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
+        });
+    if let Some(thumb_url) = thumb_url {
+        let key = format!("thumb_{}", crate::crypto::md5_hex(thumb_url));
+        if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::FetchStickerImage {
+                    key: key.clone(),
+                    url: thumb_url.to_string(),
+                });
+            }
+        }
+        if let Some(tex) = sticker_textures.get(&key) {
+            let [tw, th] = tex.size();
+            if tw > 2 && th > 2 {
+                let aspect = (th as f32 / tw as f32).clamp(0.45, 0.85);
+                let thumb_w = max_text_width.min(260.0);
+                let img_h = (thumb_w * aspect).min(150.0);
+                let img_resp = ui
+                    .add(
+                        egui::Image::new(tex)
+                            .fit_to_exact_size(Vec2::new(thumb_w, img_h))
+                            .rounding(Rounding::same(8.0))
+                            .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Bấm để phát video");
+                let pill_r =
+                    egui::Rect::from_center_size(img_resp.rect.center(), Vec2::new(46.0, 46.0));
+                ui.painter()
+                    .circle_filled(pill_r.center(), 23.0, Color32::from_black_alpha(140));
+                ui.painter().text(
+                    pill_r.center() + Vec2::new(1.5, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    "▶",
+                    FontId::proportional(20.0),
+                    Color32::WHITE,
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(truncate_chars(&title_str, 60))
+                        .size(12.5)
+                        .color(text_col),
+                );
+                if img_resp.clicked() {
+                    if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                        if !url.to_ascii_lowercase().contains("/renewmedia") {
+                            open_external_url(url);
+                        } else {
+                            return Some(BubbleAction::DownloadFile {
+                                url: url.to_string(),
+                                file_name: file_name.to_string(),
+                            });
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+    }
+    if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+        let key = video_thumb_key(url);
+        if !sticker_textures.contains_key(&key) && loading_stickers.insert(key.clone()) {
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::FetchVideoThumbnail {
+                    key,
+                    url: url.to_string(),
+                });
+            }
+        }
+        if let Some(tex) = sticker_textures.get(&video_thumb_key(url)) {
+            let [tw, th] = tex.size();
+            if tw > 2 && th > 2 {
+                let aspect = (th as f32 / tw as f32).clamp(0.45, 0.85);
+                let thumb_w = max_text_width.min(260.0);
+                let img_h = (thumb_w * aspect).min(150.0);
+                let img_resp = ui
+                    .add(
+                        egui::Image::new(tex)
+                            .fit_to_exact_size(Vec2::new(thumb_w, img_h))
+                            .rounding(Rounding::same(8.0))
+                            .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Bấm để phát video");
+                let pill_r =
+                    egui::Rect::from_center_size(img_resp.rect.center(), Vec2::new(46.0, 46.0));
+                ui.painter()
+                    .circle_filled(pill_r.center(), 23.0, Color32::from_black_alpha(140));
+                ui.painter().text(
+                    pill_r.center() + Vec2::new(1.5, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    "▶",
+                    FontId::proportional(20.0),
+                    Color32::WHITE,
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(truncate_chars(&title_str, 60))
+                        .size(12.5)
+                        .color(text_col),
+                );
+                if img_resp.clicked() {
+                    if !url.to_ascii_lowercase().contains("/renewmedia") {
+                        open_external_url(url);
+                    } else {
+                        return Some(BubbleAction::DownloadFile {
+                            url: url.to_string(),
+                            file_name: file_name.to_string(),
+                        });
+                    }
+                }
+                return None;
+            }
+        }
+    }
+    render_video_fallback_card(ui, msg, &title_str, file_name, text_col, pal)
+}
+
+fn render_video_fallback_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    title_str: &str,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+) -> Option<BubbleAction> {
+    let link_col = if pal.is_dark {
+        Color32::from_rgb(97, 175, 239)
+    } else {
+        pal.primary
+    };
+    let (icon, kind_label) = attachment_kind_label(AttachmentKind::Video);
+    ui.label(
+        RichText::new(format!("{icon}  {}", truncate_chars(title_str, 48)))
+            .size(13.8)
+            .color(text_col)
+            .strong(),
+    );
+    ui.add_space(2.0);
+    let sub_resp = ui
+        .add(
+            egui::Label::new(
+                RichText::new(format!("{kind_label} · Bấm để mở"))
+                    .size(12.5)
+                    .color(link_col),
+            )
+            .sense(Sense::click()),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if sub_resp.clicked() {
+        if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+            if !url.to_ascii_lowercase().contains("/renewmedia") {
+                open_external_url(url);
+            } else {
+                return Some(BubbleAction::DownloadFile {
+                    url: url.to_string(),
+                    file_name: file_name.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Voice bubble: play button + duration. Playback downloads bytes on the worker
+/// then opens them in the OS default player (no new audio dep).
+fn render_voice_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    kind: AttachmentKind,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+) -> Option<BubbleAction> {
+    let (icon, kind_label) = attachment_kind_label(kind);
+    let duration = voice_duration_secs(msg);
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let play_resp = ui
+            .add(
+                egui::Button::new(RichText::new("▶").size(15.0).color(Color32::WHITE))
+                    .min_size(Vec2::new(34.0, 34.0))
+                    .fill(pal.primary),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Bấm để nghe tin nhắn thoại");
+        if play_resp.clicked() {
+            if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                action = Some(BubbleAction::PlayVoice {
+                    url: url.to_string(),
+                    file_name: file_name.to_string(),
+                    msg_id: msg.id.clone(),
+                });
+            }
+        }
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(format!("{icon}  {kind_label}"))
+                    .size(12.8)
+                    .color(text_col)
+                    .strong(),
+            );
+            ui.label(
+                RichText::new(format_duration_mmss(duration))
+                    .size(11.5)
+                    .color(text_col.linear_multiply(0.75)),
+            );
+        });
+    });
+    action
+}
+
+/// File/doc bubble: per-type icon + name + meta line + "Mở"/"Lưu về máy" buttons.
+/// PDF first-page render was evaluated and deliberately skipped: no pdf-render dep exists
+/// in the tree and adding a heavy renderer for a thumbnail is not worth it, so PDF/office
+/// files get a classified card + open-outside instead.
+fn render_doc_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    kind: AttachmentKind,
+    file_name: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+) -> Option<BubbleAction> {
+    let (icon, kind_label) = attachment_kind_label(kind);
+    let link_col = if pal.is_dark {
+        Color32::from_rgb(97, 175, 239)
+    } else {
+        pal.primary
+    };
+    ui.label(
+        RichText::new(format!("{icon}  {}", truncate_chars(file_name, 42)))
+            .size(13.8)
+            .color(text_col)
+            .strong(),
+    );
+    ui.add_space(2.0);
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let meta = if ext.is_empty() {
+        kind_label.to_string()
+    } else {
+        format!("{kind_label} · {ext}")
+    };
+    ui.label(
+        RichText::new(meta)
+            .size(12.0)
+            .color(text_col.linear_multiply(0.7)),
+    );
+    ui.add_space(4.0);
+    let mut action = None;
+    ui.horizontal(|ui| {
+        let open_resp = ui
+            .add(
+                egui::Button::new(RichText::new("Mở").size(12.5).color(link_col))
+                    .min_size(Vec2::new(64.0, 26.0)),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Mở bằng ứng dụng ngoài / trình duyệt");
+        if open_resp.clicked() {
+            if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                if !url.to_ascii_lowercase().contains("/renewmedia") {
+                    open_external_url(url);
+                } else {
+                    action = Some(BubbleAction::DownloadFile {
+                        url: url.to_string(),
+                        file_name: file_name.to_string(),
+                    });
+                }
+            }
+        }
+        let save_resp = ui
+            .add(
+                egui::Button::new(RichText::new("Lưu về máy").size(12.5).color(text_col))
+                    .min_size(Vec2::new(92.0, 26.0)),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Tải và lưu tập tin với tên gốc");
+        if save_resp.clicked() {
+            if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                action = Some(BubbleAction::DownloadFile {
+                    url: url.to_string(),
+                    file_name: file_name.to_string(),
+                });
+            }
+        }
+    });
+    action
+}
+
+/// Best-effort voice duration in seconds from `history_source` params (`duration`, `fileSize`).
+/// Unknown durations render as `--:--`; never fabricates a value.
+fn voice_duration_secs(msg: &ChatMessage) -> Option<u64> {
+    let from_src = msg.history_source.as_ref().and_then(|v| {
+        v.get("meta")
+            .and_then(|m| m.get("attachsList"))
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .or(Some(v))
+    });
+    from_src.and_then(|node| {
+        node.get("duration")
+            .or_else(|| node.get("dur"))
+            .or_else(|| node.get("time"))
+            .and_then(|d| match d {
+                serde_json::Value::Number(n) => {
+                    n.as_u64().or_else(|| n.as_i64().map(|i| i.max(0) as u64))
+                }
+                serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
+                _ => None,
+            })
+    })
+}
+
+fn format_duration_mmss(secs: Option<u64>) -> String {
+    match secs {
+        Some(s) => format!("{:02}:{:02}", s / 60, s % 60),
+        None => "--:--".to_string(),
+    }
+}
+
 
 pub(super) fn is_zalo_file_or_video_message(msg: &ChatMessage) -> bool {
     let trimmed = msg.text.trim();
@@ -2577,6 +2992,11 @@ pub(super) enum BubbleAction {
         url: String,
         file_name: String,
     },
+    PlayVoice {
+        url: String,
+        file_name: String,
+        msg_id: String,
+    },
 }
 
 fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) -> egui::Response {
@@ -2757,7 +3177,7 @@ pub(super) fn bubble_context_menu(
                         }
                     }
 
-                    // 7. Nếu là file / video: Lưu tập tin
+                    // 7. Nếu là file / video / voice: Lưu tập tin (+ Nghe thoại cho voice)
                     if is_zalo_file_or_video_message(msg) {
                         if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
                             let resolved_name = crate::chat::resolve_attachment_file_name(
@@ -2770,6 +3190,19 @@ pub(super) fn bubble_context_menu(
                             } else {
                                 format!("Lưu \"{resolved_name}\"")
                             };
+                            if matches!(
+                                classify_attachment(msg),
+                                Some(AttachmentKind::Voice | AttachmentKind::Audio)
+                            ) && menu_item(ui, lucide::MIC, "Nghe tin nhắn thoại", pal.text_primary)
+                                .clicked()
+                            {
+                                action = Some(BubbleAction::PlayVoice {
+                                    url: url.to_string(),
+                                    file_name: resolved_name.clone(),
+                                    msg_id: msg.id.clone(),
+                                });
+                                close_menu = true;
+                            }
                             if menu_item(ui, lucide::PAPERCLIP, &label, pal.text_primary).clicked()
                             {
                                 action = Some(BubbleAction::DownloadFile {
@@ -3750,6 +4183,103 @@ mod quote_navigation_tests {
         assert_eq!(
             extract_photo_user_caption(&real_caption_msg),
             Some("Xem ảnh này nè")
+        );
+    }
+}
+
+#[cfg(test)]
+mod attachment_card_tests {
+    use super::*;
+
+    fn file_msg(text: &str, title: Option<&str>, url: &str) -> ChatMessage {
+        ChatMessage {
+            text: text.into(),
+            link_url: Some(url.into()),
+            link_title: title.map(str::to_string),
+            link_src: Some("Tập tin Zalo".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn classifies_video_voice_and_office_docs() {
+        let video = ChatMessage {
+            text: "[Video] clip.mp4".into(),
+            link_src: Some("Video Zalo".into()),
+            ..Default::default()
+        };
+        assert_eq!(classify_attachment(&video), Some(AttachmentKind::Video));
+
+        let voice = ChatMessage {
+            text: "[Tin nhắn thoại]".into(),
+            kind: crate::message_model::MessageKind::Voice,
+            ..Default::default()
+        };
+        assert_eq!(classify_attachment(&voice), Some(AttachmentKind::Voice));
+
+        let pdf = file_msg(
+            "[Tập tin] Bao_cao.pdf",
+            Some("Bao_cao.pdf"),
+            "https://f16-zpc.zdn.vn/renewMedia?p=abc",
+        );
+        assert_eq!(classify_attachment(&pdf), Some(AttachmentKind::Pdf));
+
+        let docx = file_msg(
+            "[Tập tin] De_cuong.docx",
+            Some("De_cuong.docx"),
+            "https://f16-zpc.zdn.vn/renewMedia?p=def",
+        );
+        assert_eq!(classify_attachment(&docx), Some(AttachmentKind::Word));
+
+        let xlsx = file_msg(
+            "[Tập tin] Bang.xlsx",
+            Some("Bang.xlsx"),
+            "https://f16-zpc.zdn.vn/renewMedia?p=ghi",
+        );
+        assert_eq!(classify_attachment(&xlsx), Some(AttachmentKind::Excel));
+
+        let pptx = file_msg(
+            "[Tập tin] Slide.pptx",
+            Some("Slide.pptx"),
+            "https://f16-zpc.zdn.vn/renewMedia?p=jkl",
+        );
+        assert_eq!(classify_attachment(&pptx), Some(AttachmentKind::PowerPoint));
+    }
+
+    #[test]
+    fn voice_duration_and_format_helpers() {
+        assert_eq!(format_duration_mmss(Some(75)), "01:15");
+        assert_eq!(format_duration_mmss(None), "--:--");
+        let no_dur = ChatMessage {
+            text: "[Tin nhắn thoại]".into(),
+            ..Default::default()
+        };
+        assert_eq!(voice_duration_secs(&no_dur), None);
+        let with_dur = ChatMessage {
+            text: "[Tin nhắn thoại]".into(),
+            history_source: Some(serde_json::json!({"duration": 12})),
+            ..Default::default()
+        };
+        assert_eq!(voice_duration_secs(&with_dur), Some(12));
+    }
+
+    #[test]
+    fn video_thumb_key_is_stable_and_namespaced() {
+        let url = "https://example.com/video.mp4";
+        let k1 = video_thumb_key(url);
+        assert!(k1.starts_with("vid_"));
+        assert_eq!(k1, video_thumb_key(url));
+        assert_ne!(k1, format!("thumb_{}", crate::crypto::md5_hex(url)));
+    }
+
+    #[test]
+    fn doc_labels_cover_office_kinds() {
+        assert_eq!(attachment_kind_label(AttachmentKind::Pdf).1, "Tài liệu PDF");
+        assert_eq!(attachment_kind_label(AttachmentKind::Word).1, "Tài liệu Word");
+        assert_eq!(attachment_kind_label(AttachmentKind::Excel).1, "Bảng tính Excel");
+        assert_eq!(
+            attachment_kind_label(AttachmentKind::PowerPoint).1,
+            "Bài thuyết trình"
         );
     }
 }

@@ -213,6 +213,10 @@ pub enum WorkerCmd {
         file_name: String,
         download_dir: String,
     },
+    FetchVideoThumbnail {
+        key: String,
+        url: String,
+    },
     SendSeen {
         thread_id: String,
         is_group: bool,
@@ -3485,6 +3489,59 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ctx_clone.request_repaint();
                             });
                         }
+                        WorkerCmd::FetchVideoThumbnail { key, url } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                // No ffmpeg -> no thumbnail, no crash: the bubble
+                                // keeps its fallback card below.
+                                if !crate::media::is_ffmpeg_available() {
+                                    let _ = gui_tx_clone
+                                        .send(GuiEvent::StickerImageFailed { key });
+                                    ctx_clone.request_repaint();
+                                    return;
+                                }
+                                let bytes = {
+                                    let client = { session_clone.lock().await.clone().http };
+                                    match client.get(&url).send().await {
+                                        Ok(resp) if resp.status().is_success() => {
+                                            resp.bytes().await.ok().map(|b| b.to_vec())
+                                        }
+                                        _ => None,
+                                    }
+                                };
+                                let Some(bytes) = bytes else {
+                                    let _ = gui_tx_clone
+                                        .send(GuiEvent::StickerImageFailed { key });
+                                    ctx_clone.request_repaint();
+                                    return;
+                                };
+                                let frame = tokio::task::spawn_blocking(move || {
+                                    extract_first_video_frame(&bytes)
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                                let Some(rgba) = frame else {
+                                    let _ = gui_tx_clone
+                                        .send(GuiEvent::StickerImageFailed { key });
+                                    ctx_clone.request_repaint();
+                                    return;
+                                };
+                                let size = [rgba.width() as usize, rgba.height() as usize];
+                                let pixels = rgba.as_flat_samples();
+                                let color_img = egui::ColorImage::from_rgba_unmultiplied(
+                                    size,
+                                    pixels.as_slice(),
+                                );
+                                let _ = gui_tx_clone.send(GuiEvent::StickerImageReady {
+                                    key,
+                                    image: color_img,
+                                });
+                                ctx_clone.request_repaint();
+                            });
+                        }
                         WorkerCmd::SendTyping {
                             thread_id,
                             is_group,
@@ -3821,6 +3878,89 @@ async fn download_attachment_with_original_name(
     .await
     .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
 }
+
+/// Extract the first video frame via the system `ffmpeg` into a downscaled RGBA thumbnail.
+/// Called on a blocking thread; returns `None` on any failure (no ffmpeg, bad bytes,
+/// decode error) so the caller can keep the fallback card.
+fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let mut child = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=480:-1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-vcodec",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Probe dimensions first with a bounded stderr parse so the raw pipe can be sized.
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            "pipe:0",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok();
+    let (w, h) = probe
+        .and_then(|mut p| {
+            use std::io::Write;
+            if let Some(mut stdin) = p.stdin.take() {
+                let _ = stdin.write_all(bytes);
+            }
+            let out = p.wait_with_output().ok()?;
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut it = s.trim().split(',');
+            let w: u32 = it.next()?.trim().parse().ok()?;
+            let h: u32 = it.next()?.trim().parse().ok()?;
+            if w == 0 || h == 0 {
+                return None;
+            }
+            // Match the `scale=480:-1` filter above (preserve aspect, even dims).
+            let sw = 480.min(w);
+            let sh = ((h as u64 * sw as u64 / w as u64).max(2) & !1) as u32;
+            Some((sw, sh))
+        })
+        .unwrap_or((480, 270));
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(bytes);
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let expect = (w as usize) * (h as usize) * 4;
+    if out.stdout.len() < expect || expect == 0 {
+        return None;
+    }
+    image::RgbaImage::from_raw(w, h, out.stdout[..expect].to_vec())
+}
+
 
 pub(crate) fn capture_screen_interactive(gui_tx: crate::gui::GuiTx, ctx: egui::Context) {
     #[cfg(target_os = "windows")]

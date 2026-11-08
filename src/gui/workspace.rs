@@ -4322,6 +4322,15 @@ impl ZaloGuiApp {
                                         });
                                     }
                                 }
+                                BubbleAction::PlayVoice { url, file_name, msg_id } => {
+                                    self.show_toast(format!(
+                                        "⏳ Đang tải thoại \"{file_name}\"…"
+                                    ));
+                                    let download_dir = self.settings.download_dir.clone();
+                                    std::thread::spawn(move || {
+                                        play_voice_attachment(&url, &file_name, &msg_id, &download_dir);
+                                    });
+                                }
                             }
                         }
                     }
@@ -5373,6 +5382,71 @@ fn render_quote_target(ui: &egui::Ui, rect: egui::Rect, scroll_pending: bool, co
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(100));
 }
+
+/// Download a voice/audio attachment to the OS temp dir and open it with the default
+/// player. Runs on a plain thread (called from the `PlayVoice` dispatch): never blocks
+/// the UI, never panics on network/OS errors — worst case the file is cached for "Lưu về máy".
+fn play_voice_attachment(url: &str, file_name: &str, msg_id: &str, download_dir: &str) {
+    let clean = crate::chat::resolve_attachment_file_name(Some(file_name), file_name, url);
+    let bytes = std::thread::scope(|s| {
+        s.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+                .and_then(|rt| {
+                    rt.block_on(async {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(25))
+                            .build()
+                            .ok()?;
+                        let resp = client.get(url).send().await.ok()?;
+                        if !resp.status().is_success() {
+                            return None;
+                        }
+                        resp.bytes().await.ok().map(|b| b.to_vec())
+                    })
+                })
+        })
+        .join()
+        .ok()
+        .flatten()
+    });
+    let Some(bytes) = bytes else { return };
+    if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+        return;
+    }
+    let mut path = if download_dir.trim().is_empty() {
+        std::env::temp_dir()
+    } else {
+        std::path::PathBuf::from(download_dir.trim())
+    };
+    let _ = std::fs::create_dir_all(&path);
+    let safe_name = if clean.is_empty() {
+        format!("voice_{msg_id}.dat")
+    } else {
+        format!("play_{msg_id}_{clean}")
+    };
+    path.push(safe_name);
+    if std::fs::write(&path, &bytes).is_err() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.display().to_string()])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&path).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+    }
+}
+
 
 #[derive(Debug, Clone)]
 pub(crate) struct MentionCandidate {

@@ -2345,10 +2345,9 @@ mod tests {
         let mut threads = vec![Thread {
             id: "t1".into(),
             name: "A".into(),
-            unread: {
-                let mut u = crate::unread::UnreadState::default();
-                u.last_seen_id = Some("200".into());
-                u
+            unread: crate::unread::UnreadState {
+                last_seen_id: Some("200".into()),
+                ..Default::default()
             },
             ..Default::default()
         }];
@@ -2370,8 +2369,10 @@ mod tests {
             Some("100")
         );
         // Direct merge helper: newer stored wins, older stored ignored.
-        let mut u = crate::unread::UnreadState::default();
-        u.last_seen_id = Some("200".into());
+        let mut u = crate::unread::UnreadState {
+            last_seen_id: Some("200".into()),
+            ..Default::default()
+        };
         crate::store::merge_stored_read_point(&mut u, "100");
         assert_eq!(u.last_seen_id.as_deref(), Some("200"));
         crate::store::merge_stored_read_point(&mut u, "300");

@@ -851,6 +851,12 @@ pub fn has_sync_v2_session(sync_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn remove_sync_v2_session(sync_id: &str) {
+    if let Ok(mut m) = SYNC_V2_SESSIONS.lock() {
+        m.retain(|(k, _)| k != sync_id);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ParsedProtoMsg {
     pub sender_id: String,
@@ -1026,7 +1032,16 @@ pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
     Some(parts)
 }
 
-pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
+pub async fn import_sync_v2_messages(s: &Session, url: &str, is_last: bool) -> Result<usize> {
+    import_sync_v2_messages_inner(s, url, None, is_last).await
+}
+
+pub(crate) async fn import_sync_v2_messages_inner(
+    s: &Session,
+    url: &str,
+    sync_id: Option<&str>,
+    is_last: bool,
+) -> Result<usize> {
     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
     let sek = s.zpw_sek.clone().unwrap_or_default();
     let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
@@ -1048,9 +1063,16 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     // chunk, nối protobuf bytes lại (đúng luồng HistoryCodec mẫu).
     let host = crate::zproto_host::ZprotoHost::load()?;
     let session_record = current_v2_session()?;
+    let frames = crate::zproto_host::split_frames(&bytes)?;
+    if frames.is_empty() {
+        anyhow::bail!("gói sync rỗng (không có frame nào)");
+    }
     let mut parts: Vec<u8> = Vec::new();
-    for chunk in crate::zproto_host::split_frames(&bytes)? {
+    for chunk in frames {
         let res = host.decrypt_message(&chunk, &session_record)?;
+        if res.plaintext.is_empty() {
+            anyhow::bail!("giải mã sync trả về rỗng (payload lỗi)");
+        }
         parts.extend_from_slice(&decompress_sync_payload(&res.plaintext));
     }
     let decrypted_bytes = parts;
@@ -1058,7 +1080,12 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     // (zstd/zlib/gzip — Zalo dùng cả 3 theo HistoryCodec mẫu).
     let decompressed = decompress_sync_payload(&decrypted_bytes);
 
-    let partitions = parse_sync_chunk(&decompressed).unwrap_or_default();
+    let partitions = parse_sync_chunk(&decompressed).ok_or_else(|| {
+        anyhow::anyhow!(
+            "payload sync hỏng ({} bytes sau giải mã, parse thất bại)",
+            decompressed.len()
+        )
+    })?;
     let db_path = crate::store::db_path_for_account(&uin);
     let mut store = crate::store::MessageStore::open(&db_path)?;
     let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
@@ -1097,8 +1124,16 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     let _ = store.hydrate_threads(&mut cached_threads, 50);
     crate::chat::save_threads_cache(&cached_threads);
 
-    if let Some(pub_k) = get_sync_public_key() {
-        let _ = crate::chat::clean_sync(s, &pub_k).await;
+    // Chỉ cleanup khi batch cuối: batch giữa giữ session/keys để batch sau
+    // còn giải mã được; lỗi payload không cleanup để có thể retry (#851).
+    if is_last {
+        if let Some(sid) = sync_id {
+            remove_sync_v2_session(sid);
+        }
+        if let Some(pub_k) = get_sync_public_key() {
+            let _ = crate::chat::clean_sync(s, &pub_k).await;
+        }
+        clear_sync_keys();
     }
 
     // Keys/session giữ trong bộ nhớ tiến trình (CURRENT_V2_KEYS/_SESSION),

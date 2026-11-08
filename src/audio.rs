@@ -431,9 +431,8 @@ impl VoiceRecorder {
             }
         }
         let dir = voice_temp_dir(tag)?;
-        let mp3_bytes = encode_mono_mp3_16k(&samples_vec).map_err(|e| {
+        let mp3_bytes = encode_mono_mp3_16k(&samples_vec).inspect_err(|_| {
             let _ = std::fs::remove_dir(&dir);
-            e
         })?;
         let path = dir.join(format!("ctdozlite_voice_{tag}.mp3"));
         if let Err(e) = std::fs::write(&path, &mp3_bytes) {

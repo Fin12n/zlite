@@ -755,7 +755,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         url,
                                                         sync_id,
                                                         batch_type,
-                                                        is_last: _,
+                                                        is_last,
                                                     } => {
                                                         let s_sync = s_snap.clone();
                                                         let gui_tx_sync = gui_tx_ws.clone();
@@ -791,7 +791,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                 ctx_sync.request_repaint();
 
-                                                                match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
+                                                                match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
                                                                     Ok(count) => {
                                                                         let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                         crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
@@ -990,9 +990,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             });
                         }
                         WorkerCmd::PersistThreads(threads_snapshot) => {
+                            let uin = session
+                                .lock()
+                                .await
+                                .login
+                                .as_ref()
+                                .map(|l| l.uin.clone())
+                                .unwrap_or_default();
+                            let db_path = crate::store::db_path_for_account(&uin);
                             tokio::task::spawn_blocking(move || {
-                                if let Ok(mut store) =
-                                    crate::store::MessageStore::open("zalo_history.db")
+                                if let Ok(mut store) = crate::store::MessageStore::open(&db_path)
                                 {
                                     let _ =
                                         crate::store::persist_threads(&mut store, &threads_snapshot);
@@ -1006,6 +1013,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default()
                             };
                             if !cur_uin.is_empty() {
+                                // Snapshot acc cũ vào accounts/ trước khi QR acc mới đè file dùng chung (#1008).
                                 let _ = crate::account_manager::save_current_account_snapshot(&cur_uin);
                             }
                             if let Some(task) = current_qr_task.take() {
@@ -1041,7 +1049,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     let name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_default();
                                     let ava = s.login.as_ref().and_then(|l| if l.avatar.is_empty() { None } else { Some(l.avatar.clone()) });
                                     let mut threads = crate::chat::load_threads_cache();
-                                    if let Ok(store) = crate::store::MessageStore::open("zalo_history.db") {
+                                    let db_path = crate::store::db_path_for_account(&uin);
+                                    if let Ok(store) = crate::store::MessageStore::open(&db_path) {
                                         let _ = store.hydrate_threads(&mut threads, 50);
                                     }
                                     let _ = gui_tx.send(GuiEvent::AccountSwitched {
@@ -1329,7 +1338,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             .as_ref()
                                                             .map(|l| l.uin.clone())
                                                             .unwrap_or_default();
-                                                        let _ = crate::account_manager::save_current_account_snapshot(&uin);
                                                         let dname = s
                                                             .login
                                                             .as_ref()
@@ -1764,7 +1772,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             url,
                                                             sync_id,
                                                             batch_type,
-                                                            is_last: _,
+                                                            is_last,
                                                         } => {
                                                             let s_sync = s.clone();
                                                             let gui_tx_sync = gui_tx_clone.clone();
@@ -1798,7 +1806,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                     ctx_sync.request_repaint();
 
-                                                                    match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
+                                                                    match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
                                                                         Ok(count) => {
                                                                             let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                             crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
@@ -2780,6 +2788,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 };
 
                                 let _ = tokio::task::spawn_blocking(move || {
+                                    let is_svg = bytes.len() >= 5
+                                        && (bytes.starts_with(b"<svg")
+                                            || bytes.starts_with(b"<?xml")
+                                            || bytes.windows(5).any(|w| w == b"<svg "));
+                                    if is_svg {
+                                        // SVG không decode được bằng image crate: fail vĩnh viễn,
+                                        // không xoá cache, bubble hiển thị link fallback (#5508).
+                                        let _ = gui_tx_clone.send(GuiEvent::StickerImageFailed { key });
+                                        ctx_clone.request_repaint();
+                                        return;
+                                    }
                                     let Ok(mut dyn_img) = image::load_from_memory(&bytes) else {
                                         if !from_network {
                                             // Corrupt cache entry: drop it so the next request refetches.
@@ -2794,7 +2813,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     }
                                     // Bubbles draw images up to 360 pt wide; resize large photos to 720px max
                                     // so inline thumbnails stay crisp on Retina/HiDPI displays (#72).
-                                    // The viewer's `hd_` textures stay full size.
                                     if !key.starts_with("ava_")
                                         && !key.starts_with("hd_")
                                         && (dyn_img.width() > 720 || dyn_img.height() > 720)
@@ -4232,6 +4250,8 @@ async fn download_attachment_with_original_name(
 /// Called on a blocking thread; returns `None` on any failure (no ffmpeg, bad bytes,
 /// decode error) so the caller can keep the fallback card.
 fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
+    // Lấy kích thước frame đã scale trực tiếp từ header PNG của ffmpeg
+    // (image2pipe + png): không còn lệch 480x360 vs 320x240 (#4226).
     let mut child = std::process::Command::new("ffmpeg")
         .args([
             "-hide_banner",
@@ -4244,11 +4264,9 @@ fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
             "-vf",
             "scale=480:-1",
             "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
+            "image2pipe",
             "-vcodec",
-            "rawvideo",
+            "png",
             "pipe:1",
         ])
         .stdin(std::process::Stdio::piped())
@@ -4256,58 +4274,15 @@ fn extract_first_video_frame(bytes: &[u8]) -> Option<image::RgbaImage> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    // Probe dimensions first with a bounded stderr parse so the raw pipe can be sized.
-    let probe = std::process::Command::new("ffprobe")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
-            "pipe:0",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok();
-    let (w, h) = probe
-        .and_then(|mut p| {
-            use std::io::Write;
-            if let Some(mut stdin) = p.stdin.take() {
-                let _ = stdin.write_all(bytes);
-            }
-            let out = p.wait_with_output().ok()?;
-            let s = String::from_utf8_lossy(&out.stdout);
-            let mut it = s.trim().split(',');
-            let w: u32 = it.next()?.trim().parse().ok()?;
-            let h: u32 = it.next()?.trim().parse().ok()?;
-            if w == 0 || h == 0 {
-                return None;
-            }
-            // Match the `scale=480:-1` filter above (preserve aspect, even dims).
-            let sw = 480.min(w);
-            let sh = ((h as u64 * sw as u64 / w as u64).max(2) & !1) as u32;
-            Some((sw, sh))
-        })
-        .unwrap_or((480, 270));
     use std::io::Write;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(bytes);
     }
     let out = child.wait_with_output().ok()?;
-    if !out.status.success() {
+    if !out.status.success() || out.stdout.is_empty() {
         return None;
     }
-    let expect = (w as usize) * (h as usize) * 4;
-    if out.stdout.len() < expect || expect == 0 {
-        return None;
-    }
-    image::RgbaImage::from_raw(w, h, out.stdout[..expect].to_vec())
+    image::load_from_memory(&out.stdout).ok().map(|d| d.to_rgba8())
 }
 
 

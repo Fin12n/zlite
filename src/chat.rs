@@ -2513,6 +2513,17 @@ pub async fn send_voice_message(
         .await
         .map_err(|e| anyhow::anyhow!("tải lên tin nhắn thoại thất bại: {e}"))?;
     let send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+    let cm = parse_voice_send_response(&send_resp, client_id, duration_secs)?;
+    Ok((send_resp, cm))
+}
+
+/// Parse envelope `sendVoice`/`sendmp3`: success giữ voice URL, error_code
+/// tài liệu hoá trả Err (để test fixture không cần network, #2503).
+pub fn parse_voice_send_response(
+    send_resp: &Value,
+    client_id: u64,
+    duration_secs: u64,
+) -> Result<ChatMessage> {
     if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
         if code != 0 {
             let msg = send_resp
@@ -2522,13 +2533,13 @@ pub async fn send_voice_message(
             return Err(crate::session::SessionError::new(code, msg).into());
         }
     }
-    let data_node = send_resp.get("data").unwrap_or(&send_resp);
+    let data_node = send_resp.get("data").unwrap_or(send_resp);
     let file_url = pick_str(data_node, &["fileUrl", "url", "normalUrl", "href"]).unwrap_or_default();
     let msg_id = pick_str(data_node, &["msgId"])
         .unwrap_or_else(|| format!("out_{client_id}"));
     let mm = duration_secs / 60;
     let ss = duration_secs % 60;
-    let cm = ChatMessage {
+    Ok(ChatMessage {
         id: msg_id,
         client_message_id: client_id.to_string(),
         sender: "Tôi".into(),
@@ -2542,8 +2553,7 @@ pub async fn send_voice_message(
         link_desc: None,
         link_src: Some("Thoại Zalo".into()),
         ..Default::default()
-    };
-    Ok((send_resp, cm))
+    })
 }
 /// Đoán ngôn ngữ nguồn để dịch (target mặc định vi). Trả None khi text đã
 /// đúng ngôn ngữ đích hoặc quá ngắn/không có chữ → không cần dịch.
@@ -9495,5 +9505,24 @@ mod send_identity_tests {
         assert_eq!(parse_mymemory_response(&echo, "Hello").unwrap_err(), TranslateError::Empty);
         let bad = json!({"responseStatus": 403, "responseDetails": "INVALID EMAIL", "responseData": {"translatedText": "INVALID EMAIL"}});
         assert!(matches!(parse_mymemory_response(&bad, "Hello").unwrap_err(), TranslateError::Rejected(_)));
+    }
+
+    #[test]
+    fn voice_response_fixture_keeps_url_and_rejects_envelope_errors() {
+        use serde_json::json;
+        // Success giữ voice URL + msgId.
+        let ok = json!({
+            "error_code": 0,
+            "data": {"fileUrl": "https://fdl.zaloapp.com/voice.m4a", "msgId": "m-voice-1"}
+        });
+        let cm = parse_voice_send_response(&ok, 77, 65).unwrap();
+        assert_eq!(cm.link_url.as_deref(), Some("https://fdl.zaloapp.com/voice.m4a"));
+        assert_eq!(cm.id, "m-voice-1");
+        assert_eq!(cm.link_title.as_deref(), Some("Tin nhắn thoại (01:05)"));
+        // error_code tài liệu hoá → Err.
+        for code in [-101, -111, -112, 201, 202] {
+            let err = json!({"error_code": code, "error_message": "fail", "data": {}});
+            assert!(parse_voice_send_response(&err, 77, 65).is_err(), "code {code}");
+        }
     }
 }

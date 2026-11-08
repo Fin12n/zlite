@@ -942,6 +942,7 @@ mod tests {
             "fallback identity must be stable"
         );
     }
+    #[test]
     fn heart_count_is_not_unique_user_count() {
         let r =
             parse_reactions(&json!({"reacts":{"reactions":{"other":{"5":2},"0":{"5":1,"3":1}}}}));

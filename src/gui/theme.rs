@@ -77,7 +77,7 @@ impl ThemePalette {
             border: Color32::from_rgb(229, 231, 235), // #E5E7EB
             text_primary: Color32::from_rgb(8, 27, 58), // #081B3A
             text_secondary: Color32::from_rgb(90, 105, 129), // #5A6981
-            text_muted: Color32::from_rgb(139, 150, 167), // #8B96A7
+            text_muted: Color32::from_rgb(99, 113, 136), // #637188 (~5.4:1 trên trắng)
             primary: Color32::from_rgb(0, 104, 255), // #0068FF
             primary_hover: Color32::from_rgb(0, 88, 220),
             accent_online: Color32::from_rgb(55, 179, 97), // #37B361
@@ -89,7 +89,7 @@ impl ThemePalette {
             bubble_in_bg: Color32::WHITE,
             bubble_in_border: Color32::from_rgb(229, 231, 235), // #E5E7EB
             bubble_in_text: Color32::from_rgb(8, 27, 58),
-            bubble_in_meta: Color32::from_rgb(139, 150, 167),
+            bubble_in_meta: Color32::from_rgb(99, 113, 136),
         }
     }
 

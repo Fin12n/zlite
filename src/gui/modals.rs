@@ -3445,14 +3445,16 @@ impl ZaloGuiApp {
                                                                     ui.add_space(4.0);
                                                                     for b in bullets.iter().take(16)
                                                                     {
-                                                                        render_markdown_bullet_line(
+                                                                        if let Some(e) = render_markdown_bullet_line(
                                                                             ui,
                                                                             b,
                                                                             11.8,
                                                                             pal.primary_hover,
                                                                             pal.text_secondary,
                                                                             pal,
-                                                                        );
+                                                                        ) {
+                                                                            self.show_toast(format!("⚠️ {e}"));
+                                                                        }
                                                                         ui.add_space(3.0);
                                                                     }
                                                                 });
@@ -3543,31 +3545,36 @@ impl ZaloGuiApp {
             self.settings_modal_open = false;
             // Flush pending vào DB acc cũ trước khi snapshot (không mất draft).
             self.flush_group_note_pending();
-            let _ = crate::account_manager::save_current_account_snapshot(&self.user_uin);
-            // Giữ uin cũ để nút Hủy quay lại được; KHÔNG gửi Logout (xóa file) (#103).
-            if !self.user_uin.is_empty() {
-                self.pending_add_account_uin = Some(self.user_uin.clone());
-            }
-            self.is_logged_in = false;
-            self.user_name.clear();
-            self.user_uin.clear();
-            self.threads.clear();
-            self.selected_thread_index = 0;
-            self.qr_texture = None;
-            self.login_status_msg.clear();
-            self.qr_status = "Đang xin mã QR mới…".into();
-            self.status_msg = "Đang xin mã QR đăng nhập tài khoản mới…".into();
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::RequestQr);
+            if let Err(e) = crate::account_manager::save_current_account_snapshot(&self.user_uin) {
+                // Snapshot fail: giữ nguyên acc + return marker để user retry (#3522).
+                self.show_toast(format!("⚠️ Không lưu được phiên hiện tại: {e}"));
+                self.pending_add_account_uin = None;
+            } else {
+                // Giữ uin cũ để nút Hủy quay lại được; KHÔNG gửi Logout (xóa file) (#103).
+                if !self.user_uin.is_empty() {
+                    self.pending_add_account_uin = Some(self.user_uin.clone());
+                }
+                self.is_logged_in = false;
+                self.user_name.clear();
+                self.user_uin.clear();
+                self.threads.clear();
+                self.selected_thread_index = 0;
+                self.qr_texture = None;
+                self.login_status_msg.clear();
+                self.qr_status = "Đang xin mã QR mới…".into();
+                self.status_msg = "Đang xin mã QR đăng nhập tài khoản mới…".into();
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::RequestQr);
+                }
             }
         }
         if theme_switched {
             self.theme_dirty = true;
             self.settings.save();
             self.show_toast(if self.dark_mode {
-                "Đã chuyển sang giao diện Tối (Atom One Dark)"
+                "Đã chuyển sang giao diện Tối"
             } else {
-                "Đã chuyển sang giao diện Sáng (Zalo Light)"
+                "Đã chuyển sang giao diện Sáng"
             });
         }
         if trigger_sync {
@@ -3633,13 +3640,17 @@ impl ZaloGuiApp {
             }
         }
         if pick_dl_dir {
-            if let Some(dir_path) = pick_native_folder_dialog("Chọn thư mục lưu file tải về") {
-                self.settings.download_dir = dir_path.display().to_string();
-                self.settings.save();
-                self.show_toast(format!(
-                    "Đã đổi thư mục lưu file: {}",
-                    self.settings.download_dir
-                ));
+            match pick_native_folder_dialog_result("Chọn thư mục lưu file tải về") {
+                FolderPick::Picked(dir_path) => {
+                    self.settings.download_dir = dir_path.display().to_string();
+                    self.settings.save();
+                    self.show_toast(format!(
+                        "Đã đổi thư mục lưu file: {}",
+                        self.settings.download_dir
+                    ));
+                }
+                FolderPick::LaunchFailed(e) => self.show_toast(format!("⚠️ {e}")),
+                FolderPick::Cancelled => {}
             }
         }
         if open_dl_dir {
@@ -3683,25 +3694,29 @@ impl ZaloGuiApp {
         }
 
         if pick_migrate_dir {
-            if let Some(src_dir) = pick_native_folder_dialog("Chọn thư mục dữ liệu Zalo để nhập") {
-                match crate::store::import_history_from_path(&src_dir, "zalo_history.db") {
-                    Ok(summary) => {
-                        let t_cnt = summary.threads_imported;
-                        let m_cnt = summary.messages_imported;
-                        crate::store::load_history_into_threads(
-                            "zalo_history.db",
-                            &mut self.threads,
-                            crate::store::MessageStore::PRELOAD_MSGS,
-                        );
-                        self.persist_threads_async();
-                        self.show_toast(format!(
-                            "✅ Đã nhập {m_cnt} tin nhắn từ {t_cnt} hội thoại vào zalo_history.db"
-                        ));
-                    }
-                    Err(e) => {
-                        self.show_toast(format!("⚠️ Lỗi nhập lịch sử: {e}"));
+            match pick_native_folder_dialog_result("Chọn thư mục dữ liệu Zalo để nhập") {
+                FolderPick::Picked(src_dir) => {
+                    match crate::store::import_history_from_path(&src_dir, "zalo_history.db") {
+                        Ok(summary) => {
+                            let t_cnt = summary.threads_imported;
+                            let m_cnt = summary.messages_imported;
+                            crate::store::load_history_into_threads(
+                                "zalo_history.db",
+                                &mut self.threads,
+                                crate::store::MessageStore::PRELOAD_MSGS,
+                            );
+                            self.persist_threads_async();
+                            self.show_toast(format!(
+                                "✅ Đã nhập {m_cnt} tin nhắn từ {t_cnt} hội thoại vào zalo_history.db"
+                            ));
+                        }
+                        Err(e) => {
+                            self.show_toast(format!("⚠️ Lỗi nhập lịch sử: {e}"));
+                        }
                     }
                 }
+                FolderPick::LaunchFailed(e) => self.show_toast(format!("⚠️ {e}")),
+                FolderPick::Cancelled => {}
             }
         }
         if export_theme_tpl {
@@ -3961,14 +3976,16 @@ impl ZaloGuiApp {
                                         .show(ui, |ui| {
                                             ui.add_space(2.0);
                                             for b in bullets.iter().take(20) {
-                                                render_markdown_bullet_line(
+                                                if let Some(e) = render_markdown_bullet_line(
                                                     ui,
                                                     b,
                                                     12.2,
                                                     pal.accent_online,
                                                     pal.text_secondary,
                                                     pal,
-                                                );
+                                                ) {
+                                                    self.show_toast(format!("⚠️ {e}"));
+                                                }
                                                 ui.add_space(6.0);
                                             }
                                             ui.add_space(2.0);
@@ -8877,7 +8894,7 @@ fn render_markdown_bullet_line(
     bullet_color: Color32,
     base_color: Color32,
     pal: &ThemePalette,
-) {
+) -> Option<String> {
     let mut job = egui::text::LayoutJob::default();
     job.append(
         "•  ",
@@ -8896,11 +8913,14 @@ fn render_markdown_bullet_line(
             .on_hover_text(&url)
             .clicked()
         {
-            // Free function không có self để toast — vẫn hưởng fallback + normalize.
-            let _ = open_external_url(&url);
+            if let Err(e) = open_external_url(&url) {
+                return Some(e);
+            }
         }
+        None
     } else {
         ui.add(egui::Label::new(job).wrap());
+        None
     }
 }
 

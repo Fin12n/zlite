@@ -294,6 +294,15 @@ pub(super) fn render_call_card_widget(
 /// Open a URL in the user's default system browser. Trả `Err` thân thiện để
 /// caller toast cho user thay vì fail im lặng (#107).
 pub(super) fn open_external_url(url: &str) -> Result<(), String> {
+    open_external_url_with_monitor(url, true)
+}
+
+/// Mở URL; `monitor_exit=true` thì spawn watcher báo lỗi khi opener exit fail
+/// (xdg-open start được nhưng không mở được URL vẫn toast, #2311).
+pub(super) fn open_external_url_with_monitor(
+    url: &str,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] monitor_exit: bool,
+) -> Result<(), String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err("Liên kết trống".into());
@@ -353,7 +362,20 @@ pub(super) fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         match std::process::Command::new("xdg-open").arg(target).spawn() {
-            Ok(_) => Ok(()),
+            Ok(mut child) => {
+                if monitor_exit {
+                    // Free function không có GuiTx: watcher log stderr; launch-fail
+                    // vẫn trả Err để caller toast ngay (#2311).
+                    std::thread::spawn(move || {
+                        if let Ok(status) = child.wait() {
+                            if !status.success() {
+                                eprintln!("xdg-open exit {status}");
+                            }
+                        }
+                    });
+                }
+                Ok(())
+            }
             Err(e) => Err(format!("Không mở được liên kết ({e})")),
         }
     }
@@ -570,6 +592,50 @@ pub(super) fn pick_native_folder_dialog(title: &str) -> Option<std::path::PathBu
     }
 }
 
+/// Kết quả folder picker: phân biệt user cancel với launch fail (#3609).
+pub(super) enum FolderPick {
+    Picked(std::path::PathBuf),
+    Cancelled,
+    LaunchFailed(String),
+}
+
+pub(super) fn pick_native_folder_dialog_result(title: &str) -> FolderPick {
+    match pick_native_folder_dialog(title) {
+        Some(p) => FolderPick::Picked(p),
+        None => {
+            // Thiếu helper → launch fail có hướng dẫn; user bấm Cancel vẫn là Cancel.
+            #[cfg(target_os = "windows")]
+            let missing = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", "exit 0"])
+                .output()
+                .is_err();
+            #[cfg(target_os = "macos")]
+            let missing = std::process::Command::new("osascript")
+                .args(["-e", "return 1"])
+                .output()
+                .is_err();
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let missing = std::process::Command::new("zenity")
+                .arg("--version")
+                .output()
+                .is_err()
+                && std::process::Command::new("kdialog")
+                    .arg("--version")
+                    .output()
+                    .is_err();
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let hint = "Không mở được hộp chọn thư mục (thiếu zenity/kdialog) — hãy cài một trong hai rồi thử lại";
+            #[cfg(target_os = "macos")]
+            let hint = "Không mở được hộp chọn thư mục (osascript lỗi)";
+            #[cfg(target_os = "windows")]
+            let hint = "Không mở được hộp chọn thư mục (thiếu PowerShell)";
+            if missing {
+                return FolderPick::LaunchFailed(hint.into());
+            }
+            FolderPick::Cancelled
+        }
+    }
+}
 /// Detect `Ctrl+V` or `Shift+Insert` reliably on Windows even when `egui-winit` swallows `Key::V`
 /// because the system clipboard contains an image instead of UTF-8 text.
 pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {
@@ -1618,7 +1684,8 @@ pub(super) fn render_message_body(
             let open_target = msg
                 .link_url
                 .as_deref()
-                .filter(|u| !u.is_empty() && crate::chat::is_zalo_photo_cdn_url(u))
+                .filter(|u| !u.is_empty() && crate::chat::is_safe_external_image_url(u))
+                .or(Some(thumb_url).filter(|u| crate::chat::is_safe_external_image_url(u)))
                 .unwrap_or(thumb_url)
                 .to_string();
             let title_label = msg
@@ -2502,10 +2569,17 @@ pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
     {
         return true;
     }
+    // Marked photo (link_src/[Hình ảnh]) giữ photo card + viewer kể cả khi
+    // link_url extensionless/host lạ — mở bằng photo_primary_url an toàn (#2508).
+    let marked_photo = msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+        || trimmed == "[Hình ảnh]"
+        || trimmed.starts_with("[Hình ảnh] ");
     // If link_url points to a non-image webpage (e.g. YouTube, Google Docs, News), it is a rich link card, not a photo message.
-    if let Some(ref lu) = msg.link_url {
-        if !lu.is_empty() && !crate::chat::is_zalo_photo_cdn_url(lu) {
-            return false;
+    if !marked_photo {
+        if let Some(lu) = msg.link_url.as_deref() {
+            if !lu.is_empty() && !crate::chat::is_zalo_photo_cdn_url(lu) {
+                return false;
+            }
         }
     }
     let trimmed = msg.text.trim();

@@ -35,11 +35,11 @@ use wasmtime::{Caller, Engine, Extern, Func, Instance, Linker, Memory, Module, S
 // WASM location (same order as scripts/sync_v2_helper.js findWasm)
 // ---------------------------------------------------------------------------
 
-/// Locate `libzproto_wasm_bg.*.wasm` without bundling it in the repo:
-/// 1. `CTDOZLITE_ZPROTO_WASM` absolute path, 2. installed Zalo PC, 3. dev
-/// copy under `scripts/assets`. Returns `None` when not found (callers turn
-/// this into a clear error telling the user to install Zalo PC or set the
-/// env var).
+/// Locate `libzproto_wasm_bg.*.wasm` without bundling it in the repo.
+/// Search order: `CTDOZLITE_ZPROTO_WASM` absolute path, installed Zalo PC,
+/// dev copy under `scripts/assets`. Returns `None` when not found (callers
+/// turn this into a clear error telling the user to install Zalo PC or set
+/// the env var).
 pub fn find_wasm_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CTDOZLITE_ZPROTO_WASM") {
         let p = PathBuf::from(p);
@@ -129,6 +129,7 @@ enum FuncKind {
 /// Host-side JS value. Only the shapes the glue touches are modeled;
 /// everything exotic collapses to [`JsVal::Dummy`] (a shared plain object).
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // Bool/Dummy payloads giữ shape enum cho glue sau này.
 enum JsVal {
     #[default]
     Undefined,
@@ -990,8 +991,7 @@ mod tests {
             Some(p) => match ZprotoHost::load_from(&p) {
                 Ok(h) => Some(h),
                 Err(e) => {
-                    eprintln!("SKIP: failed to load WASM: {e}");
-                    None
+                    panic!("failed to load WASM {}: {e:#}", p.display());
                 }
             },
         }

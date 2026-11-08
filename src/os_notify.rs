@@ -71,7 +71,7 @@ fn dispatch(title: &str, body: &str, linux_icon: &str, mac_sound: Option<&str>) 
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("notify-send")
-            .args(["-a", "ctdozlite", "-i", linux_icon, &title, &body])
+            .args(["-a", "ctdozlite", "-i", linux_icon, "--", &title, &body])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -193,15 +193,18 @@ pub fn play_notification_sound() {
 
     #[cfg(target_os = "linux")]
     {
+        let mut played = false;
         let ogg = "/usr/share/sounds/freedesktop/stereo/message.oga";
         if Path::new(ogg).exists() {
-            let _ = std::process::Command::new("paplay")
+            played = std::process::Command::new("paplay")
                 .arg(ogg)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .spawn();
-        } else {
+                .spawn()
+                .is_ok();
+        }
+        if !played {
             let _ = std::process::Command::new("canberra-gtk-play")
                 .args(["-i", "message"])
                 .stdin(std::process::Stdio::null())

@@ -2225,6 +2225,11 @@ impl CallBridge {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CallEngineCmd>();
         let active_call: Arc<Mutex<Option<PureRustCallState>>> = Arc::new(Mutex::new(None));
         let cmd_tx_inner = cmd_tx.clone();
+        // Call đã dismiss vì thiết bị khác xử lý (nghe/từ chối/kết thúc):
+        // decline sau đó chỉ đóng UI local, TUYỆT ĐỐI không gửi 402 lên server
+        // (server đã chuyển call cho mobile, 402 lúc này gây -101 + chập chờn).
+        let mut dismissed_by_peer: std::collections::HashSet<i64> =
+            std::collections::HashSet::new();
 
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
@@ -3114,6 +3119,14 @@ impl CallBridge {
                                 }
                             }
                             let mut guard = active_clone.lock().await;
+                            eprintln!(
+                                "[call] AnswerCall accept={} guard={}",
+                                accept,
+                                guard.as_ref().map(|st| format!(
+                                    "call_id={} connected={} ringing_sent={}",
+                                    st.call_id, st.is_connected, st.ringing_sent
+                                )).unwrap_or_else(|| "None".into())
+                            );
                             if let Some(ref mut st) = *guard {
                                 let call_id = st.call_id;
                                 let caller_id = st.partner_id.clone();
@@ -3704,6 +3717,15 @@ impl CallBridge {
                                     })
                                     .unwrap_or(0);
                                 let mut guard = active_call.lock().await;
+                                eprintln!(
+                                    "[call] answer evt: ev_call_id={} status={} state={}",
+                                    ev_call_id,
+                                    status,
+                                    guard.as_ref().map(|st| format!(
+                                        "call_id={} connected={} caller={}",
+                                        st.call_id, st.is_connected, st.is_caller
+                                    )).unwrap_or_else(|| "None".into())
+                                );
                                 if guard.is_none() {
                                     let self_uin = s_snap
                                         .login
@@ -3871,7 +3893,9 @@ impl CallBridge {
                                     //    or rejected/ended on another device (eff_status != 0).
                                     // Dismiss ringing on this desktop client and clean up active call resources.
                                     let is_group = st_check.is_group;
+                                    eprintln!("[call] dismiss: mobile handled call {}, eff_status={}", ev_call_id, eff_status);
                                     let _taken = guard.take();
+                                    dismissed_by_peer.insert(ev_call_id);
                                     let _ = gui_tx.send(GuiEvent::CallStateChanged("free".into()));
                                     let msg = if eff_status == 0 {
                                         if is_group {

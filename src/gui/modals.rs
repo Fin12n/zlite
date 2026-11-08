@@ -1241,25 +1241,46 @@ impl ZaloGuiApp {
             if let Some(idx) = self.threads.iter().position(|t| t.id == prof.user_id) {
                 self.selected_thread_index = idx;
             } else {
-                self.threads.insert(
-                    0,
-                    Thread {
-                        presentation: Default::default(),
-                        unread: Default::default(),
-                        id: prof.user_id.clone(),
-                        name: prof.display_name.clone(),
-                        preview: format!("SĐT: {}", prof.phone),
-                        time: crate::ui::clock(),
-                        avatar: if prof.avatar.is_empty() {
-                            None
-                        } else {
-                            Some(prof.avatar)
-                        },
-                        is_group: false,
-                        messages: Vec::new(),
-                        vanish: None,
+                let opened = Thread {
+                    presentation: Default::default(),
+                    unread: Default::default(),
+                    id: prof.user_id.clone(),
+                    name: prof.display_name.clone(),
+                    preview: format!("SĐT: {}", prof.phone),
+                    time: crate::ui::clock(),
+                    avatar: if prof.avatar.is_empty() {
+                        None
+                    } else {
+                        Some(prof.avatar)
                     },
-                );
+                    is_group: false,
+                    messages: Vec::new(),
+                    // Khôi phục vanish đã lưu TRƯỚC khi persist: thread mới
+                    // `vanish: None` + persist ngay sẽ ghi đè policy trong
+                    // SQLite thành tắt → tin cũ ngừng tự xoá (#1260).
+                    vanish: {
+                        let db = crate::store::db_path_for_account(&self.user_uin);
+                        crate::store::MessageStore::open(&db)
+                            .ok()
+                            .and_then(|st| st.load_thread_vanish(&prof.user_id))
+                            .filter(|(d, _)| *d > 0)
+                            .map(|(duration_sec, started_at_sec)| {
+                                crate::chat::VanishSetting {
+                                    duration_sec,
+                                    started_at_sec,
+                                }
+                            })
+                    },
+                };
+                // Đăng ký watch trước persist để sweep tick 2s không bỏ lỡ (#1260).
+                if opened.vanish.as_ref().is_some_and(|v| v.enabled()) {
+                    if let Ok(mut watch) = VANISH_THREADS.lock() {
+                        if !watch.contains(&opened.id) {
+                            watch.push(opened.id.clone());
+                        }
+                    }
+                }
+                self.threads.insert(0, opened);
                 self.selected_thread_index = 0;
                 self.persist_threads_async();
             }

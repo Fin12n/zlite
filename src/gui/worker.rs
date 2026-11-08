@@ -542,8 +542,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let start_ms = start.saturating_mul(1000);
                                         let mut expired_ids = Vec::new();
                                         for sm in msgs {
+                                            // Tombstone đã persist (text + marker): bỏ qua,
+                                            // không gửi event lại mỗi 2s (#1908).
                                             if sm.text.trim()
                                                 == crate::chat::VANISH_EXPIRED_TEXT
+                                                || sm.raw_json.trim()
+                                                    == crate::store::VANISH_TOMBSTONE_JSON
                                             {
                                                 continue;
                                             }
@@ -1134,8 +1138,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             duration_sec,
                         } => {
                             // Vanish là local-only: không gọi server, chỉ persist SQLite + báo GUI
-                            // để apply ngay vào thread đang hiển thị. DB theo account-uin giống
-                            // các lane khác; lỗi persist chỉ log, GUI vẫn giữ trạng thái RAM.
+                            // để apply ngay vào thread đang hiển thị. Ghi vào BOTH DB:
+                            // account DB (theo uin, nguồn thật cho sweep/hydrate) VÀ
+                            // active `zalo_history.db` (worker sweep/hydrate đọc path này;
+                            // chỉ ghi history DB thì sweep skip vì active DB không có
+                            // setting → tin đủ hạn vẫn hiển thị, #1156). Lỗi persist
+                            // chỉ log, GUI vẫn giữ trạng thái RAM.
                             let db_path = {
                                 let s = session.lock().await;
                                 let uin =
@@ -1146,6 +1154,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::task::spawn_blocking(move || {
+                                // 1) Account DB — nguồn thật.
                                 if let Ok(mut store) =
                                     crate::store::MessageStore::open(&db_path)
                                 {
@@ -1158,6 +1167,24 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     } else {
                                         let _ = store
                                             .upsert_thread_vanish(&thread_id, 0, 0);
+                                    }
+                                }
+                                // 2) Active DB — worker sweep + hydrate đang đọc path này.
+                                // Trùng khi chưa login multi-account thì open cùng file, rẻ.
+                                if db_path != "zalo_history.db" {
+                                    if let Ok(mut active) =
+                                        crate::store::MessageStore::open("zalo_history.db")
+                                    {
+                                        if duration_sec > 0 {
+                                            let _ = active.upsert_thread_vanish(
+                                                &thread_id,
+                                                duration_sec,
+                                                now_sec,
+                                            );
+                                        } else {
+                                            let _ = active
+                                                .upsert_thread_vanish(&thread_id, 0, 0);
+                                        }
                                     }
                                 }
                                 let _ = gui_tx_clone.send(GuiEvent::VanishSettingChanged {

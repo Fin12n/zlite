@@ -1158,6 +1158,14 @@ pub fn merge_thread_into(
         target.avatar = incoming.avatar;
     }
     target.is_group = target.is_group || incoming.is_group;
+    // Vanish là local-only: payload sync/poll không mang policy. Nếu thread
+    // RAM chưa có mà incoming có (vd. hydrate từ DB), nhận lấy; không bao giờ
+    // để merge history ghi đè/xoá policy đang bật trong RAM (#376).
+    if target.vanish.as_ref().is_none_or(|v| !v.enabled())
+        && incoming.vanish.as_ref().is_some_and(|v| v.enabled())
+    {
+        target.vanish = incoming.vanish.clone();
+    }
     target.presentation.pinned = target.presentation.pinned || incoming.presentation.pinned;
     target.presentation.muted = target.presentation.muted || incoming.presentation.muted;
     target.presentation.hidden = target.presentation.hidden || incoming.presentation.hidden;

@@ -34,6 +34,11 @@ pub struct StoredThread {
     #[serde(default)]
     pub last_read_msg_id: String,
 }
+/// Non-empty raw_json marker for vanish-expiry tombstones. The hydrate path
+/// treats `vanished: true` as authoritative: it never restores link/sticker
+/// metadata or original text from this row (gui.rs:1908).
+pub const VANISH_TOMBSTONE_JSON: &str = r#"{"vanished":true}"#;
+
 
 pub struct MessageStore {
     pub conn: Connection,
@@ -239,6 +244,9 @@ impl MessageStore {
     }
 
     /// Insert a message. Returns `true` if a new row was inserted, `false` if already existed.
+    /// Expiry tombstones (`[Tin nhắn đã biến mất]`, empty raw_json) MUST overwrite the
+    /// original row — otherwise the sweep re-persists expiry every 2s tick and a
+    /// restart restores the original content from the stale row (gui.rs:1908).
     pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
         let rows = self.conn.execute(
             "INSERT OR IGNORE INTO messages (msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json)
@@ -255,10 +263,19 @@ impl MessageStore {
                 msg.raw_json,
             ],
         )?;
-        if rows == 0 && !msg.raw_json.is_empty() {
+        let is_tombstone = msg.raw_json.is_empty()
+            && msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
+        if rows == 0 && (!msg.raw_json.is_empty() || is_tombstone) {
+            let raw = if is_tombstone {
+                // Non-empty tombstone marker so the row is never skipped or
+                // re-hydrated as original content; hydrate ignores `vanished`.
+                VANISH_TOMBSTONE_JSON
+            } else {
+                msg.raw_json.as_str()
+            };
             let _ = self.conn.execute(
                 "UPDATE messages SET raw_json = ?1, msg_type = ?2, text = ?4 WHERE msg_id = ?3",
-                params![msg.raw_json, msg.msg_type, msg.msg_id, msg.text],
+                params![raw, msg.msg_type, msg.msg_id, msg.text],
             );
         }
         Ok(rows > 0)
@@ -341,11 +358,40 @@ impl MessageStore {
         Ok(out)
     }
 
-    /// Insert or update thread metadata (kèm vanish; vanish mới ghi đè vanish cũ).
+    /// Insert or update thread metadata. History-sync pages carry no vanish
+    /// setting (`0/0`, like the existing read-point CASE below): preserve the
+    /// stored vanish instead of clearing it, so the sweep keeps expiring
+    /// messages. An explicit disable still clears via `upsert_thread_vanish`
+    /// when the thread carries vanish columns from a user action (#376).
+    /// Callers that only carry messages (history_sync, import) MUST pass
+    /// `vanish_duration_sec = 0` + `vanish_from_user = false`.
     pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
+        self.upsert_thread_inner(t, false)
+    }
+
+    /// `upsert_thread` with an explicit-disable flag. Pass `true` only when
+    /// the caller knows the user's vanish intent (RAM `Thread.vanish` snapshot
+    /// from `persist_threads`, or the SetThreadVanish worker lane).
+    pub fn upsert_thread_with_vanish_intent(
+        &mut self,
+        t: &StoredThread,
+        vanish_from_user: bool,
+    ) -> Result<()> {
+        self.upsert_thread_inner(t, vanish_from_user)
+    }
+
+    fn upsert_thread_inner(&mut self, t: &StoredThread, vanish_from_user: bool) -> Result<()> {
+        // History-only upsert: keep stored vanish columns (CASE mirrors the
+        // read-point CASE). User-intent upsert: overwrite (incl. explicit 0/0 disable).
+        let (vanish_dur, vanish_start) = if vanish_from_user {
+            (t.vanish_duration_sec, t.vanish_started_at_sec)
+        } else {
+            // Sentinel: negative keeps the CASE on the stored value.
+            (-1, -1)
+        };
         self.conn.execute(
             "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 < 0 THEN 0 ELSE ?5 END, CASE WHEN ?6 < 0 THEN 0 ELSE ?6 END)
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = CASE
                      WHEN excluded.name IS NOT NULL AND excluded.name != ''
@@ -357,8 +403,14 @@ impl MessageStore {
                  END,
                  is_group = excluded.is_group,
                  last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
-                 vanish_duration_sec = excluded.vanish_duration_sec,
-                 vanish_started_at_sec = excluded.vanish_started_at_sec,
+                 vanish_duration_sec = CASE
+                     WHEN ?5 < 0 THEN threads.vanish_duration_sec
+                     ELSE excluded.vanish_duration_sec
+                 END,
+                 vanish_started_at_sec = CASE
+                     WHEN ?6 < 0 THEN threads.vanish_started_at_sec
+                     ELSE excluded.vanish_started_at_sec
+                 END,
                  last_read_msg_id = CASE
                      WHEN excluded.last_read_msg_id IS NOT NULL AND excluded.last_read_msg_id != ''
                      THEN excluded.last_read_msg_id
@@ -369,11 +421,13 @@ impl MessageStore {
                 t.name,
                 if t.is_group { 1 } else { 0 },
                 t.last_ts,
-                t.vanish_duration_sec,
-                t.vanish_started_at_sec,
+                vanish_dur,
+                vanish_start,
             ],
         )?;
-        self.upsert_thread_vanish(&t.thread_id, t.vanish_duration_sec, t.vanish_started_at_sec)?;
+        if vanish_from_user {
+            self.upsert_thread_vanish(&t.thread_id, t.vanish_duration_sec, t.vanish_started_at_sec)?;
+        }
         Ok(())
     }
 
@@ -559,10 +613,10 @@ impl MessageStore {
                 }
                 existing.is_group = existing.is_group || st.is_group;
                 apply_stored_vanish(existing, &st, self);
-                // Khôi phục read-point đã lưu (#119): thread đã đọc không bị đếm lại.
-                if !st.last_read_msg_id.is_empty() {
-                    existing.unread.last_seen_id = Some(st.last_read_msg_id.clone());
-                }
+                // Khôi phục read-point đã lưu (#119, #565): chỉ tiến, không lùi.
+                // SQLite có thể giữ 100 trong khi RAM đã 200 (đọc tiếp sau hydrate):
+                // gán thẳng sẽ đếm lại tin 150 thành unread.
+                merge_stored_read_point(&mut existing.unread, &st.last_read_msg_id);
             } else if !st.is_group
                 && st.name.contains("Cloud của tôi")
                 && threads
@@ -658,6 +712,57 @@ impl MessageStore {
                 let mut link_thumb = None;
                 let mut link_src = None;
                 if !sm.raw_json.is_empty() {
+                    // Expiry tombstone (`{"vanished":true}`): authoritative —
+                    // keep the tombstone text, restore NO metadata, and never
+                    // let stored links resurrect expired content (#1908).
+                    let is_tombstone = sm.raw_json.trim() == VANISH_TOMBSTONE_JSON
+                        || serde_json::from_str::<serde_json::Value>(&sm.raw_json)
+                            .ok()
+                            .and_then(|v| v.get("vanished").and_then(|b| b.as_bool()))
+                            .unwrap_or(false);
+                    if is_tombstone {
+                        let cm = ChatMessage {
+                            id: sm.msg_id,
+                            sender: if !sm.sender_name.is_empty() {
+                                sm.sender_name
+                            } else {
+                                sm.sender_id
+                            },
+                            text: sm.text,
+                            time: if sm.ts > 0 {
+                                crate::clock::message_time(sm.ts)
+                            } else {
+                                crate::ui::clock()
+                            },
+                            is_outgoing: sm.is_outgoing,
+                            ts: sm.ts,
+                            ..Default::default()
+                        };
+                        if let Some(existing) = t.messages.iter_mut().find(|existing| {
+                            (!existing.id.is_empty() && existing.id == cm.id)
+                                || (existing.text == cm.text
+                                    && existing.is_outgoing == cm.is_outgoing
+                                    && (existing.ts == cm.ts
+                                        || (existing.ts != 0
+                                            && cm.ts != 0
+                                            && (existing.ts - cm.ts).abs() < 5000)))
+                        }) {
+                            existing.text = cm.text.clone();
+                            existing.translation = None;
+                            existing.link_url = None;
+                            existing.link_title = None;
+                            existing.link_desc = None;
+                            existing.link_thumb = None;
+                            existing.link_src = None;
+                            existing.sticker_id = None;
+                            existing.sticker_cate_id = None;
+                            existing.sticker_type = None;
+                        } else {
+                            t.messages.push(cm);
+                            loaded_count += 1;
+                        }
+                        continue;
+                    }
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sm.raw_json) {
                         sticker_id = val
                             .get("stickerId")
@@ -932,6 +1037,34 @@ fn apply_stored_vanish(thread: &mut Thread, st: &StoredThread, store: &MessageSt
     }
     thread.vanish = vanish_from_stored(st, store);
 }
+
+/// Merge a stored read-point into RAM without moving the cursor backward
+/// (#565): keep the max of stored vs existing, comparing numerically; either
+/// side absent or non-comparable leaves the other side intact.
+pub fn merge_stored_read_point(unread: &mut crate::unread::UnreadState, stored: &str) {
+    if stored.is_empty() {
+        return;
+    }
+    match unread.last_seen_id.clone() {
+        None => {
+            unread.last_seen_id = Some(stored.to_string());
+        }
+        Some(cur) if cur == stored => {}
+        Some(cur) => {
+            match crate::unread::compare_ids(stored, &cur) {
+                Some(std::cmp::Ordering::Greater) => {
+                    unread.last_seen_id = Some(stored.to_string());
+                }
+                None => {
+                    // Không so được (non-numeric): giữ read-point đã có trong RAM,
+                    // vốn mới hơn vì được advance sau hydrate.
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
     // One transaction for the whole snapshot: in autocommit every row was its own fsync.
@@ -942,7 +1075,6 @@ pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<u
         .execute_batch(if res.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
     res
 }
-
 fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
     let mut new_count = 0;
     for t in threads {
@@ -956,8 +1088,9 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             vanish_started_at_sec: t.vanish.as_ref().map(|v| v.started_at_sec).unwrap_or(0),
             last_read_msg_id: t.unread.last_seen_id.clone().unwrap_or_default(),
         };
-        store.upsert_thread(&st)?;
-
+        // RAM snapshot carries the user's vanish intent (incl. explicit disable),
+        // unlike history-sync pages which must preserve stored vanish (#376).
+        store.upsert_thread_with_vanish_intent(&st, true)?;
         for m in t.messages.iter().filter(|m| m.text != "sendBubbleMessage") {
             let mut sm = StoredMessage::from(m);
             sm.thread_id = t.id.clone();
@@ -2067,7 +2200,161 @@ mod tests {
         store.set_thread_read("t1", "msg-200").unwrap();
         assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
     }
+    #[test]
+    fn history_upsert_preserves_vanish_and_explicit_disable_clears() {
+        // #376: history-sync page (vanish 0/0, no intent) must not clear vanish.
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store
+            .upsert_thread_with_vanish_intent(
+                &StoredThread {
+                    thread_id: "g1".into(),
+                    name: "Nhóm".into(),
+                    is_group: true,
+                    last_ts: 1,
+                    vanish_duration_sec: 3600,
+                    vanish_started_at_sec: 1000,
+                    last_read_msg_id: String::new(),
+                },
+                true,
+            )
+            .unwrap();
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "g1".into(),
+                name: "Nhóm".into(),
+                is_group: true,
+                last_ts: 5,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        let got = store.all_threads().unwrap();
+        assert_eq!(got[0].vanish_duration_sec, 3600, "history upsert cleared vanish");
+        assert_eq!(store.load_thread_vanish("g1"), Some((3600, 1000)));
+        // Explicit user disable DOES clear (intent path from persist_threads).
+        store
+            .upsert_thread_with_vanish_intent(
+                &StoredThread {
+                    thread_id: "g1".into(),
+                    name: "Nhóm".into(),
+                    is_group: true,
+                    last_ts: 5,
+                    vanish_duration_sec: 0,
+                    vanish_started_at_sec: 0,
+                    last_read_msg_id: String::new(),
+                },
+                true,
+            )
+            .unwrap();
+        let got = store.all_threads().unwrap();
+        assert_eq!(got[0].vanish_duration_sec, 0);
+        assert_eq!(store.load_thread_vanish("g1"), None);
+    }
 
+    #[test]
+    fn hydrate_never_moves_read_point_backward() {
+        // #565: SQLite 100 + RAM 200 → keep 200 (no recount of 150 as unread).
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store.set_thread_read("t1", "100").unwrap();
+        let mut threads = vec![Thread {
+            id: "t1".into(),
+            name: "A".into(),
+            unread: {
+                let mut u = crate::unread::UnreadState::default();
+                u.last_seen_id = Some("200".into());
+                u
+            },
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        assert_eq!(
+            threads[0].unread.last_seen_id.as_deref(),
+            Some("200"),
+            "hydrate moved read-point backward"
+        );
+        // Forward case still advances: RAM none + stored 100 → 100.
+        let mut fresh: Vec<Thread> = vec![Thread {
+            id: "t1".into(),
+            name: "A".into(),
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut fresh, 10).unwrap();
+        assert_eq!(
+            fresh[0].unread.last_seen_id.as_deref(),
+            Some("100")
+        );
+        // Direct merge helper: newer stored wins, older stored ignored.
+        let mut u = crate::unread::UnreadState::default();
+        u.last_seen_id = Some("200".into());
+        crate::store::merge_stored_read_point(&mut u, "100");
+        assert_eq!(u.last_seen_id.as_deref(), Some("200"));
+        crate::store::merge_stored_read_point(&mut u, "300");
+        assert_eq!(u.last_seen_id.as_deref(), Some("300"));
+    }
+
+    #[test]
+    fn expiry_tombstone_overwrites_row_and_hydrate_keeps_it() {
+        // #1908: expiring a message must overwrite the SQLite row (non-empty
+        // marker) and hydrate must not restore original content/metadata.
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let mut meta = serde_json::Map::new();
+        meta.insert("link_url".into(), serde_json::json!("https://x.test/a"));
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m1".into(),
+                thread_id: "t1".into(),
+                sender_id: "u9".into(),
+                sender_name: "Peer".into(),
+                text: "secret link".into(),
+                msg_type: "chat.text".into(),
+                ts: 1000,
+                is_outgoing: false,
+                raw_json: serde_json::Value::Object(meta).to_string(),
+            })
+            .unwrap();
+        // Expire → text + cleared metadata → empty raw_json tombstone form.
+        let mut expired = StoredMessage {
+            msg_id: "m1".into(),
+            thread_id: "t1".into(),
+            sender_id: "u9".into(),
+            sender_name: "Peer".into(),
+            text: crate::chat::VANISH_EXPIRED_TEXT.into(),
+            msg_type: "chat.text".into(),
+            ts: 1000,
+            is_outgoing: false,
+            raw_json: String::new(),
+        };
+        assert!(!store.upsert_message(&expired).unwrap(), "tombstone must UPDATE, not insert");
+        let rows = store.messages_for("t1", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, crate::chat::VANISH_EXPIRED_TEXT);
+        assert_eq!(rows[0].raw_json, crate::store::VANISH_TOMBSTONE_JSON);
+        // Hydrate restores tombstone text with NO link metadata.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "A".into(),
+                is_group: false,
+                last_ts: 1000,
+                vanish_duration_sec: 3600,
+                vanish_started_at_sec: 1,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        let mut threads: Vec<Thread> = Vec::new();
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        let t = threads.iter().find(|t| t.id == "t1").expect("thread hydrated");
+        let m = t.messages.iter().find(|m| m.id == "m1").expect("msg hydrated");
+        assert_eq!(m.text, crate::chat::VANISH_EXPIRED_TEXT);
+        assert!(m.link_url.is_none(), "hydrate restored expired link");
+        // Sweep path skips tombstones (no re-persist loop): simulate the check.
+        expired.raw_json = rows[0].raw_json.clone();
+        assert!(
+            expired.text.trim() == crate::chat::VANISH_EXPIRED_TEXT
+                || expired.raw_json.trim() == crate::store::VANISH_TOMBSTONE_JSON
+        );
+    }
     #[test]
     fn test_persist_threads_and_upsert_thread() {
         let mut store = MessageStore::open(":memory:").unwrap();

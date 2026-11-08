@@ -60,7 +60,32 @@ fn resolve_reactor_name(thread: &Thread, sender_id: &str) -> String {
     }
     sender_id.to_string()
 }
-
+/// Find the message a reaction targets: ID match first (`message_id`, then
+/// `client_message_id`), timestamp only as fallback (#1745). Timestamp-first
+/// could attribute a reaction to an outgoing message in an earlier thread
+/// when two threads share a timestamp.
+fn find_reaction_target<'a>(
+    messages: &'a [ChatMessage],
+    ev: &crate::reactions::ReactionEvent,
+) -> Option<&'a ChatMessage> {
+    if !ev.message_id.is_empty() {
+        if let Some(m) = messages.iter().find(|m| m.id == ev.message_id) {
+            return Some(m);
+        }
+    }
+    if !ev.client_message_id.is_empty() {
+        if let Some(m) = messages
+            .iter()
+            .find(|m| m.client_message_id == ev.client_message_id)
+        {
+            return Some(m);
+        }
+    }
+    if ev.ts > 0 {
+        return messages.iter().find(|m| m.ts == ev.ts);
+    }
+    None
+}
 pub enum GuiEvent {
     /// Terminal response for a Settings authorization action.
     NotificationAuthorization {
@@ -1119,6 +1144,21 @@ impl ZaloGuiApp {
                 .collect();
         }
     }
+    /// Rebuild `VANISH_THREADS` from the current RAM threads (gui.rs:875).
+    /// Called after account switch / hydrate / ThreadsUpdated replace, and to
+    /// clear on logout / wipe. Keep in `gui.rs` (not worker) so GUI and sweep
+    /// always agree on the watched set.
+    fn refresh_vanish_watch(&self) {
+        if let Ok(mut watch) = VANISH_THREADS.lock() {
+            watch.clear();
+            watch.extend(
+                self.threads
+                    .iter()
+                    .filter(|t| t.vanish.as_ref().is_some_and(|v| v.enabled()))
+                    .map(|t| t.id.clone()),
+            );
+        }
+    }
 
     fn persist_threads_async(&self) {
         self.publish_known_threads();
@@ -1392,20 +1432,31 @@ impl ZaloGuiApp {
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
-                                // Brand-new thread: đếm sau read-point đã lưu (#119).
+                                // Brand-new thread chưa có read-point (#1445): đây là lần
+                                // đầu thấy thread (history load hoặc poll đầu), KHÔNG
+                                // đếm toàn bộ history thành unread và không banner tin cũ.
+                                // Lựa chọn: seed read-point = tin mới nhất rồi đếm 0 —
+                                // lần đầu mở app không báo ồ ạt, tin mới sau đó (WS
+                                // event / poll batch tiếp theo) mới đếm qua nhánh
+                                // merge ở trên. Đơn giản và đúng vì mọi tin trong
+                                // batch đầu đều là history, không phải tin mới.
                                 let is_thread_muted = settings_muted_until.is_some()
                                     || nt.presentation.muted
                                     || nt.unread.is_muted();
                                 let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
+                                if seen.is_empty() {
+                                    if let Some(newest) = nt.messages.last() {
+                                        nt.unread.last_seen_id = Some(newest.id.clone());
+                                    }
+                                    self.threads.push(nt);
+                                    continue;
+                                }
                                 let inc_cnt = nt
                                     .messages
                                     .iter()
                                     .filter(|m| {
                                         if m.is_outgoing {
                                             return false;
-                                        }
-                                        if seen.is_empty() {
-                                            return true;
                                         }
                                         // Tin mới hơn read-point, hoặc id không so được
                                         // (non-numeric) thì đếm cho chắc.
@@ -1499,6 +1550,7 @@ impl ZaloGuiApp {
                                 self.reaction_inbox.apply_to(&mut t.messages);
                             }
                         }
+                        self.refresh_vanish_watch();
                         self.persist_threads_async();
                     }
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
@@ -1518,7 +1570,10 @@ impl ZaloGuiApp {
                 GuiEvent::LocalDataWiped => {
                     self.threads.clear();
                     self.selected_thread_index = 0;
-                    self.status_msg = "Đã xoá dữ liệu tin nhắn cục bộ (session giữ nguyên)".into();
+                    // Sweep không còn gì để quét — clear để đổi acc sau không quét nhầm (#875).
+                    if let Ok(mut watch) = VANISH_THREADS.lock() {
+                        watch.clear();
+                    }
                     // Group Workspace cache theo DB cũ → xoá cùng.
                     self.group_note_drafts.clear();
                     self.group_note_loaded.clear();
@@ -1535,8 +1590,10 @@ impl ZaloGuiApp {
                     self.user_name.clear();
                     self.user_uin.clear();
                     self.threads.clear();
+                    if let Ok(mut watch) = VANISH_THREADS.lock() {
+                        watch.clear();
+                    }
                     self.selected_thread_index = 0;
-                    self.qr_texture = None;
                     self.qr_status = "Đang xin mã QR mới…".into();
                     self.status_msg = "Đã đăng xuất".into();
                     // Đăng xuất → cache nhóm không còn giá trị.
@@ -1562,9 +1619,11 @@ impl ZaloGuiApp {
                     self.user_name = name.clone();
                     self.user_avatar = avatar;
                     self.threads = threads;
+                    // Acc mới mang vanish policy riêng — rebuild watch để sweep
+                    // thread khôi phục từ SQLite, không giữ watch của acc cũ (#875).
+                    self.refresh_vanish_watch();
                     self.selected_thread_index = 0;
                     self.status_msg = format!("Đã chuyển sang tài khoản {name}");
-                    self.show_toast(format!("Đã chuyển sang tài khoản {name}"));
                     self.history_reached_start.clear();
                     // Group Workspace cache theo tài khoản cũ → xoá để nạp lại từ DB mới.
                     self.group_note_drafts.clear();
@@ -1697,9 +1756,15 @@ impl ZaloGuiApp {
                     self.status_msg = "Đã thả cảm xúc".into();
                 }
                 GuiEvent::ReactionEventsReceived(events) => {
+                    // Count/banner ONLY newly accepted events (replays ignored) and
+                    // only onto MY OWN messages (peer→peer reactions excluded).
+                    // Target lookup is ID-first, timestamp-fallback (#1745); the
+                    // per-thread unread loop additionally requires `is_outgoing`
+                    // like the banner gate (#1812), and both loops iterate the
+                    // accepted subset so repeats never double-count (#473, #1773).
                     let total = events.len();
                     let pending_before = self.reaction_inbox.pending_len();
-                    self.reaction_inbox.record(&events);
+                    let accepted = self.reaction_inbox.record_new(&events);
                     let mut changed = false;
                     for t in self.threads.iter_mut() {
                         changed |= self.reaction_inbox.apply_to(&mut t.messages);
@@ -1725,7 +1790,7 @@ impl ZaloGuiApp {
                     let reactions_sound_on =
                         self.settings.enable_notifications && self.settings.play_notification_sound;
                     let now_ts_react = crate::login::unix_now();
-                    for ev in &events {
+                    for ev in &accepted {
                         if ev.r_type < 0 || ev.historical {
                             continue;
                         }
@@ -1745,12 +1810,7 @@ impl ZaloGuiApp {
                             if muted || !reactions_notify_on {
                                 continue;
                             }
-                            let hit = t.messages.iter().find(|m| {
-                                (!ev.message_id.is_empty() && m.id == ev.message_id)
-                                    || (!ev.client_message_id.is_empty()
-                                        && m.client_message_id == ev.client_message_id)
-                                    || (ev.ts > 0 && m.ts == ev.ts)
-                            });
+                            let hit = find_reaction_target(&t.messages, ev);
                             let Some(m) = hit else { continue };
                             if !m.is_outgoing {
                                 continue;
@@ -1774,7 +1834,7 @@ impl ZaloGuiApp {
                         .unwrap_or_default();
                     let is_focused_now = ctx.input(|i| i.focused);
                     let my_uid_count = self.user_uin.clone();
-                    for ev in &events {
+                    for ev in &accepted {
                         if ev.r_type < 0 || ev.historical {
                             continue;
                         }
@@ -1783,16 +1843,16 @@ impl ZaloGuiApp {
                         }
                         let mut hit_tid: Option<String> = None;
                         for t in &self.threads {
-                            let hit = t.messages.iter().find(|m| {
-                                (!ev.message_id.is_empty() && m.id == ev.message_id)
-                                    || (!ev.client_message_id.is_empty()
-                                        && m.client_message_id == ev.client_message_id)
-                                    || (ev.ts > 0 && m.ts == ev.ts)
-                            });
-                            if hit.is_some() && !ev.thread_id.is_empty() {
+                            let Some(m) = find_reaction_target(&t.messages, ev) else {
+                                continue;
+                            };
+                            if !m.is_outgoing {
+                                continue;
+                            }
+                            if !ev.thread_id.is_empty() {
                                 hit_tid = Some(ev.thread_id.clone());
                                 break;
-                            } else if hit.is_some() {
+                            } else {
                                 hit_tid = Some(t.id.clone());
                                 break;
                             }
@@ -1904,15 +1964,24 @@ impl ZaloGuiApp {
                 } => {
                     if !expired_ids.is_empty() {
                         if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            let mut flipped = false;
                             for m in t.messages.iter_mut() {
                                 if expired_ids.contains(&m.id) {
-                                    crate::chat::apply_vanish_expiry(m);
+                                    // `apply_vanish_expiry` clears link/sticker metadata
+                                    // so `StoredMessage::from` yields empty raw_json +
+                                    // tombstone text; `upsert_message` then overwrites
+                                    // the SQLite row (non-empty tombstone marker) instead
+                                    // of skipping it — the sweep ignores tombstones and
+                                    // restart never restores original content (#1908).
+                                    flipped |= crate::chat::apply_vanish_expiry(m);
                                 }
                             }
-                            if let Some(last) = t.messages.last() {
-                                t.preview = last.text.clone();
+                            if flipped {
+                                if let Some(last) = t.messages.last() {
+                                    t.preview = last.text.clone();
+                                }
+                                self.persist_threads_async();
                             }
-                            self.persist_threads_async();
                         }
                     }
                 }

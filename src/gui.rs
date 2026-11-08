@@ -585,6 +585,9 @@ pub struct ZaloGuiApp {
     user_name: String,
     user_uin: String,
     user_avatar: Option<String>,
+    /// UIN tài khoản đang dùng trước khi bấm "Thêm tài khoản mới" (#103):
+    /// login screen hiện nút quay lại, Hủy → SwitchAccount về uin này.
+    pub(crate) pending_add_account_uin: Option<String>,
 
     // Login screen state
     login_tab: LoginTab,
@@ -859,6 +862,7 @@ impl ZaloGuiApp {
             user_name,
             user_uin,
             user_avatar,
+            pending_add_account_uin: None,
             login_tab: LoginTab::QrCode,
             phone_input: String::new(),
             password_input: String::new(),
@@ -1100,6 +1104,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
                     self.is_logged_in = true;
+                    self.pending_add_account_uin = None;
                     self.user_name = name;
                     self.user_uin = uin;
                     if avatar.is_some() {
@@ -1410,6 +1415,7 @@ impl ZaloGuiApp {
                     threads,
                 } => {
                     self.is_logged_in = true;
+                    self.pending_add_account_uin = None;
                     self.user_uin = uin;
                     self.user_name = name.clone();
                     self.user_avatar = avatar;
@@ -3242,6 +3248,32 @@ impl ZaloGuiApp {
                         }
                     });
                 });
+            // Nút quay lại khi đang thêm tài khoản mới mà đổi ý (#103).
+            if let Some(prev_uin) = self.pending_add_account_uin.clone() {
+                ui.add_space(12.0);
+                let back = egui::Button::new(
+                    RichText::new("← Hủy, quay lại tài khoản trước")
+                        .size(13.0)
+                        .color(pal.primary),
+                )
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0_f32, pal.primary.linear_multiply(0.5)))
+                .rounding(Rounding::same(8.0))
+                .min_size(Vec2::new(280.0, 34.0));
+                if ui
+                    .add(back)
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.pending_add_account_uin = None;
+                    self.status_msg = "Đã hủy thêm tài khoản".into();
+                    if let Some(tx) = WORKER_TX.get() {
+                        let _ = tx.send(WorkerCmd::SwitchAccount {
+                            target_uin: prev_uin,
+                        });
+                    }
+                }
+            }
         });
     }
 

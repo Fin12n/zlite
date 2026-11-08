@@ -3493,6 +3493,10 @@ impl ZaloGuiApp {
         if add_new_account {
             self.settings_modal_open = false;
             let _ = crate::account_manager::save_current_account_snapshot(&self.user_uin);
+            // Giữ uin cũ để nút Hủy quay lại được; KHÔNG gửi Logout (xóa file) (#103).
+            if !self.user_uin.is_empty() {
+                self.pending_add_account_uin = Some(self.user_uin.clone());
+            }
             self.is_logged_in = false;
             self.user_name.clear();
             self.user_uin.clear();
@@ -3503,7 +3507,6 @@ impl ZaloGuiApp {
             self.qr_status = "Đang xin mã QR mới…".into();
             self.status_msg = "Đang xin mã QR đăng nhập tài khoản mới…".into();
             if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::Logout);
                 let _ = tx.send(WorkerCmd::RequestQr);
             }
         }

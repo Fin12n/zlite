@@ -979,7 +979,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                             let _ = std::fs::remove_file("session.json");
                             let _ = std::fs::remove_file("threads_cache.json");
-                            let _ = std::fs::remove_file("zalo_history.db");
+                            // KHÔNG xóa zalo_history.db ở đây (#21, #103): history đã
+                            // snapshot ở trên; muốn xóa dùng WipeLocalData.
                             {
                                 let mut s = session.lock().await;
                                 s.logout();

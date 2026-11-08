@@ -1181,13 +1181,176 @@ fn strip_markdown_syntax_for_width(s: &str) -> String {
         .replace("~~", "")
         .replace('`', "")
 }
+/// Pure markdown helpers (không cần egui::Ui → test được bằng cargo test).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MdBlock {
+    Code { lang: String, body: String },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Lines(Vec<String>),
+}
 
+/// Tách text thành các block: code fence / bảng / dòng thường.
+/// Bảng = header `| a | b |` + dòng separator `| --- | --- |` + ≥1 dòng `|...|`.
+/// Bảng hỏng cú pháp (separator sai, số cột lệch) → trả về Lines để vẽ plaintext.
+fn split_md_blocks(raw: &str) -> Vec<MdBlock> {
+    let mut out: Vec<MdBlock> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut in_code = false;
+    let mut code_lang = String::new();
+    let mut code_body: Vec<String> = Vec::new();
+    let flush = |pending: &mut Vec<String>, out: &mut Vec<MdBlock>| {
+        if !pending.is_empty() {
+            out.push(MdBlock::Lines(std::mem::take(pending)));
+        }
+    };
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let t = line.trim_end();
+        if in_code {
+            if t.trim_start().starts_with("```") {
+                in_code = false;
+                out.push(MdBlock::Code { lang: std::mem::take(&mut code_lang), body: code_body.join("\n") });
+                code_body.clear();
+            } else {
+                code_body.push(line.to_string());
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(lang) = t.trim_start().strip_prefix("```") {
+            flush(&mut pending, &mut out);
+            in_code = true;
+            code_lang = lang.trim().to_string();
+            i += 1;
+            continue;
+        }
+        if is_table_header(t) && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim_end()) {
+            let headers = split_table_row(t);
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut j = i + 2;
+            let mut ok = false;
+            while j < lines.len() {
+                let rl = lines[j].trim_end();
+                if !rl.trim_start().starts_with('|') || !rl.trim_end().ends_with('|') {
+                    break;
+                }
+                let cells = split_table_row(rl);
+                if cells.len() != headers.len() {
+                    break;
+                }
+                rows.push(cells);
+                ok = true;
+                j += 1;
+            }
+            if ok {
+                flush(&mut pending, &mut out);
+                out.push(MdBlock::Table { headers, rows });
+                i = j;
+                continue;
+            }
+        }
+        pending.push(line.to_string());
+        i += 1;
+    }
+    if in_code {
+        // Fence không đóng → vẽ nguyên văn như code (vẫn đẹp hơn rớt mất nội dung).
+        let mut all = vec![format!("```{}", code_lang)];
+        all.extend(code_body);
+        pending.extend(all);
+        flush(&mut pending, &mut out);
+    } else {
+        flush(&mut pending, &mut out);
+    }
+    out
+}
+
+fn is_table_header(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.contains('|') && split_table_row(line).len() >= 2
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    if !t.starts_with('|') || !t.ends_with('|') {
+        return false;
+    }
+    let cells: Vec<&str> = t.trim_matches('|').split('|').map(str::trim).collect();
+    if cells.len() < 2 {
+        return false;
+    }
+    cells.iter().all(|c| {
+        let c = c.trim_matches(':');
+        !c.is_empty() && c.len() >= 3 && c.chars().all(|ch| ch == '-')
+    })
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    line.trim().trim_matches('|').split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Detect list số `1. ` (1-3 số, dấu chấm + space). Trả về (số, indent, nội dung).
+fn parse_ordered_item(line: &str) -> Option<(String, usize, String)> {
+    let indent = line.bytes().take_while(|&b| b == b' ').count().min(12);
+    let t = line.trim_start();
+    let dot = t.find(". ")?;
+    let (num, _) = t.split_at(dot);
+    if !num.is_empty() && num.len() <= 3 && num.chars().all(|c| c.is_ascii_digit()) {
+        Some((num.to_string(), indent, t[dot + 2..].to_string()))
+    } else {
+        None
+    }
+}
+
+/// LỰA CHỌN `*đậm*` kiểu Zalo: `*x*` → ĐẬM khi `zalo_bold` bật; `**x**` luôn đậm;
+/// `_x_` luôn nghiêng. Trả về true khi đã tiêu thụ `*...*` tại đầu `rest`.
+/// Không phá URL/mention: caller chỉ gọi khi đã loại trừ link/mention, và yêu cầu
+/// nội dung trong `*...*` không chứa whitespace biên + không phải `**`.
+fn consume_zalo_bold(job: &mut egui::text::LayoutJob, rest: &str, base_size: f32, base_color: Color32, pal: &ThemePalette) -> Option<usize> {
+    if !rest.starts_with('*') || rest.starts_with("**") {
+        return None;
+    }
+    let after = &rest[1..];
+    let end = after.find('*')?;
+    if end == 0 || end > 120 {
+        return None;
+    }
+    let inner = &after[..end];
+    if inner.starts_with(char::is_whitespace) || inner.ends_with(char::is_whitespace) || inner.contains('\n') || inner.contains("http") || inner.contains('@') {
+        return None;
+    }
+    job.append(
+        inner,
+        0.0,
+        egui::TextFormat {
+            font_id: FontId::proportional(base_size + 0.4),
+            color: if pal.is_dark { Color32::WHITE } else { pal.text_primary },
+            ..Default::default()
+        },
+    );
+    let _ = base_color;
+    Some(1 + end + 1)
+}
+
+#[allow(dead_code)]
 fn render_markdown_inline_rich(
     ui: &mut egui::Ui,
     text: &str,
     base_size: f32,
     base_color: Color32,
     pal: &ThemePalette,
+) {
+    render_markdown_inline_rich_opts(ui, text, base_size, base_color, pal, true)
+}
+
+fn render_markdown_inline_rich_opts(
+    ui: &mut egui::Ui,
+    text: &str,
+    base_size: f32,
+    base_color: Color32,
+    pal: &ThemePalette,
+    zalo_bold: bool,
 ) {
     let mut job = egui::text::LayoutJob::default();
     let mut first_link: Option<String> = None;
@@ -1452,8 +1615,37 @@ fn render_markdown_inline_rich(
             }
         }
         if rest.starts_with('*') && !rest.starts_with("**") {
+            // Zalo: `*đậm*` (1 sao = đậm) khi bật toggle; `_x_` vẫn là nghiêng chuẩn.
+            // URL/mention đã được xử lý ở nhánh link/mention phía trên nên tới đây
+            // `*` ở đầu token là an toàn để thử parse đậm.
+            if zalo_bold {
+                if let Some(consumed) = consume_zalo_bold(&mut job, rest, base_size, base_color, pal) {
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+            // Fallback: nghiêng kiểu markdown chuẩn; kỳ vọng `_x_` được xử lý ở dưới.
             let after = &rest[1..];
             if let Some(end_i) = after.find('*') {
+                if end_i > 0 && !zalo_bold {
+                    job.append(
+                        &after[..end_i],
+                        0.0,
+                        egui::TextFormat {
+                            font_id: FontId::proportional(base_size),
+                            color: base_color,
+                            italics: true,
+                            ..Default::default()
+                        },
+                    );
+                    rest = &after[end_i + 1..];
+                    continue;
+                }
+            }
+        }
+        if rest.starts_with('_') && !rest.starts_with("__") {
+            let after = &rest[1..];
+            if let Some(end_i) = after.find('_') {
                 if end_i > 0 {
                     job.append(
                         &after[..end_i],
@@ -1521,88 +1713,109 @@ fn render_markdown_inline_rich(
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn render_chat_markdown_block(
     ui: &mut egui::Ui,
     raw: &str,
     text_col: Color32,
     pal: &ThemePalette,
 ) {
-    let mut in_code_block = false;
-    let mut code_lines: Vec<&str> = Vec::new();
+    render_chat_markdown_block_opts(ui, raw, text_col, pal, true, true)
+}
 
-    for line in raw.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.trim_start().starts_with("```") {
-            if in_code_block {
-                let code_text = code_lines.join("\n");
-                code_lines.clear();
-                in_code_block = false;
-                egui::Frame::none()
-                    .fill(pal.bg_input)
-                    .stroke(Stroke::new(1.0_f32, pal.border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(10.0, 7.0))
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(code_text)
-                                    .font(FontId::monospace(12.6))
-                                    .color(pal.primary_hover),
-                            )
-                            .wrap(),
-                        );
-                    });
-            } else {
-                in_code_block = true;
+/// Bản có toggle: `enabled=false` → plaintext nguyên văn (không parse gì);
+/// `zalo_bold` điều khiển `*đậm*` kiểu Zalo (xem consume_zalo_bold).
+pub(super) fn render_chat_markdown_block_opts(
+    ui: &mut egui::Ui,
+    raw: &str,
+    text_col: Color32,
+    pal: &ThemePalette,
+    enabled: bool,
+    zalo_bold: bool,
+) {
+    if !enabled {
+        ui.add(egui::Label::new(RichText::new(raw).size(14.0).color(text_col)).wrap());
+        return;
+    }
+    for block in split_md_blocks(raw) {
+        match block {
+            MdBlock::Code { lang, body } => render_code_block(ui, &lang, &body, pal),
+            MdBlock::Table { headers, rows } => render_md_table(ui, &headers, &rows, text_col, pal, zalo_bold),
+            MdBlock::Lines(lines) => {
+                for line in &lines {
+                    let trimmed = line.trim_end();
+                    let t_start = trimmed.trim_start();
+                    if let Some(h3) = t_start.strip_prefix("### ") {
+                        render_markdown_inline_rich_opts(ui, h3, 15.0, text_col, pal, zalo_bold);
+                    } else if let Some(h2) = t_start.strip_prefix("## ") {
+                        render_markdown_inline_rich_opts(ui, h2, 16.0, text_col, pal, zalo_bold);
+                    } else if let Some(h1) = t_start.strip_prefix("# ") {
+                        render_markdown_inline_rich_opts(ui, h1, 17.0, text_col, pal, zalo_bold);
+                    } else if let Some(quote) = t_start.strip_prefix("> ") {
+                        ui.horizontal(|ui| {
+                            let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
+                            ui.painter().rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
+                            render_markdown_inline_rich_opts(ui, quote, 13.8, text_col.linear_multiply(0.88), pal, zalo_bold);
+                        });
+                    } else if let Some((num, indent, body)) = parse_ordered_item(trimmed) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent as f32 * 4.0);
+                            ui.label(RichText::new(format!("{num}.")).size(14.0).color(text_col));
+                            render_markdown_inline_rich_opts(ui, &body, 14.0, text_col, pal, zalo_bold);
+                        });
+                    } else if let Some(bullet) = t_start.strip_prefix("- ").or_else(|| t_start.strip_prefix("* ")) {
+                        let bullet_line = format!("• {bullet}");
+                        render_markdown_inline_rich_opts(ui, &bullet_line, 14.0, text_col, pal, zalo_bold);
+                    } else {
+                        render_markdown_inline_rich_opts(ui, trimmed, 14.0, text_col, pal, zalo_bold);
+                    }
+                }
             }
-            continue;
         }
-        if in_code_block {
-            code_lines.push(line);
-            continue;
-        }
-        let t_start = trimmed.trim_start();
-        if let Some(h3) = t_start.strip_prefix("### ") {
-            render_markdown_inline_rich(ui, h3, 15.0, text_col, pal);
-        } else if let Some(h2) = t_start.strip_prefix("## ") {
-            render_markdown_inline_rich(ui, h2, 16.0, text_col, pal);
-        } else if let Some(h1) = t_start.strip_prefix("# ") {
-            render_markdown_inline_rich(ui, h1, 17.0, text_col, pal);
-        } else if let Some(quote) = t_start.strip_prefix("> ") {
+    }
+}
+
+fn render_code_block(ui: &mut egui::Ui, lang: &str, body: &str, pal: &ThemePalette) {
+    let title = if lang.is_empty() { "code".to_string() } else { lang.to_string() };
+    egui::Frame::none()
+        .fill(pal.bg_input)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .rounding(Rounding::same(6.0))
+        .inner_margin(Margin::symmetric(10.0, 7.0))
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (bar_r, _) = ui.allocate_exact_size(Vec2::new(3.0, 16.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(bar_r, Rounding::same(1.5), pal.primary_hover);
-                render_markdown_inline_rich(ui, quote, 13.8, text_col.linear_multiply(0.88), pal);
+                ui.label(RichText::new(title).size(11.5).color(pal.text_muted).monospace());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("📋 Copy").on_hover_text("Sao chép code").clicked() {
+                        ui.ctx().copy_text(body.to_string());
+                    }
+                });
             });
-        } else if let Some(bullet) = t_start
-            .strip_prefix("- ")
-            .or_else(|| t_start.strip_prefix("* "))
-        {
-            let bullet_line = format!("• {bullet}");
-            render_markdown_inline_rich(ui, &bullet_line, 14.0, text_col, pal);
-        } else {
-            render_markdown_inline_rich(ui, trimmed, 14.0, text_col, pal);
-        }
-    }
-    if !code_lines.is_empty() {
-        let code_text = code_lines.join("\n");
-        egui::Frame::none()
-            .fill(pal.bg_input)
-            .stroke(Stroke::new(1.0_f32, pal.border))
-            .rounding(Rounding::same(6.0))
-            .inner_margin(Margin::symmetric(10.0, 7.0))
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(code_text)
-                            .font(FontId::monospace(12.6))
-                            .color(pal.primary_hover),
-                    )
-                    .wrap(),
-                );
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(RichText::new(body).font(FontId::monospace(12.6)).color(pal.primary_hover)).wrap());
+        });
+}
+
+fn render_md_table(ui: &mut egui::Ui, headers: &[String], rows: &[Vec<String>], text_col: Color32, pal: &ThemePalette, zalo_bold: bool) {
+    egui::Frame::none()
+        .fill(pal.bg_input)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .rounding(Rounding::same(6.0))
+        .inner_margin(Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            egui::Grid::new(format!("md_table_{}", headers.len())).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+                for h in headers {
+                    ui.label(RichText::new(h).size(13.5).color(text_col).strong());
+                }
+                ui.end_row();
+                for row in rows {
+                    for cell in row {
+                        render_markdown_inline_rich_opts(ui, cell, 13.5, text_col, pal, zalo_bold);
+                    }
+                    ui.end_row();
+                }
             });
-    }
+        });
 }
 
 pub(super) fn same_message_cluster(a: &ChatMessage, b: &ChatMessage) -> bool {
@@ -1623,6 +1836,19 @@ pub(super) fn same_message_cluster(a: &ChatMessage, b: &ChatMessage) -> bool {
     true
 }
 
+/// Cách render markdown của một bubble (truyền từ settings → ít đổi callsite nhất).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MdOptions {
+    pub enabled: bool,
+    pub zalo_bold: bool,
+}
+
+impl Default for MdOptions {
+    fn default() -> Self {
+        Self { enabled: true, zalo_bold: true }
+    }
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -1635,6 +1861,7 @@ pub(super) fn render_message_body(
     preview: Option<&str>,
     preview_loading: bool,
     preview_error: Option<&str>,
+    md: MdOptions,
 ) -> Option<BubbleAction> {
     let mut body_action = None;
     let (text_col, meta_col) = if outgoing {
@@ -1866,7 +2093,7 @@ pub(super) fn render_message_body(
             }
             if let Some(cap) = extract_photo_user_caption(msg) {
                 ui.add_space(5.0);
-                render_chat_markdown_block(ui, cap, text_col, pal);
+                render_chat_markdown_block_opts(ui, cap, text_col, pal, md.enabled, md.zalo_bold);
             }
             return body_action;
         }
@@ -1901,7 +2128,7 @@ pub(super) fn render_message_body(
         } else {
             &msg.text
         };
-        render_chat_markdown_block(ui, display_text, text_col, pal);
+        render_chat_markdown_block_opts(ui, display_text, text_col, pal, md.enabled, md.zalo_bold);
         return None;
     };
 
@@ -1934,7 +2161,7 @@ pub(super) fn render_message_body(
 
     // 1. Optional user comment above the link
     if !caption.is_empty() && caption != url {
-        render_chat_markdown_block(ui, &caption, text_col, pal);
+        render_chat_markdown_block_opts(ui, &caption, text_col, pal, md.enabled, md.zalo_bold);
         ui.add_space(4.0);
     }
 
@@ -2798,6 +3025,7 @@ pub(super) fn render_chat_bubble(
     preview: Option<&str>,
     preview_loading: bool,
     preview_error: Option<&str>,
+    md: MdOptions,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -3086,6 +3314,7 @@ pub(super) fn render_chat_bubble(
                                     preview,
                                     preview_loading,
                                     preview_error,
+                                    md,
                                 );
                             }
                             render_translation(ui, msg, pal);
@@ -3261,6 +3490,7 @@ pub(super) fn render_chat_bubble(
                                     preview,
                                     preview_loading,
                                     preview_error,
+                                    md,
                                 );
                             }
                             render_translation(ui, msg, pal);
@@ -4195,6 +4425,7 @@ mod quote_navigation_tests {
                                 None,
                                 false,
                                 None,
+                                MdOptions::default(),
                             );
                         });
                     },
@@ -4747,5 +4978,69 @@ mod attachment_card_tests {
             attachment_kind_label(AttachmentKind::PowerPoint).1,
             "Bài thuyết trình"
         );
+    }
+}
+
+#[cfg(test)]
+mod md_block_tests {
+    use super::*;
+
+    #[test]
+    fn splits_code_fence_with_lang() {
+        let blocks = split_md_blocks("hello\n```rust\nlet x = 1;\nlet y = 2;\n```\nbye");
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], MdBlock::Lines(l) if l == &vec!["hello".to_string()]));
+        match &blocks[1] {
+            MdBlock::Code { lang, body } => {
+                assert_eq!(lang, "rust");
+                assert!(body.contains("let x = 1;") && body.contains("let y = 2;"));
+            }
+            other => panic!("expected code, got {other:?}"),
+        }
+        assert!(matches!(&blocks[2], MdBlock::Lines(l) if l == &vec!["bye".to_string()]));
+    }
+
+    #[test]
+    fn unterminated_fence_keeps_content_as_text() {
+        let blocks = split_md_blocks("```py\nprint(1)");
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MdBlock::Lines(l) => assert!(l.iter().any(|s| s.contains("print(1)"))),
+            other => panic!("expected lines fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_table_and_rejects_col_mismatch() {
+        let good = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
+        match &split_md_blocks(good)[..] {
+            [MdBlock::Table { headers, rows }] => {
+                assert_eq!(headers, &vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec!["1".to_string(), "2".to_string()]);
+            }
+            other => panic!("expected table, got {other:?}"),
+        }
+        let bad_sep = "| a | b |\n| xxx | yyy |\n| 1 | 2 |";
+        assert!(matches!(&split_md_blocks(bad_sep)[..], [MdBlock::Lines(_)]));
+        let mismatch = "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 |";
+        let blocks = split_md_blocks(mismatch);
+        assert!(matches!(&blocks[0], MdBlock::Table { rows, .. } if rows.len() == 1));
+        assert!(matches!(&blocks[1], MdBlock::Lines(_)));
+    }
+
+    #[test]
+    fn parses_ordered_list_items() {
+        assert_eq!(
+            parse_ordered_item("1. mua sữa"),
+            Some(("1".to_string(), 0, "mua sữa".to_string()))
+        );
+        assert_eq!(
+            parse_ordered_item("  12. indent"),
+            Some(("12".to_string(), 2, "indent".to_string()))
+        );
+        assert_eq!(parse_ordered_item("- bullet"), None);
+        assert_eq!(parse_ordered_item("1.missing space"), None);
+        assert_eq!(parse_ordered_item("1234. too long"), None);
     }
 }

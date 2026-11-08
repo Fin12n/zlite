@@ -2989,6 +2989,24 @@ impl ZaloGuiApp {
                                                 .inner_margin(Margin::symmetric(14.0, 10.0))
                                                 .show(ui, |ui| {
                                                     ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Bật định dạng Markdown (code, bảng, danh sách)").color(pal.text_primary).size(13.2));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if render_toggle_switch(ui, &mut self.settings.render_markdown, pal).changed() {
+                                                                self.settings.save();
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(8.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Kiểu Zalo: *một sao* = đậm").color(pal.text_primary).size(13.2));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if render_toggle_switch(ui, &mut self.settings.zalo_single_star_bold, pal).changed() {
+                                                                self.settings.save();
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(8.0);
+                                                    ui.horizontal(|ui| {
                                                         ui.label(RichText::new("Bấm đúp vào vùng cạnh tin nhắn để trả lời").color(pal.text_primary).size(13.2));
                                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                                             render_toggle_switch(ui, &mut self.settings.double_click_to_reply, pal);

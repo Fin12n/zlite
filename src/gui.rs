@@ -21,7 +21,7 @@ use crate::logger::{self, FindingLevel, LogEntry, ScanFinding};
 use crate::qr::QrLogin;
 use crate::session::Session;
 
-mod messages;
+pub(crate) mod messages;
 mod modals;
 mod reactions_dialog;
 mod stickers;
@@ -443,6 +443,10 @@ enum SettingsTab {
     Utilities,
     Update,
 }
+fn settings_default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AppSettings {
@@ -482,6 +486,10 @@ struct AppSettings {
     hidden_chat_pin_enabled: bool,
     split_priority_inbox: bool,
     excel_paste_mode: String, // "image" | "text" | "ask"
+    #[serde(default = "settings_default_true")]
+    render_markdown: bool,
+    #[serde(default = "settings_default_true")]
+    zalo_single_star_bold: bool,
     double_click_to_reply: bool,
     show_typing_indicator: bool,
     send_message_key: String, // "enter" | "cmd_enter"
@@ -549,6 +557,8 @@ impl Default for AppSettings {
             hidden_chat_pin_enabled: true,
             split_priority_inbox: false,
             excel_paste_mode: "ask".into(),
+            render_markdown: true,
+            zalo_single_star_bold: true,
             double_click_to_reply: true,
             show_typing_indicator: true,
             send_message_key: "enter".into(),

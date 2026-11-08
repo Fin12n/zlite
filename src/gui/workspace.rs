@@ -4834,6 +4834,10 @@ impl ZaloGuiApp {
                                                         self.doc_previews.get(&msg.id).map(|s| s.as_str()),
                                                         self.doc_preview_loading.contains(&msg.id),
                                                         self.doc_preview_errors.get(&msg.id).map(|s| s.as_str()),
+                                                        crate::gui::messages::MdOptions {
+                                                            enabled: self.settings.render_markdown,
+                                                            zalo_bold: self.settings.zalo_single_star_bold,
+                                                        },
                                                     ) {
                                                         pending_action = Some((idx, action));
                                                     }

@@ -419,6 +419,147 @@ impl ChatMessage {
     }
 }
 
+/// Tin nhắn tự xoá (disappearing messages) — client-side local-only.
+//
+// Tham chiếu hành vi Zalo PC (`MSG_VANISH`, TTL picker, `expireOn` cột TTLItem):
+// - Chế độ theo hội thoại: bật/tắt + 1 thời gian chung cho mọi tin trong thread.
+// - Durations theo config server `chat_privacy_ttl_durations` của Zalo PC:
+//   `[36e5, 864e5, 7*864e5, 14*864e5]` = 1 giờ / 1 ngày / 7 ngày / 14 ngày.
+// - Zalo thật: server giữ `ttl`/`expireOn` nên phía bên kia vẫn thấy tin hết hạn
+//   (khi server xoá). ctdozlite KHÔNG tìm thấy endpoint/cmd nào để gửi TTL lên
+//   server trong bundle PC nên chỉ tự ẩn phía mình, phía bên kia vẫn thấy tin.
+//
+// Thời điểm bắt đầu (`started_at_sec`, epoch giây) là lúc bật chế độ; mọi tin có
+// `ts` (ms, chuẩn hoá về ms) >= `started_at_sec * 1000` đều chịu chế độ tự xoá và
+// hết hạn sau `duration_sec`. Tin cũ hơn lúc bật không bị ảnh hưởng.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct VanishSetting {
+    /// Thời gian tự xoá chung của thread, tính bằng giây. `0` = tắt.
+    pub duration_sec: i64,
+    /// Epoch giây lúc bật chế độ (mốc tính tin nào chịu tự xoá).
+    pub started_at_sec: i64,
+}
+
+/// Các mốc thời gian Zalo cho phép, theo `chat_privacy_ttl_durations` trong bundle PC.
+pub const VANISH_DURATIONS: [(i64, &str); 4] = [
+    (3600, "1 giờ"),
+    (86_400, "1 ngày"),
+    (604_800, "7 ngày"),
+    (1_209_600, "14 ngày"),
+];
+
+/// Text thay thế khi tin hết hạn — khớp `STR_VANISH_MSG` của Zalo PC.
+pub const VANISH_EXPIRED_TEXT: &str = "[Tin nhắn đã biến mất]";
+
+impl VanishSetting {
+    pub fn enabled(&self) -> bool {
+        self.duration_sec > 0
+    }
+
+    /// Tin có timestamp `msg_ts_ms` (đã chuẩn hoá ms) có chịu chế độ tự xoá không.
+    pub fn covers(&self, msg_ts_ms: i64) -> bool {
+        self.enabled() && msg_ts_ms >= self.started_at_sec.saturating_mul(1000)
+    }
+
+    /// Epoch ms lúc tin `msg_ts_ms` hết hạn. `None` khi tắt hoặc tin ngoài chế độ.
+    pub fn expire_at_ms(&self, msg_ts_ms: i64) -> Option<i64> {
+        if !self.covers(msg_ts_ms) {
+            return None;
+        }
+        Some(msg_ts_ms.saturating_add(self.duration_sec.saturating_mul(1000)))
+    }
+
+    /// Số ms còn lại tới khi tin hết hạn tại `now_ms`. `None` khi đã hết hạn / ngoài chế độ.
+    pub fn remaining_ms(&self, msg_ts_ms: i64, now_ms: i64) -> Option<i64> {
+        self.expire_at_ms(msg_ts_ms)
+            .map(|exp| exp.saturating_sub(now_ms))
+            .filter(|&r| r > 0)
+    }
+
+    /// Tin đã hết hạn tại `now_ms` chưa.
+    pub fn is_expired(&self, msg_ts_ms: i64, now_ms: i64) -> bool {
+        match self.expire_at_ms(msg_ts_ms) {
+            Some(exp) => now_ms >= exp,
+            None => false,
+        }
+    }
+}
+
+/// Đọc cấu hình vanish của thread. `None` = tắt.
+pub fn vanish_of(thread: &Thread) -> Option<&VanishSetting> {
+    thread.vanish.as_ref().filter(|v| v.enabled())
+}
+
+/// Đặt chế độ tự xoá cho thread. `duration_sec <= 0` = tắt.
+/// Trả về `true` khi cấu hình thực sự đổi.
+pub fn set_thread_vanish(thread: &mut Thread, duration_sec: i64, now_sec: i64) -> bool {
+    if duration_sec <= 0 {
+        let changed = thread.vanish.as_ref().is_some_and(|v| v.enabled());
+        thread.vanish = None;
+        return changed;
+    }
+    let changed = thread
+        .vanish
+        .as_ref()
+        .map(|v| (v.duration_sec, v.started_at_sec))
+        != Some((duration_sec, now_sec));
+    thread.vanish = Some(VanishSetting {
+        duration_sec,
+        started_at_sec: now_sec,
+    });
+    changed
+}
+
+/// Tin có đang hiển thị dưới dạng đã biến mất không.
+pub fn is_vanished_message(msg: &ChatMessage) -> bool {
+    msg.text.trim() == VANISH_EXPIRED_TEXT
+}
+
+/// Lật tin sang trạng thái đã biến mất: text thành `[Tin nhắn đã biến mất]`,
+/// vô hiệu media/link (xoá thumb/url/desc/sticker) để không mở lại được.
+/// Giữ `id`/`ts`/`sender` để merge/dedup/history không vỡ.
+pub fn apply_vanish_expiry(msg: &mut ChatMessage) -> bool {
+    if is_vanished_message(msg) {
+        return false;
+    }
+    msg.text = VANISH_EXPIRED_TEXT.to_string();
+    msg.link_url = None;
+    msg.link_title = None;
+    msg.link_desc = None;
+    msg.link_thumb = None;
+    msg.link_src = None;
+    msg.sticker_id = None;
+    msg.sticker_cate_id = None;
+    msg.sticker_type = None;
+    true
+}
+
+/// Quét 1 thread, lật mọi tin đã hết hạn tại `now_ms`.
+/// Trả về id các tin vừa lật (để persist + báo GUI).
+pub fn sweep_thread_vanish(thread: &mut Thread, now_ms: i64) -> Vec<String> {
+    let Some(v) = vanish_of(thread) else {
+        return Vec::new();
+    };
+    let duration_ms = v.duration_sec.saturating_mul(1000);
+    let start_ms = v.started_at_sec.saturating_mul(1000);
+    let mut expired = Vec::new();
+    for m in thread.messages.iter_mut() {
+        if is_vanished_message(m) {
+            continue;
+        }
+        let ts = crate::clock::normalize_ts_ms(m.ts);
+        if ts < start_ms {
+            continue;
+        }
+        if now_ms.saturating_sub(ts) >= duration_ms {
+            apply_vanish_expiry(m);
+            expired.push(m.id.clone());
+        }
+    }
+    expired
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Thread {
     #[serde(default)]
@@ -432,6 +573,9 @@ pub struct Thread {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub unread: crate::unread::UnreadState,
+    /// Chế độ tin nhắn tự xoá của thread (`None` = tắt). Persist SQLite + cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vanish: Option<VanishSetting>,
 }
 
 /// Durable sidebar metadata, including metadata-only startup snapshots.

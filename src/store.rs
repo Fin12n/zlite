@@ -27,6 +27,10 @@ pub struct StoredThread {
     pub name: String,
     pub is_group: bool,
     pub last_ts: i64,
+    #[serde(default)]
+    pub vanish_duration_sec: i64,
+    #[serde(default)]
+    pub vanish_started_at_sec: i64,
 }
 
 pub struct MessageStore {
@@ -74,9 +78,18 @@ impl MessageStore {
                 thread_id TEXT PRIMARY KEY,
                 name TEXT,
                 is_group INTEGER,
-                last_ts INTEGER
+                last_ts INTEGER,
+                vanish_duration_sec INTEGER NOT NULL DEFAULT 0,
+                vanish_started_at_sec INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS thread_vanish (
+                thread_id TEXT PRIMARY KEY,
+                duration_sec INTEGER NOT NULL,
+                started_at_sec INTEGER NOT NULL
             );",
         )?;
+        // Migration 2: vanish columns / side table on DBs created before vanish slice.
+        Self::ensure_vanish_schema(&conn)?;
         // Migration 1: one-time cleanup of placeholder rows. This DELETE used to run (a full
         // table scan) on every hydrate; new rows are filtered in `persist_threads` instead.
         if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
@@ -90,6 +103,39 @@ impl MessageStore {
 
         Ok(Self { conn })
     }
+
+    /// Thêm cột vanish / bảng `thread_vanish` cho DB cũ (pre-vanish slice).
+    /// Chạy an toàn nhiều lần: dò `PRAGMA table_info` rồi mới `ALTER TABLE`.
+    fn ensure_vanish_schema(conn: &Connection) -> Result<()> {
+    let mut cols: Vec<String> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(threads)") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) {
+            for c in rows.flatten() {
+                cols.push(c);
+            }
+        }
+    }
+    if !cols.iter().any(|c| c == "vanish_duration_sec") {
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN vanish_duration_sec INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+    }
+    if !cols.iter().any(|c| c == "vanish_started_at_sec") {
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN vanish_started_at_sec INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS thread_vanish (
+            thread_id TEXT PRIMARY KEY,
+            duration_sec INTEGER NOT NULL,
+            started_at_sec INTEGER NOT NULL
+        );",
+    )?;
+    Ok(())
+}
 
     /// Insert a message. Returns `true` if a new row was inserted, `false` if already existed.
     pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
@@ -185,11 +231,11 @@ impl MessageStore {
         Ok(out)
     }
 
-    /// Insert or update thread metadata.
+    /// Insert or update thread metadata (kèm vanish; vanish mới ghi đè vanish cũ).
     pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO threads (thread_id, name, is_group, last_ts)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = CASE
                      WHEN excluded.name IS NOT NULL AND excluded.name != ''
@@ -200,15 +246,59 @@ impl MessageStore {
                      ELSE COALESCE(NULLIF(threads.name, ''), excluded.name)
                  END,
                  is_group = excluded.is_group,
-                 last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts)",
+                 last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
+                 vanish_duration_sec = excluded.vanish_duration_sec,
+                 vanish_started_at_sec = excluded.vanish_started_at_sec",
             params![
                 t.thread_id,
                 t.name,
                 if t.is_group { 1 } else { 0 },
                 t.last_ts,
+                t.vanish_duration_sec,
+                t.vanish_started_at_sec,
             ],
         )?;
+        self.upsert_thread_vanish(&t.thread_id, t.vanish_duration_sec, t.vanish_started_at_sec)?;
         Ok(())
+    }
+
+    /// Lưu cấu hình vanish 1 thread vào bảng phụ `thread_vanish` (persist + load restart).
+    pub fn upsert_thread_vanish(
+        &mut self,
+        thread_id: &str,
+        duration_sec: i64,
+        started_at_sec: i64,
+    ) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
+        if duration_sec > 0 {
+            self.conn.execute(
+                "INSERT INTO thread_vanish (thread_id, duration_sec, started_at_sec)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(thread_id) DO UPDATE SET duration_sec = excluded.duration_sec,
+                     started_at_sec = excluded.started_at_sec",
+                params![thread_id, duration_sec, started_at_sec],
+            )?;
+        } else {
+            let _ = self.conn.execute(
+                "DELETE FROM thread_vanish WHERE thread_id = ?1",
+                params![thread_id],
+            );
+        }
+        Ok(())
+    }
+
+    /// Đọc cấu hình vanish 1 thread. `None` = tắt.
+    pub fn load_thread_vanish(&self, thread_id: &str) -> Option<(i64, i64)> {
+        self.conn
+            .query_row(
+                "SELECT duration_sec, started_at_sec FROM thread_vanish WHERE thread_id = ?1",
+                params![thread_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .ok()
+            .filter(|(d, _)| *d > 0)
     }
 
     /// Id of the oldest stored server message in a thread, where a history sync resumes from.
@@ -264,11 +354,31 @@ impl MessageStore {
 
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
     pub fn all_threads(&self) -> Result<Vec<StoredThread>> {
-        let mut stmt = self.conn.prepare(
+        // Cột vanish chỉ có sau migration 2; SELECT liệt kê tường minh + fallback PRAGMA
+        // để DB cũ chưa migrate vẫn đọc được (migration chạy ở `open`, đây là lưới an toàn).
+        let has_vcols = self
+            .conn
+            .prepare("PRAGMA table_info(threads)")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(1))
+                    .ok()
+                    .map(|rows| rows.flatten().collect::<Vec<_>>())
+            })
+            .is_some_and(|cols| {
+                cols.iter().any(|c| c == "vanish_duration_sec")
+                    && cols.iter().any(|c| c == "vanish_started_at_sec")
+            });
+        let sql = if has_vcols {
+            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec
+             FROM threads
+             ORDER BY last_ts DESC"
+        } else {
             "SELECT thread_id, name, is_group, last_ts
              FROM threads
-             ORDER BY last_ts DESC",
-        )?;
+             ORDER BY last_ts DESC"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             let is_group_num: i64 = row.get(2).unwrap_or(0);
             Ok(StoredThread {
@@ -276,6 +386,8 @@ impl MessageStore {
                 name: row.get(1).unwrap_or_default(),
                 is_group: is_group_num != 0,
                 last_ts: row.get(3).unwrap_or(0),
+                vanish_duration_sec: row.get(4).unwrap_or(0),
+                vanish_started_at_sec: row.get(5).unwrap_or(0),
             })
         })?;
         let mut out = Vec::new();
@@ -301,9 +413,10 @@ impl MessageStore {
             }
             if let Some(existing) = threads.iter_mut().find(|t| t.id == st.thread_id) {
                 if !st.name.is_empty() && !crate::chat::is_generic_thread_name(&st.name) {
-                    existing.name = st.name;
+                    existing.name = st.name.clone();
                 }
                 existing.is_group = existing.is_group || st.is_group;
+                apply_stored_vanish(existing, &st, self);
             } else if !st.is_group
                 && st.name.contains("Cloud của tôi")
                 && threads
@@ -334,14 +447,14 @@ impl MessageStore {
                     name: if st.name.is_empty() {
                         format!("Người dùng {}", st.thread_id)
                     } else {
-                        st.name
+                        st.name.clone()
                     },
                     preview: String::new(),
                     time: String::new(),
                     avatar: None,
                     is_group: st.is_group,
                     messages: Vec::new(),
-                    vanish: None,
+                    vanish: vanish_from_stored(&st, self),
                 });
             }
         }
@@ -644,6 +757,31 @@ impl From<&ChatMessage> for StoredMessage {
     }
 }
 
+
+/// Dựng `VanishSetting` từ hàng `threads` (ưu tiên), fallback bảng phụ `thread_vanish`.
+/// `None` = tắt.
+fn vanish_from_stored(st: &StoredThread, store: &MessageStore) -> Option<crate::chat::VanishSetting> {
+    if st.vanish_duration_sec > 0 {
+        return Some(crate::chat::VanishSetting {
+            duration_sec: st.vanish_duration_sec,
+            started_at_sec: st.vanish_started_at_sec,
+        });
+    }
+    store
+        .load_thread_vanish(&st.thread_id)
+        .map(|(duration_sec, started_at_sec)| crate::chat::VanishSetting {
+            duration_sec,
+            started_at_sec,
+        })
+}
+
+/// Áp cấu hình vanish đã lưu vào thread có sẵn (không đè vanish đang bật trong RAM).
+fn apply_stored_vanish(thread: &mut Thread, st: &StoredThread, store: &MessageStore) {
+    if thread.vanish.as_ref().is_some_and(|v| v.enabled()) {
+        return;
+    }
+    thread.vanish = vanish_from_stored(st, store);
+}
 /// Persist threads and their messages to SQLite store, returning the count of newly inserted messages.
 pub fn persist_threads(store: &mut MessageStore, threads: &[Thread]) -> Result<usize> {
     // One transaction for the whole snapshot: in autocommit every row was its own fsync.
@@ -664,6 +802,8 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             name: t.name.clone(),
             is_group: t.is_group,
             last_ts,
+            vanish_duration_sec: t.vanish.as_ref().map(|v| v.duration_sec).unwrap_or(0),
+            vanish_started_at_sec: t.vanish.as_ref().map(|v| v.started_at_sec).unwrap_or(0),
         };
         store.upsert_thread(&st)?;
 
@@ -1120,6 +1260,8 @@ fn import_message_table(
         name: thread_name.to_string(),
         is_group,
         last_ts,
+        vanish_duration_sec: 0,
+        vanish_started_at_sec: 0,
     })?;
 
     dst.conn.execute_batch("BEGIN")?;
@@ -1601,6 +1743,8 @@ mod tests {
                 name: "Example".into(),
                 is_group: false,
                 last_ts: 1793467800000,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
             })
             .unwrap();
         for (id, ts) in [("msg-0001", 1793467800), ("msg-0002", 1793467800000)] {
@@ -1737,6 +1881,8 @@ mod tests {
             name: "Nhóm".into(),
             is_group: true,
             last_ts,
+            vanish_duration_sec: 0,
+            vanish_started_at_sec: 0,
         };
         store.upsert_thread(&st(300)).unwrap();
         store.upsert_thread(&st(100)).unwrap();
@@ -1810,6 +1956,8 @@ mod tests {
                 name: "Nhóm Kỹ Thuật".into(),
                 is_group: true,
                 last_ts: 500,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
             })
             .unwrap();
         store
@@ -1852,6 +2000,8 @@ mod tests {
                     name: "Migrated Group".into(),
                     is_group: true,
                     last_ts: 999,
+                    vanish_duration_sec: 0,
+                    vanish_started_at_sec: 0,
                 })
                 .unwrap();
             src_store

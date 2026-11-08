@@ -9090,4 +9090,51 @@ mod send_identity_tests {
             }
         );
     }
+
+    #[test]
+    fn sweep_thread_vanish_expires_only_covered_messages() {
+        let m = |id: &str, text: &str, ts: i64| ChatMessage {
+            id: id.into(),
+            text: text.into(),
+            ts,
+            ..Default::default()
+        };
+        // Bật vanish 1 giờ; dùng epoch thật để normalize_ts_ms không nhân 1000 lần nữa.
+        let start_sec = 1_760_000_000;
+        let mut t = Thread {
+            presentation: Default::default(),
+            unread: Default::default(),
+            id: "van".into(),
+            name: "Van".into(),
+            preview: String::new(),
+            time: String::new(),
+            avatar: None,
+            is_group: false,
+            messages: Vec::new(),
+            vanish: None,
+        };
+        assert!(set_thread_vanish(&mut t, 3600, start_sec));
+        t.messages = vec![
+            m("old", "tin cũ", (start_sec - 10) * 1000),
+            m("fresh", "tin mới", (start_sec + 10) * 1000),
+            m("edge", "vừa hết hạn", (start_sec + 10) * 1000),
+        ];
+        // Chưa tới giờ: không tin nào lật.
+        let now_ms = (start_sec + 100) * 1000;
+        assert!(sweep_thread_vanish(&mut t, now_ms).is_empty());
+        assert_eq!(t.messages[1].text, "tin mới");
+        // Quá 1 giờ từ lúc gửi: 2 tin sau mốc bật lật, tin cũ giữ nguyên.
+        let now_ms = (start_sec + 10 + 3600) * 1000;
+        let expired = sweep_thread_vanish(&mut t, now_ms);
+        assert_eq!(expired, vec!["fresh".to_string(), "edge".to_string()]);
+        assert!(is_vanished_message(&t.messages[1]));
+        assert!(is_vanished_message(&t.messages[2]));
+        assert_eq!(t.messages[0].text, "tin cũ");
+        // Sweep lại: không lật trùng.
+        assert!(sweep_thread_vanish(&mut t, now_ms).is_empty());
+        // Tắt vanish: sweep không làm gì.
+        assert!(set_thread_vanish(&mut t, 0, now_ms / 1000));
+        t.messages.push(m("after", "sau khi tắt", now_ms));
+        assert!(sweep_thread_vanish(&mut t, now_ms + 10_000_000).is_empty());
+    }
 }

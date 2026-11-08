@@ -1960,6 +1960,7 @@ impl ZaloGuiApp {
                 t.avatar.clone(),
                 t.is_group,
                 t.messages.len(),
+                t.vanish.clone(),
             )
         });
 
@@ -1972,7 +1973,7 @@ impl ZaloGuiApp {
         let drawer_w = (screen_w * 0.26).clamp(240.0, 310.0);
 
         if show_info_drawer {
-            if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
+            if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count, _)) = thread_meta {
                 let shared_photos: Vec<(String, String, String, String)> = self
                     .threads
                     .get(self.selected_thread_index)
@@ -2642,7 +2643,7 @@ impl ZaloGuiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
             .show(ctx, |ui| {
-                if let Some((thread_id, thread_name, thread_avatar, is_group, _msg_count)) =
+                if let Some((thread_id, thread_name, thread_avatar, is_group, _msg_count, thread_vanish)) =
                     thread_meta
                 {
                     let is_cloud_thread = thread_name.contains("Cloud của tôi");
@@ -3099,7 +3100,124 @@ impl ZaloGuiApp {
                                             });
                                         }
                                     }
-                                    // Search Messages in Conversation Button (`Ctrl+F`)
+                                    // Vanish toggle (tin nhắn tự xoá local-only) — visual tối thiểu,
+                                    // không đụng badge/pill của slice khác.
+                                    let vanish_on =
+                                        thread_vanish.as_ref().is_some_and(|v| v.enabled());
+                                    let vanish_resp = ui.add(
+                                        egui::Button::new(
+                                            RichText::new(if vanish_on { "⏳" } else { "🕓" })
+                                                .size(16.0)
+                                                .color(if vanish_on {
+                                                    pal.primary_hover
+                                                } else {
+                                                    pal.text_secondary
+                                                }),
+                                        )
+                                        .frame(false)
+                                        .min_size(Vec2::new(34.0, 34.0)),
+                                    );
+                                    let vanish_pos =
+                                        vanish_resp.rect.left_bottom() + Vec2::new(-160.0, 6.0);
+                                    if vanish_resp
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text(if vanish_on {
+                                            "Tin nhắn tự xoá đang BẬT — bấm để tắt/đổi thời gian"
+                                        } else {
+                                            "Bật tin nhắn tự xoá (chỉ ẩn phía bạn)"
+                                        })
+                                        .clicked()
+                                    {
+                                        self.vanish_picker_open = !self.vanish_picker_open;
+                                    }
+                                    if self.vanish_picker_open {
+                                        egui::Area::new(Id::new(("vanish_picker", &thread_id)))
+                                            .order(egui::Order::Foreground)
+                                            .fixed_pos(vanish_pos)
+                                            .show(ctx, |ui| {
+                                                egui::Frame::none()
+                                                    .fill(pal.bg_elevated)
+                                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                                    .rounding(Rounding::same(8.0))
+                                                    .inner_margin(Margin::symmetric(8.0, 6.0))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_width(190.0);
+                                                        ui.label(
+                                                            RichText::new("Tin nhắn tự xoá")
+                                                                .size(12.5)
+                                                                .color(pal.text_primary)
+                                                                .strong(),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new("Chỉ ẩn phía bạn")
+                                                                .size(11.0)
+                                                                .color(pal.text_muted),
+                                                        );
+                                                        ui.add_space(4.0);
+                                                        for (dur, label) in
+                                                            crate::chat::VANISH_DURATIONS
+                                                        {
+                                                            let selected = vanish_on
+                                                                && thread_vanish.as_ref().is_some_and(
+                                                                    |v| v.duration_sec == dur,
+                                                                );
+                                                            let btn_txt = if selected {
+                                                                format!("⏳ {label}  ✓")
+                                                            } else {
+                                                                format!("      {label}")
+                                                            };
+                                                            if ui
+                                                                .add(
+                                                                    egui::Button::new(
+                                                                        RichText::new(btn_txt)
+                                                                            .size(13.0)
+                                                                            .color(pal.text_primary),
+                                                                    )
+                                                                    .frame(false)
+                                                                    .min_size(Vec2::new(180.0, 28.0)),
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                if let Some(tx) = WORKER_TX.get() {
+                                                                    let _ = tx.send(
+                                                                        WorkerCmd::SetThreadVanish {
+                                                                            thread_id:
+                                                                                thread_id.clone(),
+                                                                            duration_sec: dur,
+                                                                        },
+                                                                    );
+                                                                }
+                                                                self.vanish_picker_open = false;
+                                                            }
+                                                        }
+                                                        if vanish_on
+                                                            && ui
+                                                                .add(
+                                                                    egui::Button::new(
+                                                                        RichText::new("Tắt tự xoá")
+                                                                            .size(13.0)
+                                                                            .color(Color32::from_rgb(
+                                                                                239, 68, 68,
+                                                                            )),
+                                                                    )
+                                                                    .frame(false)
+                                                                    .min_size(Vec2::new(180.0, 28.0)),
+                                                                )
+                                                                .clicked()
+                                                        {
+                                                            if let Some(tx) = WORKER_TX.get() {
+                                                                let _ = tx.send(
+                                                                    WorkerCmd::SetThreadVanish {
+                                                                        thread_id: thread_id.clone(),
+                                                                        duration_sec: 0,
+                                                                    },
+                                                                );
+                                                            }
+                                                            self.vanish_picker_open = false;
+                                                        }
+                                                    });
+                                            });
+                                    }
                                     let (srch_rect, srch_resp) = ui.allocate_exact_size(
                                         Vec2::new(34.0, 34.0),
                                         Sense::click(),
@@ -4017,7 +4135,8 @@ impl ZaloGuiApp {
                                                     m.is_outgoing && !is_system_notice_message(m)
                                                 })
                                                 .map(|(i, _)| i);
-
+                                            let vanish_now_ms =
+                                                crate::login::unix_now().saturating_mul(1000);
                                             for (pos, &idx) in visible_indices.iter().enumerate() {
                                                 let msg = &thread.messages[idx];
                                                 let prev_msg = pos
@@ -4093,6 +4212,10 @@ impl ZaloGuiApp {
                                                         &mut self.loading_stickers,
                                                         &self.emoji_textures,
                                                         idx,
+                                                        thread.vanish.as_ref().and_then(|v| {
+                                                            let ts_ms = crate::clock::normalize_ts_ms(msg.ts);
+                                                            v.remaining_ms(ts_ms, vanish_now_ms)
+                                                        }),
                                                     ) {
                                                         pending_action = Some((idx, action));
                                                     }

@@ -1477,6 +1477,15 @@ pub(super) fn render_message_body(
     };
 
     let trimmed_text = msg.text.trim();
+    if trimmed_text == crate::chat::VANISH_EXPIRED_TEXT {
+        ui.label(
+            RichText::new(format!("{} {}", lucide::BAN, crate::chat::VANISH_EXPIRED_TEXT))
+                .color(meta_col)
+                .italics()
+                .size(13.8),
+        );
+        return None;
+    }
     if trimmed_text == "[Tin nhắn đã thu hồi]" {
         ui.label(
             RichText::new(format!("{} Tin nhắn đã được thu hồi", lucide::BAN))
@@ -1485,19 +1494,6 @@ pub(super) fn render_message_body(
                 .size(13.8),
         );
         return None;
-    }
-
-    if trimmed_text.starts_with("[Đã thu hồi]") {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("{} Đã thu hồi", lucide::BAN))
-                    .color(Color32::from_rgb(239, 68, 68))
-                    .italics()
-                    .strong()
-                    .size(12.0),
-            );
-        });
-        ui.add_space(2.0);
     }
 
     let sender_label = if msg.is_outgoing {
@@ -2457,6 +2453,30 @@ pub(super) fn extract_photo_user_caption(msg: &ChatMessage) -> Option<&str> {
         None
     }
 }
+/// Badge `⏳ còn …` cho tin trong thread bật vanish. `None` = không hiển thị.
+pub(super) fn vanish_badge_label(remain_ms: Option<i64>) -> Option<String> {
+    let ms = remain_ms?;
+    if ms <= 0 {
+        return None;
+    }
+    Some(format!("⏳ {}", format_vanish_remaining(ms)))
+}
+
+/// Format thời gian còn lại ngắn gọn: `59p`, `23g`, `6ng`.
+pub(super) fn format_vanish_remaining(remain_ms: i64) -> String {
+    if remain_ms <= 0 {
+        return "hết hạn".to_string();
+    }
+    let secs = remain_ms / 1000;
+    if secs < 3600 {
+        let m = (secs / 60).max(1);
+        format!("{m}p")
+    } else if secs < 86_400 {
+        format!("{}g", secs / 3600)
+    } else {
+        format!("{}ng", secs / 86_400)
+    }
+}
 
 pub(super) fn render_chat_bubble(
     ui: &mut egui::Ui,
@@ -2472,17 +2492,23 @@ pub(super) fn render_chat_bubble(
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     idx: usize,
+    vanish_remain: Option<i64>,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
     let max_text_width = (max_bubble_width - 24.0).max(90.0);
-    let has_sticker = is_sticker_message(msg).is_some();
-    let call_card_opt = extract_call_card_view(msg);
+    // Tin đã biến mất: vô hiệu mọi media/link card — chỉ render text hệ thống.
+    let vanished = msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
+    let has_sticker = !vanished && is_sticker_message(msg).is_some();
+    let call_card_opt = if vanished { None } else { extract_call_card_view(msg) };
     let is_call_card = call_card_opt.is_some();
-    let is_photo_card = !has_sticker && is_zalo_photo_message(msg);
-    let is_file_card = !has_sticker && is_zalo_file_or_video_message(msg);
-    let has_link_card =
-        !has_sticker && !is_photo_card && !is_file_card && extract_message_link_view(msg).is_some();
+    let is_photo_card = !vanished && !has_sticker && is_zalo_photo_message(msg);
+    let is_file_card = !vanished && !has_sticker && is_zalo_file_or_video_message(msg);
+    let has_link_card = !vanished
+        && !has_sticker
+        && !is_photo_card
+        && !is_file_card
+        && extract_message_link_view(msg).is_some();
     let has_interactive_card = is_call_card || has_link_card || is_photo_card || is_file_card;
 
     let show_timestamp = !msg.time.is_empty()
@@ -2780,6 +2806,16 @@ pub(super) fn render_chat_bubble(
                                 };
                                 ui.label(RichText::new(status_str).size(11.0).color(status_col));
                             }
+                            if !vanished {
+                                if let Some(badge) = vanish_badge_label(vanish_remain) {
+                                    if show_timestamp && !has_sticker && !is_frameless_photo {
+                                        ui.add_space(1.0);
+                                    }
+                                    ui.label(
+                                        RichText::new(badge).size(10.5).color(pal.text_muted).italics(),
+                                    );
+                                }
+                            }
                         });
                     });
                 if fr.response.double_clicked() {
@@ -2924,6 +2960,16 @@ pub(super) fn render_chat_bubble(
                                         .color(pal.bubble_in_meta)
                                         .size(11.0),
                                 );
+                            }
+                            if !vanished {
+                                if let Some(badge) = vanish_badge_label(vanish_remain) {
+                                    if show_timestamp && !has_sticker && !is_frameless_photo {
+                                        ui.add_space(1.0);
+                                    }
+                                    ui.label(
+                                        RichText::new(badge).size(10.5).color(pal.bubble_in_meta).italics(),
+                                    );
+                                }
                             }
                         });
                     });
@@ -3096,20 +3142,30 @@ pub(super) fn bubble_context_menu(
                     ui.set_min_width(menu_w);
                     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
 
+                    // Tin đã biến mất: vô hiệu mọi thao tác media/link (chỉ cho xoá).
+                    let vanished =
+                        msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
                     // 1. Trả lời (Quote)
-                    if menu_item(ui, lucide::QUOTE, "Trả lời", pal.text_primary).clicked() {
+                    if !vanished
+                        && menu_item(ui, lucide::QUOTE, "Trả lời", pal.text_primary).clicked()
+                    {
                         action = Some(BubbleAction::Reply);
                         close_menu = true;
                     }
 
                     // 2. Chia sẻ (Forward)
-                    if menu_item(ui, lucide::FORWARD, "Chia sẻ", pal.text_primary).clicked() {
+                    if !vanished
+                        && menu_item(ui, lucide::FORWARD, "Chia sẻ", pal.text_primary).clicked()
+                    {
                         action = Some(BubbleAction::Forward);
                         close_menu = true;
                     }
 
                     // 3. Copy tin nhắn
-                    if menu_item(ui, lucide::COPY, "Copy tin nhắn", pal.text_primary).clicked() {
+                    if !vanished
+                        && menu_item(ui, lucide::COPY, "Copy tin nhắn", pal.text_primary)
+                            .clicked()
+                    {
                         ui.ctx().copy_text(msg.text.clone());
                         close_menu = true;
                     }
@@ -3137,14 +3193,16 @@ pub(super) fn bubble_context_menu(
                     }
 
                     // 5b. Hẹn giờ / Nhắc hẹn cho tin nhắn này (#94)
-                    if menu_item(ui, lucide::BELL, "Hẹn giờ / Nhắc hẹn", pal.text_primary).clicked()
+                    if !vanished
+                        && menu_item(ui, lucide::BELL, "Hẹn giờ / Nhắc hẹn", pal.text_primary)
+                            .clicked()
                     {
                         action = Some(BubbleAction::ScheduleReminder);
                         close_menu = true;
                     }
 
                     // 6. Nếu là ảnh: Xem ảnh phóng to
-                    if is_zalo_photo_message(msg) {
+                    if !vanished && is_zalo_photo_message(msg) {
                         if let Some(thumb_url) = photo_primary_url(msg) {
                             if menu_item(ui, lucide::SEARCH, "Xem ảnh phóng to", pal.text_primary)
                                 .clicked()
@@ -3178,7 +3236,7 @@ pub(super) fn bubble_context_menu(
                     }
 
                     // 7. Nếu là file / video / voice: Lưu tập tin (+ Nghe thoại cho voice)
-                    if is_zalo_file_or_video_message(msg) {
+                    if !vanished && is_zalo_file_or_video_message(msg) {
                         if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
                             let resolved_name = crate::chat::resolve_attachment_file_name(
                                 msg.link_title.as_deref(),
@@ -3217,7 +3275,8 @@ pub(super) fn bubble_context_menu(
                     ui.separator();
 
                     // 8. Thu hồi tin nhắn (với mọi người)
-                    if msg.is_outgoing
+                    if !vanished
+                        && msg.is_outgoing
                         && msg.text.trim() != "[Tin nhắn đã thu hồi]"
                         && !msg.text.starts_with("[Đã thu hồi]")
                     {
@@ -3735,6 +3794,7 @@ mod quote_navigation_tests {
                                 &mut HashSet::new(),
                                 &HashMap::new(),
                                 0,
+                                None,
                             );
                         });
                     },

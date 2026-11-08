@@ -160,6 +160,17 @@ pub enum GuiEvent {
         msg_id: String,
         ts: i64,
     },
+    /// Tin nhắn tự xoá đã hết hạn (worker sweep 2s) — apply text biến mất vào GUI.
+    VanishExpired {
+        thread_id: String,
+        expired_ids: Vec<String>,
+    },
+    /// Worker đã persist vanish xong — apply `VanishSetting` vào thread RAM.
+    VanishSettingChanged {
+        thread_id: String,
+        duration_sec: i64,
+        started_at_sec: i64,
+    },
     ForwardFinished {
         target_name: String,
         error: Option<String>,
@@ -626,6 +637,8 @@ pub struct ZaloGuiApp {
     in_chat_search_open: bool,
     in_chat_search_query: String,
     in_chat_search_focus_pending: bool,
+    /// Picker chọn thời gian tin nhắn tự xoá ở thread header (local-only).
+    vanish_picker_open: bool,
     // Sticker picker & image cache state
     sticker_picker_open: bool,
     sticker_tab: StickerTab,
@@ -822,7 +835,15 @@ impl ZaloGuiApp {
             }
         }
         crate::chat::deduplicate_threads(&mut threads, None);
-
+        if let Ok(mut watch) = VANISH_THREADS.lock() {
+            watch.clear();
+            watch.extend(
+                threads
+                    .iter()
+                    .filter(|t| t.vanish.as_ref().is_some_and(|v| v.enabled()))
+                    .map(|t| t.id.clone()),
+            );
+        }
         let selected_thread_index = threads
             .iter()
             .enumerate()
@@ -875,6 +896,7 @@ impl ZaloGuiApp {
             in_chat_search_open: false,
             in_chat_search_query: String::new(),
             in_chat_search_focus_pending: false,
+            vanish_picker_open: false,
             sticker_picker_open: false,
             sticker_tab: StickerTab::Popular,
             sticker_textures: HashMap::new(),
@@ -1688,6 +1710,51 @@ impl ZaloGuiApp {
                         self.persist_threads_async();
                     }
                     self.status_msg = "Có tin nhắn vừa bị thu hồi (đã lưu lại)".into();
+                }
+                GuiEvent::VanishSettingChanged {
+                    thread_id,
+                    duration_sec,
+                    started_at_sec,
+                } => {
+                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                        if duration_sec > 0 {
+                            t.vanish = Some(crate::chat::VanishSetting {
+                                duration_sec,
+                                started_at_sec,
+                            });
+                        } else {
+                            t.vanish = None;
+                        }
+                    }
+                    if let Ok(mut watch) = VANISH_THREADS.lock() {
+                        watch.retain(|id| *id != thread_id);
+                        if duration_sec > 0 {
+                            watch.push(thread_id);
+                        }
+                    }
+                    if duration_sec > 0 {
+                        self.status_msg = "⏳ Đã bật tin nhắn tự xoá cho hội thoại này".into();
+                    } else {
+                        self.status_msg = "Đã tắt tin nhắn tự xoá".into();
+                    }
+                }
+                GuiEvent::VanishExpired {
+                    thread_id,
+                    expired_ids,
+                } => {
+                    if !expired_ids.is_empty() {
+                        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                            for m in t.messages.iter_mut() {
+                                if expired_ids.contains(&m.id) {
+                                    crate::chat::apply_vanish_expiry(m);
+                                }
+                            }
+                            if let Some(last) = t.messages.last() {
+                                t.preview = last.text.clone();
+                            }
+                            self.persist_threads_async();
+                        }
+                    }
                 }
                 GuiEvent::ForwardFinished { target_name, error } => match error {
                     None => {

@@ -5,6 +5,11 @@ use super::*;
 pub(super) static KNOWN_THREADS: std::sync::Mutex<Vec<(String, String, bool)>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Cache thread-id có bật vanish (memory-only) để sweep tick 2s early-return ngay
+/// khi không thread nào bật — KHÔNG query DB mỗi tick.
+pub(super) static VANISH_THREADS: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 pub enum WorkerCmd {
     /// Read OS authorization without prompting.
     ReadNotificationAuthorization {
@@ -181,6 +186,11 @@ pub enum WorkerCmd {
         thread_id: String,
         is_group: bool,
         hide: bool,
+    },
+    /// Bật/tắt tin nhắn tự xoá local-only (`duration_sec <= 0` = tắt).
+    SetThreadVanish {
+        thread_id: String,
+        duration_sec: i64,
     },
     DeleteThread {
         thread_id: String,
@@ -464,6 +474,90 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             }
                             let _ = gui_tx_sched.send(GuiEvent::ScheduledListUpdated);
                             ctx_sched.request_repaint();
+                        }
+                    });
+                }
+                {
+                    // Vanish sweep (tin nhắn tự xoá local-only): nhịp tick 2s riêng.
+                    // RẺ: early-return ngay khi `VANISH_THREADS` rỗng (cache memory, không
+                    // query DB mỗi tick). Chỉ thread có vanish mới đọc SQLite + gửi event.
+                    let gui_tx_vanish = gui_tx.clone();
+                    let ctx_vanish = egui_ctx.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(2));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        loop {
+                            tick.tick().await;
+                            let watch: Vec<String> = VANISH_THREADS
+                                .lock()
+                                .map(|v| v.clone())
+                                .unwrap_or_default();
+                            if watch.is_empty() {
+                                continue;
+                            }
+                            let now_ms = crate::login::unix_now().saturating_mul(1000);
+                            let swept: Vec<(String, Vec<String>)> =
+                                tokio::task::spawn_blocking(move || {
+                                    let mut out = Vec::new();
+                                    let Ok(store) =
+                                        crate::store::MessageStore::open("zalo_history.db")
+                                    else {
+                                        return out;
+                                    };
+                                    for tid in watch {
+                                        let Ok(msgs) = store.messages_for(&tid, 500) else {
+                                            continue;
+                                        };
+                                        if msgs.is_empty() {
+                                            continue;
+                                        }
+                                        let Some((dur, start)) =
+                                            store.load_thread_vanish(&tid)
+                                        else {
+                                            continue;
+                                        };
+                                        let setting = crate::chat::VanishSetting {
+                                            duration_sec: dur,
+                                            started_at_sec: start,
+                                        };
+                                        let dur_ms = dur.saturating_mul(1000);
+                                        let start_ms = start.saturating_mul(1000);
+                                        let mut expired_ids = Vec::new();
+                                        for sm in msgs {
+                                            if sm.text.trim()
+                                                == crate::chat::VANISH_EXPIRED_TEXT
+                                            {
+                                                continue;
+                                            }
+                                            let ts =
+                                                crate::clock::normalize_ts_ms(sm.ts);
+                                            if ts < start_ms {
+                                                continue;
+                                            }
+                                            if now_ms.saturating_sub(ts) >= dur_ms
+                                                && setting.is_expired(ts, now_ms)
+                                            {
+                                                expired_ids.push(sm.msg_id.clone());
+                                            }
+                                        }
+                                        if !expired_ids.is_empty() {
+                                            out.push((tid, expired_ids));
+                                        }
+                                    }
+                                    out
+                                })
+                                .await
+                                .unwrap_or_default();
+                            if swept.is_empty() {
+                                continue;
+                            }
+                            for (tid, ids) in swept {
+                                let _ = gui_tx_vanish.send(GuiEvent::VanishExpired {
+                                    thread_id: tid,
+                                    expired_ids: ids,
+                                });
+                            }
+                            ctx_vanish.request_repaint();
                         }
                     });
                 }
@@ -996,6 +1090,49 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     &s, &thread_id, is_group, hide,
                                 )
                                 .await;
+                            });
+                        }
+                        WorkerCmd::SetThreadVanish {
+                            thread_id,
+                            duration_sec,
+                        } => {
+                            // Vanish là local-only: không gọi server, chỉ persist SQLite + báo GUI
+                            // để apply ngay vào thread đang hiển thị. DB theo account-uin giống
+                            // các lane khác; lỗi persist chỉ log, GUI vẫn giữ trạng thái RAM.
+                            let db_path = {
+                                let s = session.lock().await;
+                                let uin =
+                                    s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+                                crate::store::db_path_for_account(&uin)
+                            };
+                            let now_sec = crate::login::unix_now();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Ok(mut store) =
+                                    crate::store::MessageStore::open(&db_path)
+                                {
+                                    if duration_sec > 0 {
+                                        let _ = store.upsert_thread_vanish(
+                                            &thread_id,
+                                            duration_sec,
+                                            now_sec,
+                                        );
+                                    } else {
+                                        let _ = store
+                                            .upsert_thread_vanish(&thread_id, 0, 0);
+                                    }
+                                }
+                                let _ = gui_tx_clone.send(GuiEvent::VanishSettingChanged {
+                                    thread_id,
+                                    duration_sec,
+                                    started_at_sec: if duration_sec > 0 {
+                                        now_sec
+                                    } else {
+                                        0
+                                    },
+                                });
+                                ctx_clone.request_repaint();
                             });
                         }
                         WorkerCmd::DeleteThread {

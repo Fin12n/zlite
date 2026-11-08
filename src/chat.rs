@@ -2476,7 +2476,7 @@ pub async fn send_voice_message(
     let file_name = voice_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("voice.m4a")
+        .unwrap_or("voice.aac")
         .to_string();
     let file_host = if s.domains.file.is_empty() {
         "https://tt-files-wpa.zaloapp.com"
@@ -5907,17 +5907,24 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         .and_then(extract_content_text)
         .unwrap_or_default();
 
+    // Voice ưu tiên trước file: params voice có fileSize khiến extract_link_info
+    // gán nhầm "Tập tin Zalo" (tin thoại thật hiện thành [Tập tin] xxx.aac).
+    let is_voice_msg = matches!(msg_type.as_str(), "chat.voice" | "voice" | "3");
+    if is_voice_msg {
+        link_src = Some("Thoại Zalo".to_string());
+    }
     let is_photo_msg = matches!(msg_type.as_str(), "chat.photo" | "photo" | "2")
         || link_src.as_deref() == Some("Hình ảnh Zalo")
         || link_url.as_deref().is_some_and(is_zalo_photo_cdn_url)
         || link_thumb.as_deref().is_some_and(is_zalo_photo_cdn_url);
-    let is_file_msg = matches!(
-        msg_type.as_str(),
-        "chat.file" | "file" | "19" | "share.file"
-    ) || link_src.as_deref() == Some("Tập tin Zalo")
-        || link_url
-            .as_deref()
-            .is_some_and(|u| u.to_ascii_lowercase().contains("/renewmedia"));
+    let is_file_msg = !is_voice_msg
+        && (matches!(
+            msg_type.as_str(),
+            "chat.file" | "file" | "19" | "share.file"
+        ) || link_src.as_deref() == Some("Tập tin Zalo")
+            || link_url
+                .as_deref()
+                .is_some_and(|u| u.to_ascii_lowercase().contains("/renewmedia")));
 
     if is_photo_msg && !is_file_msg && sticker_meta.is_none() {
         link_src = Some("Hình ảnh Zalo".to_string());
@@ -6149,6 +6156,26 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         (reacts, summaries)
     };
 
+    // Voice: giữ params (duration/waveform/m4a) vào history_source để bubble
+    // thoại hiển thị duration + waveform + nút chuyển thành chữ.
+    let history_source = if is_voice_msg {
+        raw_content_val.and_then(|rv| {
+            let params_str = rv.get("params").and_then(Value::as_str)?;
+            let mut params: Value = serde_json::from_str(params_str.trim()).ok()?;
+            if let Some(obj) = params.as_object_mut() {
+                // Giữ cả href để bubble biết URL gốc.
+                if obj.get("href").is_none() {
+                    if let Some(h) = rv.get("href").and_then(Value::as_str) {
+                        obj.insert("href".into(), Value::String(h.to_string()));
+                    }
+                }
+            }
+            Some(params)
+        })
+    } else {
+        None
+    };
+
     Some(ChatMessage {
         id: msg_id,
         client_message_id: ["cliMsgId", "clientId", "client_message_id"]
@@ -6176,6 +6203,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_desc,
         link_thumb,
         link_src,
+        history_source,
 
         ..Default::default()
     })

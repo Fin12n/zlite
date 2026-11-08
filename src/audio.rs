@@ -50,7 +50,7 @@ impl Drop for AudioHandle {
 pub struct VoiceRecord {
     /// Đường dẫn file audio tạm trong thư mục riêng (xem [`voice_temp_dir`]).
     pub path: std::path::PathBuf,
-    /// MIME để upload (`audio/mp4` cho M4A/AAC, `audio/mpeg` cho MP3 fallback).
+    /// MIME để upload (`audio/aac` cho AAC, `audio/mpeg` cho MP3 fallback).
     pub mime: String,
     /// Thời lượng thu, làm tròn lên giây.
     pub duration_secs: u64,
@@ -395,7 +395,7 @@ impl VoiceRecorder {
         drop(self._stream.take());
     }
 
-    /// Dừng thu, encode PCM → M4A/AAC (ffmpeg) hoặc MP3 fallback, ghi vào thư
+    /// Dừng thu, encode PCM → AAC (ffmpeg) hoặc MP3 fallback, ghi vào thư
     /// mục tạm owner-only. Trả `Err` thân thiện khi chưa thu được mẫu nào.
     /// Caller (worker) MUST gọi [`VoiceRecord::cleanup`] sau upload, cả khi lỗi.
     /// `Drop` xóa meter của recorder trên mọi đường về (Ok lẫn Err).
@@ -416,11 +416,11 @@ impl VoiceRecorder {
         let samples_n = samples_vec.len() as u64;
         // Ưu tiên AAC/M4A đúng chuẩn Zalo; không có ffmpeg thì MP3 fallback.
         // Encode vào thư mục riêng owner-only; M4A fail giữa chừng → dọn dir.
-        match encode_mono_m4a_16k(&samples_vec, tag) {
+        match encode_mono_aac_16k(&samples_vec, tag) {
             Ok((path, dir)) => {
                 return Ok(VoiceRecord {
                     path,
-                    mime: "audio/mp4".into(),
+                    mime: "audio/aac".into(),
                     duration_secs,
                     samples: samples_n,
                     dir: Some(dir),
@@ -495,11 +495,11 @@ pub fn encode_mono_mp3_16k(pcm_mono_16k: &[f32]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Encode PCM mono 16 kHz float → file M4A/AAC qua ffmpeg (stdin raw f32le).
+/// Encode PCM mono 16 kHz float → file AAC (.aac ADTS) qua ffmpeg (stdin raw f32le).
 /// Trả `(file, dir)`: file nằm trong thư mục tạm owner-only mới tạo.
 /// Err khi không có ffmpeg hoặc ffmpeg fail → caller fallback MP3.
 /// Luôn dọn dir khi fail (không để lại file mồ côi trong `/tmp` chia sẻ).
-pub fn encode_mono_m4a_16k(
+pub fn encode_mono_aac_16k(
     pcm_mono_16k: &[f32],
     tag: i64,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
@@ -508,12 +508,12 @@ pub fn encode_mono_m4a_16k(
         anyhow::bail!("Không có mẫu âm thanh để encode");
     }
     let dir = voice_temp_dir(tag)?;
-    let path = dir.join(format!("ctdozlite_voice_{tag}.m4a"));
+    let path = dir.join(format!("ctdozlite_voice_{tag}.aac"));
     let spawn_r = std::process::Command::new("ffmpeg")
         .args([
             "-y", "-loglevel", "error",
             "-f", "f32le", "-ar", "16000", "-ac", "1", "-i", "pipe:0",
-            "-c:a", "aac", "-b:a", "64k",
+            "-c:a", "aac", "-b:a", "64k", "-f", "adts",
             path.to_string_lossy().as_ref(),
         ])
         .stdin(std::process::Stdio::piped())

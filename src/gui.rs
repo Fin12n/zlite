@@ -290,6 +290,16 @@ pub enum GuiEvent {
     },
     ProxyUpdated(Result<Option<String>, String>),
     FileDownloaded(Result<(String, String), String>),
+    /// Worker đã tải + trích text xem trước tài liệu (session-only).
+    DocPreviewReady {
+        msg_id: String,
+        text: String,
+    },
+    /// Worker báo lỗi xem trước tài liệu (quá lớn / định dạng cũ / lỗi mạng).
+    DocPreviewFailed {
+        msg_id: String,
+        err: String,
+    },
     LoggedOut,
     HistoryReachedStart(String),
     AccountSwitched {
@@ -769,6 +779,14 @@ pub struct ZaloGuiApp {
     group_summary_pending: Option<String>,
     /// Nhảy tới tin khớp chờ thực hiện sau khi vẽ xong workspace.
     group_jump_pending: Option<(String, String)>,
+    /// Xem trước tài liệu (session-only): msg_id → text đã trích.
+    doc_previews: HashMap<String, String>,
+    /// msg_id đang tải xem trước (tránh gửi trùng mỗi frame).
+    doc_preview_loading: HashSet<String>,
+    /// msg_id xem trước lỗi (msg_id → message): hiện lỗi + cho thử lại.
+    doc_preview_errors: HashMap<String, String>,
+    /// Popup xem đầy đủ text tài liệu (msg_id, file_name, text).
+    doc_viewer: Option<(String, String, String)>,
     user_online_map: HashMap<String, (bool, String)>,
     allow_quit: bool,
     settings_modal_open: bool,
@@ -1048,6 +1066,10 @@ impl ZaloGuiApp {
             group_stats_loading: HashSet::new(),
             group_summary_pending: None,
             group_jump_pending: None,
+            doc_previews: HashMap::new(),
+            doc_preview_loading: HashSet::new(),
+            doc_preview_errors: HashMap::new(),
+            doc_viewer: None,
             user_online_map: HashMap::new(),
             allow_quit: false,
             settings_modal_open: false,
@@ -2808,6 +2830,15 @@ impl ZaloGuiApp {
                         self.show_toast(msg);
                     }
                 },
+                GuiEvent::DocPreviewReady { msg_id, text } => {
+                    self.doc_preview_loading.remove(&msg_id);
+                    self.doc_preview_errors.remove(&msg_id);
+                    self.doc_previews.insert(msg_id, text);
+                }
+                GuiEvent::DocPreviewFailed { msg_id, err } => {
+                    self.doc_preview_loading.remove(&msg_id);
+                    self.doc_preview_errors.insert(msg_id, err);
+                }
             }
         }
     }

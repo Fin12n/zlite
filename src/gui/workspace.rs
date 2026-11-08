@@ -444,9 +444,8 @@ impl ZaloGuiApp {
             self.render_reactions_dialog(ctx, pal);
             self.render_call_overlay(ctx, pal);
             self.render_image_viewer_modal(ctx, pal);
+            self.render_doc_viewer_modal(ctx, pal);
             self.render_phone_lookup_modal(ctx, pal);
-            self.render_settings_modal(ctx, pal);
-            self.render_schedule_modal(ctx, pal);
             return;
         }
         if self.feed_modal_open {
@@ -458,6 +457,7 @@ impl ZaloGuiApp {
             self.render_reactions_dialog(ctx, pal);
             self.render_call_overlay(ctx, pal);
             self.render_image_viewer_modal(ctx, pal);
+            self.render_doc_viewer_modal(ctx, pal);
             self.render_phone_lookup_modal(ctx, pal);
             self.render_settings_modal(ctx, pal);
             return;
@@ -4831,6 +4831,9 @@ impl ZaloGuiApp {
                                                         self.translate_pending.contains(
                                                             &crate::chat::translate_request_key(&thread_id, &msg.id),
                                                         ),
+                                                        self.doc_previews.get(&msg.id).map(|s| s.as_str()),
+                                                        self.doc_preview_loading.contains(&msg.id),
+                                                        self.doc_preview_errors.get(&msg.id).map(|s| s.as_str()),
                                                     ) {
                                                         pending_action = Some((idx, action));
                                                     }
@@ -5118,6 +5121,30 @@ impl ZaloGuiApp {
                                             file_name,
                                             download_dir: self.settings.download_dir.clone(),
                                         });
+                                    }
+                                }
+                                BubbleAction::FetchDocPreview { url, file_name, msg_id } => {
+                                    // Chặn gửi trùng khi user bấm liên tục.
+                                    if self.doc_preview_loading.insert(msg_id.clone()) {
+                                        self.doc_preview_errors.remove(&msg_id);
+                                        self.show_toast(format!(
+                                            "⏳ Đang trích nội dung \"{file_name}\"…"
+                                        ));
+                                        if let Some(tx) = WORKER_TX.get() {
+                                            let _ = tx.send(WorkerCmd::FetchDocPreview {
+                                                msg_id,
+                                                url,
+                                                file_name,
+                                            });
+                                        } else {
+                                            self.doc_preview_loading.remove(&m.id);
+                                        }
+                                    }
+                                }
+                                BubbleAction::OpenDocViewer { msg_id, file_name } => {
+                                    if let Some(text) = self.doc_previews.get(&msg_id).cloned() {
+                                        self.doc_viewer =
+                                            Some((msg_id, file_name, text));
                                     }
                                 }
                                 BubbleAction::PlayVoice { url, file_name, msg_id } => {
@@ -6330,6 +6357,7 @@ impl ZaloGuiApp {
         self.render_reactions_dialog(ctx, pal);
         self.render_call_overlay(ctx, pal);
         self.render_image_viewer_modal(ctx, pal);
+        self.render_doc_viewer_modal(ctx, pal);
         self.render_phone_lookup_modal(ctx, pal);
         self.render_schedule_modal(ctx, pal);
         self.render_settings_modal(ctx, pal);

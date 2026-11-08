@@ -241,6 +241,12 @@ pub enum WorkerCmd {
         file_name: String,
         download_dir: String,
     },
+    /// Tải bytes tài liệu (giới hạn 10MB) + trích text xem trước trong app.
+    FetchDocPreview {
+        msg_id: String,
+        url: String,
+        file_name: String,
+    },
     FetchVideoThumbnail {
         key: String,
         url: String,
@@ -3856,6 +3862,52 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 ctx_clone.request_repaint();
                             });
                         }
+                        WorkerCmd::FetchDocPreview {
+                            msg_id,
+                            url,
+                            file_name,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let client = { session_clone.lock().await.clone().http };
+                                let res = download_preview_bytes(&client, &url).await;
+                                match res {
+                                    Ok(bytes) => {
+                                        let ext = file_name
+                                            .rsplit('.')
+                                            .next()
+                                            .unwrap_or_default()
+                                            .to_ascii_lowercase();
+                                        // Extract trên blocking thread (zip/pdf CPU-bound).
+                                        let extracted = tokio::task::spawn_blocking(move || {
+                                            crate::doc_preview::extract_text(&bytes, &ext)
+                                        })
+                                        .await
+                                        .map_err(|e| format!("Lỗi tác vụ trích text: {e}"))
+                                        .and_then(|r| r);
+                                        match extracted {
+                                            Ok(text) => {
+                                                let _ = gui_tx_clone.send(
+                                                    GuiEvent::DocPreviewReady { msg_id, text },
+                                                );
+                                            }
+                                            Err(err) => {
+                                                let _ = gui_tx_clone.send(
+                                                    GuiEvent::DocPreviewFailed { msg_id, err },
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let _ = gui_tx_clone
+                                            .send(GuiEvent::DocPreviewFailed { msg_id, err });
+                                    }
+                                }
+                                ctx_clone.request_repaint();
+                            });
+                        }
                         WorkerCmd::FetchVideoThumbnail { key, url } => {
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
@@ -4244,6 +4296,34 @@ async fn download_attachment_with_original_name(
     })
     .await
     .map_err(|e| format!("Lỗi tác vụ lưu file: {e}"))?
+}
+/// Download attachment bytes for in-app preview, bounded at 10 MiB (no disk write).
+async fn download_preview_bytes(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Không thể tải tập tin: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Máy chủ trả về mã HTTP {}", resp.status()));
+    }
+    if resp
+        .content_length()
+        .is_some_and(|len| len > crate::doc_preview::MAX_PREVIEW_BYTES as u64)
+    {
+        return Err("File quá lớn để xem trước (>10MB), hãy tải về.".to_string());
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Lỗi đọc dữ liệu tập tin: {e}"))?;
+    if bytes.len() > crate::doc_preview::MAX_PREVIEW_BYTES {
+        return Err("File quá lớn để xem trước (>10MB), hãy tải về.".to_string());
+    }
+    Ok(bytes.to_vec())
 }
 
 /// Extract the first video frame via the system `ffmpeg` into a downscaled RGBA thumbnail.

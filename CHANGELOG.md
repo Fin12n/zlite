@@ -5,6 +5,9 @@ Xem thêm quy ước tại [ADR 0003 — Chính sách Changelog & Release Notes]
 
 ## [Unreleased]
 
+### Added (Tính năng mới)
+- **Xem trước tài liệu trong app (preview docx/xlsx/pptx/pdf/txt/csv/md/rtf):** card tệp có nút "Xem trước" (chỉ tải khi bấm, giới hạn 10MB) trích text ngay trong bong bóng (6 dòng đầu) + popup "Xem đầy đủ" có cuộn và nút Sao chép (`src/doc_preview.rs`, `src/gui/worker.rs`, `src/gui/messages.rs`, `src/gui/modals.rs`); định dạng cũ `.doc/.xls/.ppt` báo mở ngoài. Session-only, không cache đĩa.
+
 ### Fixed (Sửa lỗi)
 - **Clipboard Windows:** nhận thêm `CF_DIBV5`, giới hạn kích thước trước khi cấp phát và giải mã đúng bit mask màu/alpha của DIB 24/32-bit; nhả clipboard trước khi chuyển pixel.
 - **Gửi tập tin / video đính kèm thất bại với HTTP 405 ([#75](https://github.com/ctdoteam1110/ctdozlite/issues/75)):** `send_attachment` (`src/chat.rs`) chờ sự kiện điều khiển `file_done` (WebSocket `cmd 601`/`603` hoặc `lp_control`) để lấy `fileUrl` trước khi gọi `asyncfile/msg`, thay vì gửi thiếu `fileUrl` rồi rơi vào endpoint `sharefile_full` đã bị khai tử. Lỗi tải lên từng phần (chunk) nay được báo rõ thay vì bị bỏ qua.

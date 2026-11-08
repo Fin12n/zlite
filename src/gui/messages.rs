@@ -1632,6 +1632,9 @@ pub(super) fn render_message_body(
     max_text_width: f32,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
+    preview: Option<&str>,
+    preview_loading: bool,
+    preview_error: Option<&str>,
 ) -> Option<BubbleAction> {
     let mut body_action = None;
     let (text_col, meta_col) = if outgoing {
@@ -1886,6 +1889,9 @@ pub(super) fn render_message_body(
             max_text_width,
             sticker_textures,
             loading_stickers,
+            preview,
+            preview_loading,
+            preview_error,
         );
     }
 
@@ -2136,6 +2142,9 @@ fn render_attachment_card(
     max_text_width: f32,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
+    preview: Option<&str>,
+    preview_loading: bool,
+    preview_error: Option<&str>,
 ) -> Option<BubbleAction> {
     match kind {
         AttachmentKind::Video => render_video_card(
@@ -2151,7 +2160,17 @@ fn render_attachment_card(
         AttachmentKind::Voice | AttachmentKind::Audio => {
             render_voice_card(ui, msg, kind, file_name, text_col, pal)
         }
-        _ => render_doc_card(ui, msg, kind, file_name, text_col, pal),
+        _ => render_doc_card(
+            ui,
+            msg,
+            kind,
+            file_name,
+            text_col,
+            pal,
+            preview,
+            preview_loading,
+            preview_error,
+        ),
     }
 }
 
@@ -2401,7 +2420,21 @@ fn render_voice_card(
 /// File/doc bubble: per-type icon + name + meta line + "Mở"/"Lưu về máy" buttons.
 /// PDF first-page render was evaluated and deliberately skipped: no pdf-render dep exists
 /// in the tree and adding a heavy renderer for a thumbnail is not worth it, so PDF/office
-/// files get a classified card + open-outside instead.
+/// files get a classified card + open-outside instead. Preview text (when extracted)
+/// renders inline below the buttons.
+/// Extensions whose text can be extracted in-app (matches `doc_preview::extract_text`).
+pub(super) fn previewable_ext(file_name: &str) -> bool {
+    matches!(
+        file_name
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "pdf" | "docx" | "xlsx" | "pptx" | "txt" | "csv" | "md" | "log" | "rtf"
+    )
+}
+
 fn render_doc_card(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -2409,6 +2442,9 @@ fn render_doc_card(
     file_name: &str,
     text_col: Color32,
     pal: &ThemePalette,
+    preview: Option<&str>,
+    preview_loading: bool,
+    preview_error: Option<&str>,
 ) -> Option<BubbleAction> {
     let (icon, kind_label) = attachment_kind_label(kind);
     let link_col = if pal.is_dark {
@@ -2476,6 +2512,79 @@ fn render_doc_card(
             }
         }
     });
+    // Inline preview snippet (text đã trích, session-only) hoặc nút "Xem trước".
+    if let Some(text) = preview {
+        let snippet = crate::doc_preview::snippet_lines(text, 6);
+        ui.add_space(2.0);
+        egui::Frame::none()
+            .fill(pal.bg_elevated)
+            .inner_margin(Margin::symmetric(8.0, 6.0))
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(snippet)
+                        .size(11.5)
+                        .color(text_col.linear_multiply(0.75)),
+                );
+            });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let full_resp = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("Xem đầy đủ").size(12.5).color(text_col),
+                    )
+                    .min_size(Vec2::new(92.0, 26.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Mở toàn bộ nội dung trong app");
+            if full_resp.clicked() {
+                action = Some(BubbleAction::OpenDocViewer {
+                    msg_id: msg.id.clone(),
+                    file_name: file_name.to_string(),
+                });
+            }
+        });
+    } else if preview_loading {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new("Đang trích nội dung…")
+                    .size(12.0)
+                    .color(text_col.linear_multiply(0.7)),
+            );
+        });
+    } else if let Some(err) = preview_error {
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(format!("⚠️ {err}"))
+                .size(12.0)
+                .color(pal.danger),
+        );
+    } else if previewable_ext(file_name) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let prev_resp = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("Xem trước").size(12.5).color(text_col),
+                    )
+                    .min_size(Vec2::new(92.0, 26.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Đọc nội dung ngay trong app");
+            if prev_resp.clicked() {
+                if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
+                    action = Some(BubbleAction::FetchDocPreview {
+                        url: url.to_string(),
+                        file_name: file_name.to_string(),
+                        msg_id: msg.id.clone(),
+                    });
+                }
+            }
+        });
+    }
     action
 }
 
@@ -2490,7 +2599,8 @@ fn voice_duration_secs(msg: &ChatMessage) -> Option<u64> {
             .or(Some(v))
     });
     from_src.and_then(|node| {
-        node.get("duration")
+        let raw: u64 = node
+            .get("duration")
             .or_else(|| node.get("dur"))
             .or_else(|| node.get("time"))
             .and_then(|d| match d {
@@ -2499,7 +2609,9 @@ fn voice_duration_secs(msg: &ChatMessage) -> Option<u64> {
                 }
                 serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
                 _ => None,
-            })
+            })?;
+        // Params voice Zalo là ms (vd 1610); >3600 thì chắc chắn là ms.
+        Some(if raw > 3600 { raw / 1000 } else { raw })
     })
 }
 
@@ -2683,6 +2795,9 @@ pub(super) fn render_chat_bubble(
     idx: usize,
     vanish_remain: Option<i64>,
     pending_translate: bool,
+    preview: Option<&str>,
+    preview_loading: bool,
+    preview_error: Option<&str>,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -2968,6 +3083,9 @@ pub(super) fn render_chat_bubble(
                                     content_width,
                                     sticker_textures,
                                     loading_stickers,
+                                    preview,
+                                    preview_loading,
+                                    preview_error,
                                 );
                             }
                             render_translation(ui, msg, pal);
@@ -3140,6 +3258,9 @@ pub(super) fn render_chat_bubble(
                                     content_width,
                                     sticker_textures,
                                     loading_stickers,
+                                    preview,
+                                    preview_loading,
+                                    preview_error,
                                 );
                             }
                             render_translation(ui, msg, pal);
@@ -3230,6 +3351,17 @@ pub(super) enum BubbleAction {
     },
     DownloadFile {
         url: String,
+        file_name: String,
+    },
+    /// Tải + trích text xem trước tài liệu trong app (chỉ khi bấm, không tự fetch).
+    FetchDocPreview {
+        url: String,
+        file_name: String,
+        msg_id: String,
+    },
+    /// Mở popup xem đầy đủ text đã trích (session-only).
+    OpenDocViewer {
+        msg_id: String,
         file_name: String,
     },
     PlayVoice {
@@ -4060,6 +4192,9 @@ mod quote_navigation_tests {
                                 0,
                                 None,
                                 false,
+                                None,
+                                false,
+                                None,
                             );
                         });
                     },

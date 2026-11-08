@@ -6478,6 +6478,89 @@ impl ZaloGuiApp {
         }
     }
 
+    pub(super) fn render_doc_viewer_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        let Some((_, file_name, text)) = self.doc_viewer.clone() else {
+            return;
+        };
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.doc_viewer = None;
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        let title = format!("📄 {}", truncate_chars(&file_name, 42));
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width((ctx.screen_rect().width() * 0.6).clamp(320.0, 560.0))
+            .default_height((ctx.screen_rect().height() * 0.7).clamp(300.0, 640.0))
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(14.0))
+                    .stroke(Stroke::new(1.2_f32, pal.primary))
+                    .inner_margin(Margin::symmetric(16.0, 12.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} ký tự",
+                            text.chars().count()
+                        ))
+                        .size(11.5)
+                        .color(pal.text_muted),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Sao chép").size(12.5).color(pal.primary),
+                                )
+                                .min_size(Vec2::new(92.0, 28.0)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(text.clone());
+                            self.show_toast("Đã sao chép nội dung xem trước.");
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(text).size(13.0).color(pal.text_primary))
+                                .wrap(),
+                        );
+                    });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Đóng").size(12.5).color(pal.text_secondary),
+                                )
+                                .min_size(Vec2::new(92.0, 30.0)),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if !open || close {
+            self.doc_viewer = None;
+        }
+    }
+
     pub(super) fn render_wipe_confirm(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         if !self.wipe_confirm_open {
             return;

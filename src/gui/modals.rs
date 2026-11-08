@@ -2284,7 +2284,9 @@ impl ZaloGuiApp {
                                                             .on_hover_cursor(CursorIcon::PointingHand)
                                                             .clicked()
                                                         {
-                                                            open_external_url("https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md");
+                                                            if let Err(e) = open_external_url("https://github.com/ctdoteam1110/ctdozlite/blob/main/docs/TINH_NANG.md") {
+                                                                self.show_toast(format!("⚠️ {e}"));
+                                                            }
                                                         }
                                                         ui.add_space(4.0);
                                                         let total_msgs: usize = self.threads.iter().map(|t| t.messages.len()).sum();
@@ -3450,9 +3452,9 @@ impl ZaloGuiApp {
                                                                         )
                                                                         .clicked()
                                                                     {
-                                                                        open_external_url(
-                                                                            &info.html_url,
-                                                                        );
+                                                                        if let Err(e) = open_external_url(&info.html_url) {
+                                                                            self.show_toast(format!("⚠️ {e}"));
+                                                                        }
                                                                     }
                                                                 },
                                                             );
@@ -4006,7 +4008,9 @@ impl ZaloGuiApp {
                                 .on_hover_cursor(CursorIcon::PointingHand)
                                 .clicked()
                             {
-                                open_external_url(&info.html_url);
+                                if let Err(e) = open_external_url(&info.html_url) {
+                                    self.show_toast(format!("⚠️ {e}"));
+                                }
                             }
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -6840,7 +6844,9 @@ impl ZaloGuiApp {
                                         .on_hover_text(&viewer.full_url)
                                         .clicked()
                                     {
-                                        open_external_url(&viewer.full_url);
+                                        if let Err(e) = open_external_url(&viewer.full_url) {
+                                            self.show_toast(format!("⚠️ {e}"));
+                                        }
                                     }
 
                                     let copy_btn = egui::Button::new(
@@ -8841,7 +8847,8 @@ fn render_markdown_bullet_line(
             .on_hover_text(&url)
             .clicked()
         {
-            open_external_url(&url);
+            // Free function không có self để toast — vẫn hưởng fallback + normalize.
+            let _ = open_external_url(&url);
         }
     } else {
         ui.add(egui::Label::new(job).wrap());

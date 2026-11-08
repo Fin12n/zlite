@@ -291,12 +291,23 @@ pub(super) fn render_call_card_widget(
     action
 }
 
-/// Open an `http://` or `https://` URL in the user's default system browser.
-pub(super) fn open_external_url(url: &str) {
+/// Open a URL in the user's default system browser. Trả `Err` thân thiện để
+/// caller toast cho user thay vì fail im lặng (#107).
+pub(super) fn open_external_url(url: &str) -> Result<(), String> {
     let trimmed = url.trim();
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        return;
+    if trimmed.is_empty() {
+        return Err("Liên kết trống".into());
     }
+    // Chuẩn hoá link không scheme (www.x, x.com/abc) thay vì bỏ qua im lặng.
+    let owned;
+    let target = if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        trimmed
+    } else if trimmed.contains('.') && !trimmed.contains(' ') && !trimmed.contains("://") {
+        owned = format!("https://{trimmed}");
+        &owned
+    } else {
+        return Err(format!("Không mở được liên kết: {trimmed}"));
+    };
     #[cfg(target_os = "windows")]
     {
         #[link(name = "shell32")]
@@ -311,28 +322,47 @@ pub(super) fn open_external_url(url: &str) {
             ) -> isize;
         }
         let op: Vec<u16> = "open\0".encode_utf16().collect();
-        let mut file: Vec<u16> = trimmed.encode_utf16().collect();
+        let mut file: Vec<u16> = target.encode_utf16().collect();
         file.push(0);
-        unsafe {
-            let _ = ShellExecuteW(
+        let rc = unsafe {
+            ShellExecuteW(
                 std::ptr::null_mut(),
                 op.as_ptr(),
                 file.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
                 5, // SW_SHOW
-            );
+            )
+        };
+        // ShellExecuteW trả <= 32 khi lỗi (không có handler, bị chặn AV/policy).
+        if rc > 32 {
+            return Ok(());
+        }
+        // Fallback: cmd /C start (đi qua handler mặc định của shell).
+        match std::process::Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .spawn()
+        {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Không mở được liên kết ({e})")),
         }
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(trimmed).spawn();
+        match std::process::Command::new("open").arg(target).spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Không mở được liên kết ({e})")),
+        }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(trimmed).spawn();
+        match std::process::Command::new("xdg-open").arg(target).spawn() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Không mở được liên kết ({e})")),
+        }
     }
 }
+
 /// Open a native OS file-picker dialog on a worker thread and return the selected path.
 pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
@@ -1422,7 +1452,7 @@ fn render_markdown_inline_rich(
             .on_hover_text(&url)
             .clicked()
         {
-            open_external_url(&url);
+            let _ = open_external_url(&url);
         }
     } else {
         ui.add(egui::Label::new(job).wrap());
@@ -1653,7 +1683,7 @@ pub(super) fn render_message_body(
                         .on_hover_text("Bấm để thử mở liên kết ảnh gốc")
                         .clicked()
                     {
-                        open_external_url(&open_target);
+                        let _ = open_external_url(&open_target);
                     }
                 } else {
                     let tw_f = tw as f32;
@@ -1872,7 +1902,7 @@ pub(super) fn render_message_body(
                 .on_hover_text(&url)
                 .clicked()
             {
-                open_external_url(&url);
+                let _ = open_external_url(&url);
             }
             ui.add_space(5.0);
         }
@@ -1903,7 +1933,7 @@ pub(super) fn render_message_body(
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(&url);
     if title_resp.clicked() {
-        open_external_url(&url);
+        let _ = open_external_url(&url);
     }
 
     // 4. Optional short description (only if concise and distinct)
@@ -1927,7 +1957,7 @@ pub(super) fn render_message_body(
             .on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text(&url);
         if d_resp.clicked() {
-            open_external_url(&url);
+            let _ = open_external_url(&url);
         }
     }
 
@@ -1941,7 +1971,7 @@ pub(super) fn render_message_body(
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(&url);
     if dom_resp.clicked() {
-        open_external_url(&url);
+        let _ = open_external_url(&url);
     }
 
     body_action
@@ -2131,7 +2161,7 @@ fn render_video_card(
                 if img_resp.clicked() {
                     if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
                         if !url.to_ascii_lowercase().contains("/renewmedia") {
-                            open_external_url(url);
+                            let _ = open_external_url(url);
                         } else {
                             return Some(BubbleAction::DownloadFile {
                                 url: url.to_string(),
@@ -2188,7 +2218,7 @@ fn render_video_card(
                 );
                 if img_resp.clicked() {
                     if !url.to_ascii_lowercase().contains("/renewmedia") {
-                        open_external_url(url);
+                        let _ = open_external_url(url);
                     } else {
                         return Some(BubbleAction::DownloadFile {
                             url: url.to_string(),
@@ -2237,7 +2267,7 @@ fn render_video_fallback_card(
     if sub_resp.clicked() {
         if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
             if !url.to_ascii_lowercase().contains("/renewmedia") {
-                open_external_url(url);
+                let _ = open_external_url(url);
             } else {
                 return Some(BubbleAction::DownloadFile {
                     url: url.to_string(),
@@ -2350,7 +2380,7 @@ fn render_doc_card(
         if open_resp.clicked() {
             if let Some(url) = msg.link_url.as_deref().filter(|u| !u.is_empty()) {
                 if !url.to_ascii_lowercase().contains("/renewmedia") {
-                    open_external_url(url);
+                    let _ = open_external_url(url);
                 } else {
                     action = Some(BubbleAction::DownloadFile {
                         url: url.to_string(),

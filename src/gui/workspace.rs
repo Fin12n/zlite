@@ -6290,9 +6290,34 @@ fn play_voice_attachment(url: &str, file_name: &str, msg_id: &str, download_dir:
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.display().to_string()])
-            .spawn();
+        // Không dùng `cmd /C start`: cmd diễn giải `&` trong tên file thành
+        // toán tử shell (`a&calc&b.mp3` → chạy `calc`). ShellExecuteW mở file
+        // trực tiếp, coi path là target chứ không parse shell syntax.
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lp_operation: *const u16,
+                lp_file: *const u16,
+                lp_parameters: *const u16,
+                lp_directory: *const u16,
+                n_show_cmd: i32,
+            ) -> isize;
+        }
+        let op: Vec<u16> = "open\0".encode_utf16().collect();
+        let path_s = path.display().to_string();
+        let mut file: Vec<u16> = path_s.encode_utf16().collect();
+        file.push(0);
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                5, // SW_SHOW
+            );
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -6363,14 +6388,28 @@ impl ZaloGuiApp {
                     "⏳ Đang gửi thoại ({}s)…",
                     record.duration_secs
                 ));
-                if let Some(tx) = WORKER_TX.get() {
-                    let _ = tx.send(WorkerCmd::SendVoice {
-                        to_id: thread_id.to_string(),
-                        is_group,
-                        voice_path: record.path,
-                        mime: record.mime,
-                        duration_secs: record.duration_secs,
-                    });
+                match WORKER_TX.get() {
+                    Some(tx) => {
+                        // Gửi thất bại (kênh đóng) → dọn ngay, không để file mồ côi.
+                        if tx
+                            .send(WorkerCmd::SendVoice {
+                                to_id: thread_id.to_string(),
+                                is_group,
+                                voice_path: record.path.clone(),
+                                voice_dir: record.dir.clone(),
+                                mime: record.mime.clone(),
+                                duration_secs: record.duration_secs,
+                            })
+                            .is_err()
+                        {
+                            record.cleanup();
+                            self.show_toast("Không gửi được thoại: kênh worker đã đóng");
+                        }
+                    }
+                    None => {
+                        record.cleanup();
+                        self.show_toast("Không gửi được thoại: worker chưa sẵn sàng");
+                    }
                 }
             }
             Err(e) => {

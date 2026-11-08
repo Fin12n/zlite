@@ -335,17 +335,13 @@ pub(super) fn open_external_url(url: &str) -> Result<(), String> {
             )
         };
         // ShellExecuteW trả <= 32 khi lỗi (không có handler, bị chặn AV/policy).
+        // Không fallback qua `cmd /C start`: cmd diễn giải `&` trong URL thành
+        // toán tử shell (`https://x/?a=1&calc` → chạy `calc`). Trả lỗi để caller
+        // hiện toast thay vì thực thi lệnh ngoài ý muốn.
         if rc > 32 {
             return Ok(());
         }
-        // Fallback: cmd /C start (đi qua handler mặc định của shell).
-        match std::process::Command::new("cmd")
-            .args(["/C", "start", "", target])
-            .spawn()
-        {
-            Ok(_) => Ok(()),
-            Err(e) => Err(format!("Không mở được liên kết ({e})")),
-        }
+        Err("Không mở được liên kết (hệ thống chặn mở URL)".into())
     }
     #[cfg(target_os = "macos")]
     {

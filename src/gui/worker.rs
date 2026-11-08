@@ -93,6 +93,7 @@ pub enum WorkerCmd {
         to_id: String,
         is_group: bool,
         voice_path: std::path::PathBuf,
+        voice_dir: Option<std::path::PathBuf>,
         mime: String,
         duration_secs: u64,
     },
@@ -3074,6 +3075,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             to_id,
                             is_group,
                             voice_path,
+                            voice_dir,
                             mime,
                             duration_secs,
                         } => {
@@ -3081,6 +3083,14 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
+                                // Dọn file + dir tạm đúng cả khi gửi xong lẫn khi lỗi:
+                                // không để lại bản ghi âm riêng tư trong thư mục chia sẻ.
+                                let cleanup = || {
+                                    let _ = std::fs::remove_file(&voice_path);
+                                    if let Some(d) = voice_dir.as_ref() {
+                                        let _ = std::fs::remove_dir(d);
+                                    }
+                                };
                                 let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
                                     "⏳ Đang tải lên và gửi tin nhắn thoại…".into(),
                                 ));
@@ -3103,14 +3113,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             thread_id: to_id,
                                             msg: cm,
                                         });
-                                        let _ = std::fs::remove_file(&voice_path);
+                                        cleanup();
                                     }
                                     Err(e) => {
                                         let err_s = e.to_string();
                                         crate::logger::log_error("gui::send_voice", &err_s);
+                                        cleanup();
                                         let _ = gui_tx_clone.send(GuiEvent::SendFailed {
                                             thread_id: to_id,
-                                            text: "[Tin nhắn thoại]".into(),
+                                            text: String::new(),
                                             error: format!("Lỗi gửi thoại: {err_s}"),
                                         });
                                     }

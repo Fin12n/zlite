@@ -30,7 +30,9 @@ pub(crate) fn escape_osascript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Escape for embedding inside a PowerShell single-quoted string literal.
+/// Legacy single-quote escaper, kept for unit-test compatibility.
+/// The Windows notifier no longer interpolates text into PowerShell code
+/// (see `dispatch`); it passes title/body via environment variables instead.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn escape_powershell_single(s: &str) -> String {
     s.replace('\'', "''")
@@ -80,19 +82,20 @@ fn dispatch(title: &str, body: &str, linux_icon: &str, mac_sound: Option<&str>) 
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let esc_title = escape_powershell_single(&title);
-        let esc_body = escape_powershell_single(&body);
-        let ps_script = format!(
+        // Pass notification text as data (environment), never as PowerShell code:
+        // even doubled `''` escaping is fragile against smart-quote/encoding
+        // edge cases (`’; Start-Process calc; ’x`). The script below contains
+        // no interpolated text; it reads the literal values from the environment.
+        let ps_script =
             "Add-Type -AssemblyName System.Windows.Forms; \
              $n = New-Object System.Windows.Forms.NotifyIcon; \
              $n.Icon = [System.Drawing.SystemIcons]::Information; \
-             $n.BalloonTipTitle = '{esc_title}'; \
-             $n.BalloonTipText = '{esc_body}'; \
+             $n.BalloonTipTitle = $env:CTDOZLITE_NOTIFY_TITLE; \
+             $n.BalloonTipText = $env:CTDOZLITE_NOTIFY_BODY; \
              $n.Visible = $true; \
              $n.ShowBalloonTip(6000); \
              Start-Sleep -Seconds 6; \
-             $n.Dispose();"
-        );
+             $n.Dispose();";
         let _ = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -100,8 +103,10 @@ fn dispatch(title: &str, body: &str, linux_icon: &str, mac_sound: Option<&str>) 
                 "-WindowStyle",
                 "Hidden",
                 "-Command",
-                &ps_script,
+                ps_script,
             ])
+            .env("CTDOZLITE_NOTIFY_TITLE", &title)
+            .env("CTDOZLITE_NOTIFY_BODY", &body)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

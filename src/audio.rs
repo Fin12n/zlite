@@ -45,8 +45,10 @@ impl Drop for AudioHandle {
     }
 }
 /// Kết quả một lần thu tin nhắn thoại: file audio đã encode + thời lượng (giây).
+/// `dir` (khi có) là thư mục tạm owner-only chứa `path`; caller nên gọi
+/// [`VoiceRecord::cleanup`] sau khi upload xong (cả khi gửi thất bại).
 pub struct VoiceRecord {
-    /// Đường dẫn file tạm (trong `std::env::temp_dir()`), caller tự xoá sau khi gửi.
+    /// Đường dẫn file audio tạm trong thư mục riêng (xem [`voice_temp_dir`]).
     pub path: std::path::PathBuf,
     /// MIME để upload (`audio/mp4` cho M4A/AAC, `audio/mpeg` cho MP3 fallback).
     pub mime: String,
@@ -54,6 +56,65 @@ pub struct VoiceRecord {
     pub duration_secs: u64,
     /// Số mẫu PCM 16 kHz đã thu (để test/unit tính duration).
     pub samples: u64,
+    /// Thư mục tạm owner-only chứa `path` (xoá cùng file khi cleanup).
+    pub dir: Option<std::path::PathBuf>,
+}
+
+impl VoiceRecord {
+    /// Xoá file audio tạm và thư mục chứa nó (nếu còn). Không bao giờ panic.
+    pub fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.path);
+        if let Some(d) = self.dir.as_ref() {
+            let _ = std::fs::remove_dir(d);
+        }
+    }
+}
+
+/// Tạo thư mục tạm owner-only `ctdozlite-voice-<pid>-<tag>[-n]/` dưới `temp_dir()`.
+///
+/// `create_dir` là atomic (fail nếu đã tồn tại) nên chống TOCTOU; từ chối
+/// symlink gài sẵn; trên Unix đặt mode `0o700` ngay sau khi tạo để umask
+/// thoáng cũng không làm lộ file voice trong `/tmp` chia sẻ.
+pub(crate) fn voice_temp_dir(tag: i64) -> Result<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    for attempt in 0..17u32 {
+        let suffix = if attempt == 0 {
+            format!("{tag}")
+        } else {
+            format!("{tag}-{attempt}")
+        };
+        let dir = base.join(format!(
+            "ctdozlite-voice-{}-{suffix}",
+            std::process::id()
+        ));
+        // Từ chối symlink có sẵn (kẻ khác gài sẵn link trỏ ra ngoài).
+        if let Ok(meta) = std::fs::symlink_metadata(&dir) {
+            if meta.file_type().is_symlink() {
+                anyhow::bail!("Thư mục tạm voice không an toàn (symlink)");
+            }
+            continue; // tên đã có thật → thử suffix khác
+        }
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                }
+                // Kiểm tra lại sau khi tạo: phải là dir thật, không symlink.
+                let meta = std::fs::symlink_metadata(&dir)
+                    .map_err(|e| anyhow::anyhow!("Không stat được thư mục tạm voice ({e})"))?;
+                if !meta.is_dir() || meta.file_type().is_symlink() {
+                    let _ = std::fs::remove_dir(&dir);
+                    anyhow::bail!("Thư mục tạm voice không an toàn");
+                }
+                return Ok(dir);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => anyhow::bail!("Không tạo được thư mục tạm voice ({e})"),
+        }
+    }
+    anyhow::bail!("Không tạo được thư mục tạm voice (trùng tên)")
 }
 
 /// Thu mic thành file MP3 (Zalo voice: `voicemp3`/`sendmp3` nhận `audio/mpeg`).
@@ -173,8 +234,9 @@ impl VoiceRecorder {
         crate::media::set_mic_level_from_peak(0.0);
     }
 
-    /// Dừng thu, encode PCM → MP3 mono 16 kHz và ghi file tạm. Trả `Err` thân
-    /// thiện khi chưa thu được mẫu nào (bấm gửi quá nhanh).
+    /// Dừng thu, encode PCM → M4A/AAC (ffmpeg) hoặc MP3 fallback, ghi vào thư
+    /// mục tạm owner-only. Trả `Err` thân thiện khi chưa thu được mẫu nào.
+    /// Caller (worker) MUST gọi [`VoiceRecord::cleanup`] sau upload, cả khi lỗi.
     pub fn stop_and_encode(mut self) -> Result<VoiceRecord> {
         self.stop.store(true, Ordering::Relaxed);
         // Drop stream: callback mic dừng ngay, không cần join thread.
@@ -185,23 +247,44 @@ impl VoiceRecorder {
         }
         let duration_secs = (samples_vec.len() as u64).div_ceil(16000).max(1);
         let tag = crate::login::unix_now();
+        let samples_n = samples_vec.len() as u64;
         // Ưu tiên AAC/M4A đúng chuẩn Zalo; không có ffmpeg thì MP3 fallback.
-        if let Ok(path) = encode_mono_m4a_16k(&samples_vec, tag) {
-            return Ok(VoiceRecord {
-                path,
-                mime: "audio/mp4".into(),
-                duration_secs,
-                samples: samples_vec.len() as u64,
-            });
+        // Encode vào thư mục riêng owner-only; M4A fail giữa chừng → dọn dir.
+        match encode_mono_m4a_16k(&samples_vec, tag) {
+            Ok((path, dir)) => {
+                return Ok(VoiceRecord {
+                    path,
+                    mime: "audio/mp4".into(),
+                    duration_secs,
+                    samples: samples_n,
+                    dir: Some(dir),
+                });
+            }
+            Err(_) => {
+                // fallback MP3 bên dưới (dir của lần M4A fail đã tự dọn).
+            }
         }
-        let mp3_bytes = encode_mono_mp3_16k(&samples_vec)?;
-        let path = std::env::temp_dir().join(format!("ctdozlite_voice_{tag}.mp3"));
-        std::fs::write(&path, &mp3_bytes)?;
+        let dir = voice_temp_dir(tag)?;
+        let mp3_bytes = encode_mono_mp3_16k(&samples_vec).map_err(|e| {
+            let _ = std::fs::remove_dir(&dir);
+            e
+        })?;
+        let path = dir.join(format!("ctdozlite_voice_{tag}.mp3"));
+        if let Err(e) = std::fs::write(&path, &mp3_bytes) {
+            let _ = std::fs::remove_dir(&dir);
+            anyhow::bail!("Không ghi được file thoại tạm ({e})");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         Ok(VoiceRecord {
             path,
             mime: "audio/mpeg".into(),
             duration_secs,
-            samples: samples_vec.len() as u64,
+            samples: samples_n,
+            dir: Some(dir),
         })
     }
 }
@@ -248,14 +331,20 @@ pub fn encode_mono_mp3_16k(pcm_mono_16k: &[f32]) -> Result<Vec<u8>> {
 }
 
 /// Encode PCM mono 16 kHz float → file M4A/AAC qua ffmpeg (stdin raw f32le).
+/// Trả `(file, dir)`: file nằm trong thư mục tạm owner-only mới tạo.
 /// Err khi không có ffmpeg hoặc ffmpeg fail → caller fallback MP3.
-pub fn encode_mono_m4a_16k(pcm_mono_16k: &[f32], tag: i64) -> Result<std::path::PathBuf> {
+/// Luôn dọn dir khi fail (không để lại file mồ côi trong `/tmp` chia sẻ).
+pub fn encode_mono_m4a_16k(
+    pcm_mono_16k: &[f32],
+    tag: i64,
+) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     use std::io::Write;
     if pcm_mono_16k.is_empty() {
         anyhow::bail!("Không có mẫu âm thanh để encode");
     }
-    let path = std::env::temp_dir().join(format!("ctdozlite_voice_{tag}.m4a"));
-    let mut child = std::process::Command::new("ffmpeg")
+    let dir = voice_temp_dir(tag)?;
+    let path = dir.join(format!("ctdozlite_voice_{tag}.m4a"));
+    let spawn_r = std::process::Command::new("ffmpeg")
         .args([
             "-y", "-loglevel", "error",
             "-f", "f32le", "-ar", "16000", "-ac", "1", "-i", "pipe:0",
@@ -265,24 +354,45 @@ pub fn encode_mono_m4a_16k(pcm_mono_16k: &[f32], tag: i64) -> Result<std::path::
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Không chạy được ffmpeg ({e})"))?;
+        .spawn();
+    let mut child = match spawn_r {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir(&dir);
+            anyhow::bail!("Không chạy được ffmpeg ({e})");
+        }
+    };
     let mut pcm_bytes = Vec::with_capacity(pcm_mono_16k.len() * 4);
     for s in pcm_mono_16k {
         pcm_bytes.extend_from_slice(&s.to_le_bytes());
     }
-    child
+    let write_r = child
         .stdin
         .take()
-        .ok_or_else(|| anyhow::anyhow!("Không mở được stdin của ffmpeg"))?
-        .write_all(&pcm_bytes)
-        .map_err(|e| anyhow::anyhow!("Ghi PCM vào ffmpeg thất bại ({e})"))?;
+        .ok_or_else(|| anyhow::anyhow!("Không mở được stdin của ffmpeg"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(&pcm_bytes)
+                .map_err(|e| anyhow::anyhow!("Ghi PCM vào ffmpeg thất bại ({e})"))
+        });
+    if let Err(e) = write_r {
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+        return Err(e);
+    }
     let status = child.wait().map_err(|e| anyhow::anyhow!("ffmpeg lỗi ({e})"))?;
     if !status.success() || path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
         anyhow::bail!("ffmpeg encode AAC thất bại");
     }
-    Ok(path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((path, dir))
 }
 
 fn run_pass_through(stop: Arc<AtomicBool>) -> Result<()> {

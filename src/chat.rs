@@ -2492,28 +2492,83 @@ pub async fn send_voice_message(
         to_id
     };
     // Zalo PC truyền `clientId` là string trong params của `sendVoice`.
+    // Endpoint mới (cmd 12060/12063): voicemp3/sendmp3 cũ đã 404 mọi host.
     let client_id = next_client_message_id();
+    // Zalo yêu cầu fileType cho voice: "amr" nếu tên file chứa .amr, else "aac".
+    let file_type = if file_name.to_ascii_lowercase().contains(".amr") {
+        "amr"
+    } else {
+        "aac"
+    };
     let (upload_ep, target_type, params_obj) = if is_group {
         let m = obj(&[
             ("grid", json!(clean_target)),
             ("clientId", json!(client_id.to_string())),
+            ("fileName", json!(file_name.clone())),
+            ("fileSize", json!(voice_bytes.len() as u64)),
+            ("totalSize", json!(voice_bytes.len() as u64)),
+            ("totalChunk", json!(1)),
+            ("chunkId", json!(1)),
+            ("duration", json!(duration_secs)),
+            ("fileType", json!(file_type)),
+            ("imei", json!(s.imei.clone())),
+            ("isE2EE", json!(0)),
         ]);
-        ("/api/group/sendmp3", 11, m)
+        ("/api/group/voice/upload", 11, m)
     } else {
         let m = obj(&[
             ("toid", json!(clean_target)),
             ("clientId", json!(client_id.to_string())),
+            ("fileName", json!(file_name.clone())),
+            ("fileSize", json!(voice_bytes.len() as u64)),
+            ("totalSize", json!(voice_bytes.len() as u64)),
+            ("totalChunk", json!(1)),
+            ("chunkId", json!(1)),
+            ("duration", json!(duration_secs)),
+            ("fileType", json!(file_type)),
+            ("imei", json!(s.imei.clone())),
+            ("isE2EE", json!(0)),
         ]);
-        ("/api/message/voicemp3", 2, m)
+        ("/api/message/voice/upload", 2, m)
     };
     let params = s.encoded_params(&params_obj)?;
     let url = format!("{file_host}{upload_ep}?{}&params={params}&type={target_type}", s.common_params());
     let up_raw = s
-        .post_multipart(&url, "fileContent", &file_name, mime, &voice_bytes)
+        .post_multipart(&url, "chunkContent", &file_name, mime, &voice_bytes)
         .await
         .map_err(|e| anyhow::anyhow!("tải lên tin nhắn thoại thất bại: {e}"))?;
-    let send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+    let mut send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
     eprintln!("[voice] upload {} ({} bytes, {}) resp: {}", file_name, voice_bytes.len(), mime, send_resp);
+    // Async upload chỉ trả fileId; fileUrl tới sau qua WS file_done (như attachment).
+    // Chờ event rồi nhét URL vào response để parse ra message đầy đủ.
+    let need_url = send_resp
+        .get("data")
+        .and_then(|d| pick_str(d, &["fileUrl", "url", "normalUrl", "href"]))
+        .unwrap_or_default()
+        .is_empty();
+    if need_url && FILE_DONE_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        let fid = send_resp
+            .get("data")
+            .and_then(|d| {
+                pick_str(d, &["fileId"]).filter(|id| id != "-1")
+            })
+            .unwrap_or_default();
+        if !fid.is_empty() {
+            if let Some(url) = wait_for_file_done(&fid, FILE_DONE_TIMEOUT).await {
+                if let Some(obj) = send_resp
+                    .get_mut("data")
+                    .and_then(Value::as_object_mut)
+                {
+                    obj.insert("fileUrl".into(), Value::String(url));
+                }
+            } else {
+                crate::logger::log_error(
+                    "chat::send_voice",
+                    &format!("no file_done event for fileId {fid} within {FILE_DONE_TIMEOUT:?}"),
+                );
+            }
+        }
+    }
     let cm = parse_voice_send_response(&send_resp, client_id, duration_secs)?;
     Ok((send_resp, cm))
 }

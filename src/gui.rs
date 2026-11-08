@@ -298,6 +298,27 @@ pub enum GuiEvent {
         avatar: Option<String>,
         threads: Vec<Thread>,
     },
+    /// Worker thread đã nạp xong note + watch của 1 nhóm (DB off UI thread).
+    /// `note: None` = DB lỗi → disable editor, hiện retry.
+    GroupNoteLoaded {
+        thread_id: String,
+        uin: String,
+        note: Option<String>,
+        watch: Vec<String>,
+        error: Option<String>,
+    },
+    /// Kết quả auto-save note (debounce) từ worker thread.
+    GroupNoteSaved {
+        thread_id: String,
+        saved_at_label: String,
+        error: Option<String>,
+    },
+    /// Worker thread đã tính xong stats nhóm (DB + RAM snapshot).
+    GroupStatsReady {
+        thread_id: String,
+        uin: String,
+        stats: crate::group_stats::GroupStats,
+    },
 }
 
 fn phone_sync_completion_message(
@@ -726,7 +747,10 @@ pub struct ZaloGuiApp {
     /// Thread đã nạp ghi chú từ SQLite (tránh đọc lại mỗi frame).
     group_note_loaded: HashSet<String>,
     /// Lần sửa ghi chú cuối (thread_id → instant) để auto-save debounce ~1s.
+    /// Giữ pending khi save fail → tick sau thử lại (không mất draft).
     group_note_edited_at: HashMap<String, std::time::Instant>,
+    /// Mốc save fail gần nhất (thread_id → instant): debounce retry, tránh spam DB.
+    group_note_save_retry_at: HashMap<String, std::time::Instant>,
     /// Trạng thái lưu ghi chú hiển thị dưới editor ("Đã lưu HH:MM" / "Đang lưu…").
     group_note_saved_label: HashMap<String, String>,
     /// Từ khóa mới đang nhập trong ô theo dõi (theo thread).
@@ -735,6 +759,12 @@ pub struct ZaloGuiApp {
     group_watch_cache: HashMap<String, Vec<String>>,
     /// Stats nhóm đang hiển thị (thread_id → (fetched_at, stats)).
     group_stats_cache: HashMap<String, (std::time::Instant, crate::group_stats::GroupStats)>,
+    /// Nhóm đang nạp note/watch async (tránh spawn trùng mỗi frame).
+    group_note_loading: HashSet<String>,
+    /// Nhóm nạp note/watch lỗi DB (thread_id → message): editor disable + nút thử lại.
+    group_note_load_error: HashMap<String, String>,
+    /// Nhóm đang tính stats async (tránh spawn trùng mỗi frame).
+    group_stats_loading: HashSet<String>,
     /// Toast tóm tắt nhóm chờ hiển thị sau khi vẽ xong workspace (tránh borrow ui).
     group_summary_pending: Option<String>,
     /// Nhảy tới tin khớp chờ thực hiện sau khi vẽ xong workspace.
@@ -1008,10 +1038,14 @@ impl ZaloGuiApp {
             group_note_drafts: HashMap::new(),
             group_note_loaded: HashSet::new(),
             group_note_edited_at: HashMap::new(),
+            group_note_save_retry_at: HashMap::new(),
             group_note_saved_label: HashMap::new(),
             group_watch_inputs: HashMap::new(),
             group_watch_cache: HashMap::new(),
             group_stats_cache: HashMap::new(),
+            group_note_loading: HashSet::new(),
+            group_note_load_error: HashMap::new(),
+            group_stats_loading: HashSet::new(),
             group_summary_pending: None,
             group_jump_pending: None,
             user_online_map: HashMap::new(),
@@ -1207,6 +1241,24 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    // Đổi acc: flush note pending của acc cũ TRƯỚC khi đổi identity,
+                    // rồi clear cache workspace để acc mới không thấy/đè state cũ.
+                    if self.user_uin != uin {
+                        self.flush_group_note_pending();
+                        self.group_note_drafts.clear();
+                        self.group_note_loaded.clear();
+                        self.group_note_edited_at.clear();
+                        self.group_note_save_retry_at.clear();
+                        self.group_note_saved_label.clear();
+                        self.group_watch_inputs.clear();
+                        self.group_watch_cache.clear();
+                        self.group_stats_cache.clear();
+                        self.group_note_loading.clear();
+                        self.group_note_load_error.clear();
+                        self.group_stats_loading.clear();
+                        self.group_summary_pending = None;
+                        self.group_jump_pending = None;
+                    }
                     // Refresh (đã login) thì merge, KHÔNG clear — clear + nạp lại sẽ
                     // khiến nhánh brand-new đếm toàn bộ history thành unread (#119).
                     let is_refresh = self.is_logged_in;
@@ -1285,14 +1337,13 @@ impl ZaloGuiApp {
                                     || nt.presentation.muted
                                     || nt.unread.is_muted();
                                 let old_len = existing.messages.len();
+                                let old_ids: std::collections::HashSet<String> = existing
+                                    .messages
+                                    .iter()
+                                    .filter(|m| !m.id.is_empty())
+                                    .map(|m| m.id.clone())
+                                    .collect();
                                 crate::chat::merge_thread_into(existing, nt, true);
-                                if is_thread_muted {
-                                    existing.presentation.muted = true;
-                                    existing.unread.muted = true;
-                                    if let Some(until) = settings_muted_until {
-                                        existing.unread.muted_until = (until > 0).then_some(until);
-                                    }
-                                }
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
                                     let inc_cnt = existing
@@ -1391,14 +1442,19 @@ impl ZaloGuiApp {
                                             }
                                         }
                                     }
-                                    // Group Workspace: tin mới khớp từ khóa theo dõi → toast ưu tiên.
+                                    // Group Workspace: tin mới khớp từ khóa → toast ưu tiên.
+                                    // Chỉ tin live (id chưa từng thấy) mới match — history
+                                    // load (LoadGroupHistory merge) không bắn toast trùng.
+                                    // Tôn trọng mute thread + toggle notifications; không cộng
+                                    // unread riêng cho watch (tin đã có unread thread).
                                     if existing.is_group {
                                         let fresh: Vec<&ChatMessage> = existing
                                             .messages
                                             .iter()
-                                            .rev()
-                                            .take(added)
-                                            .filter(|m| !m.is_outgoing)
+                                            .filter(|m| {
+                                                !m.is_outgoing
+                                                    && (m.id.is_empty() || !old_ids.contains(&m.id))
+                                            })
                                             .collect();
                                         if !fresh.is_empty() {
                                             let hits =
@@ -1407,23 +1463,21 @@ impl ZaloGuiApp {
                                                     &existing.id,
                                                     &fresh,
                                                 );
-                                            for h in hits {
-                                                watch_toasts.push(format!(
-                                                    "🔔 [{}] {}: {}",
-                                                    h.keyword, h.sender, h.preview
-                                                ));
-                                                let badge_key =
-                                                    format!("watch:{}", existing.id);
-                                                *self
-                                                    .unread_counts
-                                                    .entry(badge_key)
-                                                    .or_insert(0) += 1;
+                                            if !hits.is_empty()
+                                                && !is_thread_muted
+                                                && self.settings.enable_notifications
+                                            {
+                                                for h in hits {
+                                                    watch_toasts.push(format!(
+                                                        "🔔 [{}] {}: {}",
+                                                        h.keyword, h.sender, h.preview
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
                                     if existing.id == self.chat_render_window.0 {
                                         self.chat_render_window.1 += added;
-                                        self.show_toast(format!("Đã tải thêm {added} tin nhắn cũ"));
                                     }
                                 }
                             } else if let Some(existing) = self.threads.iter_mut().find(|t| {
@@ -1578,10 +1632,14 @@ impl ZaloGuiApp {
                     self.group_note_drafts.clear();
                     self.group_note_loaded.clear();
                     self.group_note_edited_at.clear();
+                    self.group_note_save_retry_at.clear();
                     self.group_note_saved_label.clear();
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.group_note_loading.clear();
+                    self.group_note_load_error.clear();
+                    self.group_stats_loading.clear();
                     self.group_summary_pending = None;
                     self.group_jump_pending = None;
                 }
@@ -1600,10 +1658,14 @@ impl ZaloGuiApp {
                     self.group_note_drafts.clear();
                     self.group_note_loaded.clear();
                     self.group_note_edited_at.clear();
+                    self.group_note_save_retry_at.clear();
                     self.group_note_saved_label.clear();
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.group_note_loading.clear();
+                    self.group_note_load_error.clear();
+                    self.group_stats_loading.clear();
                     self.group_summary_pending = None;
                     self.group_jump_pending = None;
                 }
@@ -1613,6 +1675,9 @@ impl ZaloGuiApp {
                     avatar,
                     threads,
                 } => {
+                    // Worker đã snapshot DB acc cũ trước khi switch — flush pending
+                    // ở đây phòng trường hợp GUI còn draft treo chưa kịp lưu.
+                    self.flush_group_note_pending();
                     self.is_logged_in = true;
                     self.pending_add_account_uin = None;
                     self.user_uin = uin;
@@ -1629,10 +1694,14 @@ impl ZaloGuiApp {
                     self.group_note_drafts.clear();
                     self.group_note_loaded.clear();
                     self.group_note_edited_at.clear();
+                    self.group_note_save_retry_at.clear();
                     self.group_note_saved_label.clear();
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.group_note_loading.clear();
+                    self.group_note_load_error.clear();
+                    self.group_stats_loading.clear();
                     self.group_summary_pending = None;
                     self.group_jump_pending = None;
                 }
@@ -2365,6 +2434,60 @@ impl ZaloGuiApp {
                 GuiEvent::HistoryReachedStart(tid) => {
                     self.history_reached_start.insert(tid);
                     self.show_toast("Đã hiển thị toàn bộ lịch sử tin nhắn của cuộc trò chuyện này");
+                }
+                GuiEvent::GroupNoteLoaded { thread_id, uin, note, watch, error } => {
+                    self.group_note_loading.remove(&thread_id);
+                    // Stale (đổi acc trước khi worker trả) → bỏ, không đè cache acc mới.
+                    if uin != self.user_uin {
+                        return;
+                    }
+                    match note {
+                        Some(n) => {
+                            // Không đè draft user đang gõ: chỉ nạp khi chưa ai sửa.
+                            if !self.group_note_edited_at.contains_key(&thread_id)
+                                && !self.group_note_drafts.contains_key(&thread_id)
+                            {
+                                self.group_note_drafts.insert(thread_id.clone(), n);
+                            }
+                            self.group_watch_cache.insert(thread_id.clone(), watch);
+                            self.group_note_loaded.insert(thread_id.clone());
+                            self.group_note_load_error.remove(&thread_id);
+                        }
+                        None => {
+                            self.group_note_load_error.insert(
+                                thread_id.clone(),
+                                error.unwrap_or_else(|| "Không mở được DB".to_string()),
+                            );
+                        }
+                    }
+                }
+                GuiEvent::GroupNoteSaved { thread_id, saved_at_label, error } => {
+                    match error {
+                        None => {
+                            self.group_note_saved_label.insert(thread_id.clone(), saved_at_label);
+                            // Thành công mới clear pending; fail giữ lại để tick sau retry.
+                            self.group_note_edited_at.remove(&thread_id);
+                            self.group_note_save_retry_at.remove(&thread_id);
+                        }
+                        Some(e) => {
+                            self.group_note_saved_label.insert(
+                                thread_id.clone(),
+                                "Lưu thất bại, sẽ thử lại".to_string(),
+                            );
+                            // Giữ group_note_edited_at (pending) + đánh dấu mốc retry.
+                            self.group_note_save_retry_at
+                                .insert(thread_id.clone(), std::time::Instant::now());
+                            let _ = e;
+                        }
+                    }
+                }
+                GuiEvent::GroupStatsReady { thread_id, uin, stats } => {
+                    self.group_stats_loading.remove(&thread_id);
+                    if uin != self.user_uin {
+                        return;
+                    }
+                    self.group_stats_cache
+                        .insert(thread_id, (std::time::Instant::now(), stats));
                 }
                 GuiEvent::RefreshFinished {
                     threads,

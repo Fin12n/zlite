@@ -1976,49 +1976,95 @@ impl ZaloGuiApp {
         let show_info_drawer = self.info_drawer_open && !is_compact_w;
         let drawer_w = (screen_w * 0.26).clamp(240.0, 310.0);
 
-        // Pre-load group workspace state (note + watch cache) when a group is selected,
-        // so opening the drawer shows the note immediately. Cheap: one SELECT per table.
-        // Auto-save debounce ~1s: ghi chú đổi quá 1s → persist SQLite (UPDATE nhỏ, chạy
-        // trực tiếp trên UI thread).
+        // Pre-load group workspace state (note + watch cache) khi chọn nhóm.
+        // DB read/write + save chạy trên worker thread (spawn + GuiEvent),
+        // không block UI. Save fail → giữ pending, tick sau thử lại.
         if show_info_drawer {
             if let Some((d_id, _, _, d_is_group, _, _)) = &thread_meta {
-                if *d_is_group && !self.group_note_loaded.contains(d_id) {
-                    let db = crate::store::db_path_for_account(&self.user_uin);
-                    let (note, watch) = match crate::store::MessageStore::open(&db) {
-                        Ok(store) => (store.get_group_note(d_id), store.list_group_watch(d_id)),
-                        Err(_) => (String::new(), Vec::new()),
-                    };
-                    self.group_note_drafts.insert(d_id.clone(), note);
-                    self.group_watch_cache.insert(d_id.clone(), watch);
-                    self.group_note_loaded.insert(d_id.clone());
+                if *d_is_group
+                    && !self.group_note_loaded.contains(d_id)
+                    && !self.group_note_loading.contains(d_id)
+                    && !self.group_note_load_error.contains_key(d_id)
+                {
+                    self.group_note_loading.insert(d_id.clone());
+                    let tid = d_id.clone();
+                    let uin = self.user_uin.clone();
+                    let tx = self.event_tx.clone();
+                    std::thread::spawn(move || {
+                        let db = crate::store::db_path_for_account(&uin);
+                        match crate::store::MessageStore::open(&db) {
+                            Ok(store) => {
+                                let note = store.get_group_note(&tid);
+                                let watch = store.list_group_watch(&tid);
+                                let _ = tx.send(crate::gui::GuiEvent::GroupNoteLoaded {
+                                    thread_id: tid,
+                                    uin,
+                                    note: Some(note),
+                                    watch,
+                                    error: None,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(crate::gui::GuiEvent::GroupNoteLoaded {
+                                    thread_id: tid,
+                                    uin,
+                                    note: None,
+                                    watch: Vec::new(),
+                                    error: Some(e.to_string()),
+                                });
+                            }
+                        }
+                    });
                 }
                 if *d_is_group {
                     if let Some(edited) = self.group_note_edited_at.get(d_id).copied() {
-                        if edited.elapsed() >= std::time::Duration::from_secs(1) {
+                        // Debounce ~1s sau lần gõ cuối; sau fail chờ thêm ~3s mới retry.
+                        let retry_ok = self
+                            .group_note_save_retry_at
+                            .get(d_id)
+                            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3));
+                        if edited.elapsed() >= std::time::Duration::from_secs(1) && retry_ok {
+                            // Đánh dấu đang lưu bằng cách dời mốc edited về hiện tại
+                            // (tránh spawn trùng), nhưng giữ key pending để fail còn retry.
+                            self.group_note_edited_at
+                                .insert(d_id.clone(), std::time::Instant::now());
+                            self.group_note_save_retry_at.remove(d_id);
+                            let tid = d_id.clone();
+                            let uin = self.user_uin.clone();
                             let draft =
                                 self.group_note_drafts.get(d_id).cloned().unwrap_or_default();
-                            let db = crate::store::db_path_for_account(&self.user_uin);
-                            let saved_at = crate::clock::message_time(
-                                chrono::Local::now().timestamp_millis(),
-                            );
-                            let ok = crate::store::MessageStore::open(&db).and_then(|mut st| {
-                                st.set_group_note(d_id, &draft, chrono::Local::now().timestamp())
+                            let tx = self.event_tx.clone();
+                            std::thread::spawn(move || {
+                                let db = crate::store::db_path_for_account(&uin);
+                                let res = crate::store::MessageStore::open(&db).and_then(
+                                    |mut st| {
+                                        st.set_group_note(
+                                            &tid,
+                                            &draft,
+                                            chrono::Local::now().timestamp(),
+                                        )
+                                    },
+                                );
+                                match res {
+                                    Ok(()) => {
+                                        let saved_at = crate::clock::message_time(
+                                            chrono::Local::now().timestamp_millis(),
+                                        );
+                                        let _ = tx.send(crate::gui::GuiEvent::GroupNoteSaved {
+                                            thread_id: tid,
+                                            saved_at_label: format!("Đã lưu {saved_at}"),
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(crate::gui::GuiEvent::GroupNoteSaved {
+                                            thread_id: tid,
+                                            saved_at_label: String::new(),
+                                            error: Some(e.to_string()),
+                                        });
+                                    }
+                                }
                             });
-                            match ok {
-                                Ok(()) => {
-                                    self.group_note_saved_label.insert(
-                                        d_id.clone(),
-                                        format!("Đã lưu {saved_at}"),
-                                    );
-                                }
-                                Err(_) => {
-                                    self.group_note_saved_label.insert(
-                                        d_id.clone(),
-                                        "Lưu thất bại, sẽ thử lại".to_string(),
-                                    );
-                                }
-                            }
-                            self.group_note_edited_at.remove(d_id);
                         }
                     }
                 }
@@ -2075,10 +2121,14 @@ impl ZaloGuiApp {
                             .stroke(Stroke::new(1.0_f32, pal.border)),
                     )
                     .show(ctx, |ui| {
-                        ui.set_max_width(drawer_w);
-                        egui::Frame::none()
-                            .inner_margin(Margin::symmetric(16.0, 18.0))
+                        // Toàn bộ drawer cuộn dọc: stats/watch/media không bị đẩy
+                        // khỏi viewport khi drawer cao hơn màn hình. Member list
+                        // giữ ScrollArea riêng (max 200px) bên trong.
+                        egui::ScrollArea::vertical()
+                            .id_salt("info_drawer_scroll")
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                ui.set_max_width(drawer_w - 4.0);
                                 ui.vertical_centered(|ui| {
                                     let (av_rect, _) = ui
                                         .allocate_exact_size(Vec2::new(64.0, 64.0), Sense::hover());
@@ -2471,7 +2521,9 @@ impl ZaloGuiApp {
                         // Group Workspace: ghi chú + thống kê + theo dõi (chỉ nhóm).
                         if d_is_group {
                             let ws_id = d_id.clone();
-                            // Ghi chú: đảm bảo draft (preload ở trên đã nạp từ SQLite).
+                            // Ghi chú: draft nạp async từ DB authoritative của acc đang dùng.
+                            // DB lỗi → disable editor + nút thử lại (không cache rỗng đè note).
+                            let load_err = self.group_note_load_error.get(&ws_id).cloned();
                             let draft = self
                                 .group_note_drafts
                                 .entry(ws_id.clone())
@@ -2483,7 +2535,7 @@ impl ZaloGuiApp {
                                 .get(&ws_id)
                                 .cloned()
                                 .unwrap_or_default();
-                                                        egui::Frame::none()
+                            egui::Frame::none()
                                 .inner_margin(Margin::symmetric(16.0, 14.0))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
@@ -2507,24 +2559,53 @@ impl ZaloGuiApp {
                                         );
                                     });
                                     ui.add_space(6.0);
-                                    // a. Ghi chú (multiline, auto-save debounce ~1s).
-                                    let note_resp = ui.add(
-                                        egui::TextEdit::multiline(&mut draft_new)
-                                            .hint_text("Ghi chú riêng cho nhóm này…")
-                                            .desired_rows(3)
-                                            .desired_width(f32::INFINITY)
-                                            .margin(Margin::symmetric(6.0, 4.0)),
+                                    // a. Ghi chú (multiline, auto-save debounce).
+                                    // DB lỗi → disable editor + nút thử lại.
+                            let note_resp: Option<egui::Response> = if load_err.is_some() {
+                                ui.label(
+                                    RichText::new("Không tải được ghi chú (lỗi DB).")
+                                        .size(11.0)
+                                        .color(pal.text_muted),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Thử lại")
+                                                .size(11.0)
+                                                .color(pal.primary_hover),
+                                        )
+                                        .fill(pal.primary.linear_multiply(0.12))
+                                        .stroke(Stroke::new(1.0_f32, pal.primary))
+                                        .rounding(Rounding::same(6.0)),
+                                    )
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    self.group_note_load_error.remove(&ws_id);
+                                    self.group_note_loading.remove(&ws_id);
+                                    self.group_note_loaded.remove(&ws_id);
+                                }
+                                None
+                            } else {
+                                Some(ui.add(
+                                    egui::TextEdit::multiline(&mut draft_new)
+                                        .hint_text("Ghi chú riêng cho nhóm này…")
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY)
+                                        .margin(Margin::symmetric(6.0, 4.0)),
+                                ))
+                            };
+                            if let Some(resp) = note_resp {
+                                if resp.changed() {
+                                    self.group_note_drafts.insert(ws_id.clone(), draft_new);
+                                    self.group_note_edited_at
+                                        .insert(ws_id.clone(), std::time::Instant::now());
+                                    self.group_note_saved_label.insert(
+                                        ws_id.clone(),
+                                        "Đang nhập…".to_string(),
                                     );
-                                    if note_resp.changed() {
-                                        self.group_note_drafts.insert(ws_id.clone(), draft_new);
-                                        self.group_note_edited_at
-                                            .insert(ws_id.clone(), std::time::Instant::now());
-                                        self.group_note_saved_label.insert(
-                                            ws_id.clone(),
-                                            "Đang nhập…".to_string(),
-                                        );
-                                    }
-                                    ui.add_space(10.0);
+                                }
+                            }
                                     // b. Thống kê (tính từ DB + RAM, rẻ). Nút Làm mới buộc tính lại.
                                     ui.horizontal(|ui| {
                                         ui.label(
@@ -2555,31 +2636,40 @@ impl ZaloGuiApp {
                                         );
                                     });
                                     // Cache 30s để không tính lại mỗi frame.
+                                    // DB + tính toán chạy worker thread (spawn + GuiEvent).
                                     let stats_fresh = self
                                         .group_stats_cache
                                         .get(&ws_id)
                                         .is_some_and(|(at, _)| {
                                             at.elapsed() < std::time::Duration::from_secs(30)
                                         });
-                                    if !stats_fresh {
-                                        let db = crate::store::db_path_for_account(&self.user_uin);
+                                    if !stats_fresh && !self.group_stats_loading.contains(&ws_id) {
+                                        self.group_stats_loading.insert(ws_id.clone());
+                                        let tid = ws_id.clone();
+                                        let uin = self.user_uin.clone();
                                         let thread_now = self
                                             .threads
                                             .iter()
-                                            .find(|t| t.id == ws_id)
+                                            .find(|t| t.id == tid)
                                             .cloned();
-                                        if let Ok(store) =
-                                            crate::store::MessageStore::open(&db)
-                                        {
-                                            let st = crate::group_stats::compute_group_stats(
-                                                Some(&store),
-                                                thread_now.as_ref(),
-                                            );
-                                            self.group_stats_cache.insert(
-                                                ws_id.clone(),
-                                                (std::time::Instant::now(), st),
-                                            );
-                                        }
+                                        let tx = self.event_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let db = crate::store::db_path_for_account(&uin);
+                                            // DB authoritative của acc đang dùng; mở lỗi
+                                            // → chỉ tính trên RAM snapshot.
+                                            let store =
+                                                crate::store::MessageStore::open(&db).ok();
+                                            let st =
+                                                crate::group_stats::compute_group_stats(
+                                                    store.as_ref(),
+                                                    thread_now.as_ref(),
+                                                );
+                                            let _ = tx.send(crate::gui::GuiEvent::GroupStatsReady {
+                                                thread_id: tid,
+                                                uin,
+                                                stats: st,
+                                            });
+                                        });
                                     }
                                     if let Some((_, st)) =
                                         self.group_stats_cache.get(&ws_id)

@@ -37,7 +37,9 @@ pub fn match_new_messages(
         return Vec::new();
     }
     let db = crate::store::db_path_for_account(user_uin);
-    let store = match crate::store::MessageStore::open(&db) {
+    // Đọc trực tiếp, không chạy migration: tránh GUI block trên ALTER TABLE
+    // khi writer khác đang giữ lock; DB cũ thiếu bảng → đọc trả rỗng.
+    let store = match crate::store::MessageStore::open_no_migrate(&db) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };

@@ -69,30 +69,63 @@ pub fn build_group_context(
     let note = store.get_group_note(thread_id);
     let keywords = store.list_group_watch(thread_id);
 
+    // Gộp DB + RAM theo id trước khi chọn recent/hits: tin chỉ có trong DB
+    // (ngoài cửa sổ RAM) vẫn vào ngữ cảnh, không trùng lặp.
+    // Sắp xếp theo ts chuẩn hoá ms (lẫn lộn giây/ms không đảo thứ tự).
+    let mut with_ts: Vec<(i64, String, String, String, String)> = Vec::new();
+    if let Ok(rows) = store.messages_for_all(thread_id) {
+        for r in rows {
+            let time = crate::clock::message_time(crate::clock::normalize_ts_ms(r.ts));
+            with_ts.push((
+                crate::clock::normalize_ts_ms(r.ts),
+                r.msg_id,
+                r.sender_name,
+                r.text,
+                time,
+            ));
+        }
+    }
+    if let Some(t) = thread {
+        for m in &t.messages {
+            let ts = crate::clock::normalize_ts_ms(m.ts);
+            if !m.id.is_empty() {
+                if let Some(slot) = with_ts.iter_mut().find(|(_, id, _, _, _)| *id == m.id) {
+                    slot.0 = ts;
+                    slot.2 = m.sender.clone();
+                    slot.3 = m.text.clone();
+                    slot.4 = m.time.clone();
+                    continue;
+                }
+            }
+            with_ts.push((ts, m.id.clone(), m.sender.clone(), m.text.clone(), m.time.clone()));
+        }
+    }
+    with_ts.sort_by_key(|(ts, _, _, _, _)| *ts);
+
     let mut recent: Vec<GroupRecentMessage> = Vec::new();
     let mut tracked: Vec<TrackedHit> = Vec::new();
-    if let Some(t) = thread {
-        let mut msgs: Vec<_> = t.messages.iter().collect();
-        msgs.sort_by_key(|m| m.ts);
-        for m in msgs.iter().rev().take(30).rev() {
+    {
+        let n = with_ts.len();
+        let start = n.saturating_sub(30);
+        for (_, _, sender, text, time) in &with_ts[start..] {
             recent.push(GroupRecentMessage {
-                sender: if m.sender.is_empty() {
+                sender: if sender.is_empty() {
                     "Ẩn danh".to_string()
                 } else {
-                    m.sender.clone()
+                    sender.clone()
                 },
-                text: m.text.clone(),
-                time: m.time.clone(),
+                text: text.clone(),
+                time: time.clone(),
             });
         }
         // Tin khớp: duyệt từ mới nhất về cũ, mỗi keyword tối đa 10 tin.
         let mut per_kw: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        for m in msgs.iter().rev() {
+        for (_, _, sender, text, time) in with_ts.iter().rev() {
             if tracked.len() >= 30 {
                 break;
             }
-            let hay = m.text.to_lowercase();
+            let hay = text.to_lowercase();
             for kw in &keywords {
                 if tracked.len() >= 30 {
                     break;
@@ -108,13 +141,13 @@ pub fn build_group_context(
                 per_kw.insert(kw.clone(), used + 1);
                 tracked.push(TrackedHit {
                     keyword: kw.clone(),
-                    sender: if m.sender.is_empty() {
+                    sender: if sender.is_empty() {
                         "Ẩn danh".to_string()
                     } else {
-                        m.sender.clone()
+                        sender.clone()
                     },
-                    text: m.text.clone(),
-                    time: m.time.clone(),
+                    text: text.clone(),
+                    time: time.clone(),
                 });
             }
         }

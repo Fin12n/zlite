@@ -3514,6 +3514,8 @@ impl ZaloGuiApp {
             });
 
         if do_logout {
+            // Lưu note pending vào đúng DB acc hiện tại trước khi logout/xoá cache.
+            self.flush_group_note_pending();
             self.settings_modal_open = false;
             self.is_logged_in = false;
             self.user_name.clear();
@@ -3531,12 +3533,16 @@ impl ZaloGuiApp {
         }
         if let Some(target) = switch_to_uin {
             self.settings_modal_open = false;
+            // Lưu note pending của acc A vào đúng DB A trước khi worker snapshot/switch.
+            self.flush_group_note_pending();
             if let Some(tx) = WORKER_TX.get() {
                 let _ = tx.send(WorkerCmd::SwitchAccount { target_uin: target });
             }
         }
         if add_new_account {
             self.settings_modal_open = false;
+            // Flush pending vào DB acc cũ trước khi snapshot (không mất draft).
+            self.flush_group_note_pending();
             let _ = crate::account_manager::save_current_account_snapshot(&self.user_uin);
             // Giữ uin cũ để nút Hủy quay lại được; KHÔNG gửi Logout (xóa file) (#103).
             if !self.user_uin.is_empty() {

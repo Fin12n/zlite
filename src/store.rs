@@ -60,8 +60,20 @@ impl MessageStore {
     /// for ordering and preview; opening a thread reads deeper (`LoadGroupHistory`).
     pub const PRELOAD_MSGS: usize = 20;
 
-    /// Open SQLite database at `path` and initialize table schemas and indices if absent.
-    pub fn open(path: &str) -> Result<Self> {
+    /// Mở SQLite mà KHÔNG chạy migration/khởi tạo schema (đọc đường nhanh).
+    /// Dùng cho lookup nền (vd. watch keyword khi match tin mới): DB cũ thiếu
+    /// bảng → các hàm đọc trả rỗng thay vì chờ `ALTER TABLE`.
+    pub fn open_no_migrate(path: &str) -> Result<Self> {
+        let conn = if path == ":memory:" {
+            Connection::open_in_memory()?
+        } else {
+            Connection::open(path)?
+        };
+        Ok(Self { conn })
+    }
+
+     /// Open SQLite database at `path` and initialize table schemas and indices if absent.
+     pub fn open(path: &str) -> Result<Self> {
         let conn = if path == ":memory:" {
             Connection::open_in_memory()?
         } else {
@@ -200,9 +212,9 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Thêm từ khóa theo dõi cho 1 nhóm (chuẩn hoá trim, bỏ trống).
+    /// Thêm từ khóa theo dõi cho 1 nhóm (chuẩn hoá trim + lowercase, bỏ trống).
     pub fn add_group_watch(&mut self, thread_id: &str, keyword: &str) -> Result<bool> {
-        let kw = keyword.trim();
+        let kw = keyword.trim().to_lowercase();
         if thread_id.is_empty() || kw.is_empty() {
             return Ok(false);
         }
@@ -213,14 +225,21 @@ impl MessageStore {
         Ok(rows > 0)
     }
 
-    /// Xoá 1 từ khóa theo dõi của nhóm.
+    /// Xoá 1 từ khóa theo dõi của nhóm (chuẩn hoá trim/lowercase như lúc thêm).
     pub fn remove_group_watch(&mut self, thread_id: &str, keyword: &str) -> Result<()> {
         if thread_id.is_empty() {
             return Ok(());
         }
-        self.conn.execute(
-            "DELETE FROM group_watch WHERE thread_id = ?1 AND keyword = ?2",
-            params![thread_id, keyword],
+        let kw = keyword.trim();
+        if kw.is_empty() {
+            return Ok(());
+        }
+        let norm = kw.to_lowercase();
+        // Xoá khớp chính xác trước; sau đó xoá nốt biến thể chỉ khác chữ hoa/thường
+        // hoặc khoảng trắng (DB cũ lưu trước khi chuẩn hoá).
+        let _ = self.conn.execute(
+            "DELETE FROM group_watch WHERE thread_id = ?1 AND (keyword = ?2 OR LOWER(TRIM(keyword)) = ?3)",
+            params![thread_id, kw, norm],
         )?;
         Ok(())
     }
@@ -526,6 +545,59 @@ impl MessageStore {
             })
         })?;
 
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
+    /// Đếm toàn bộ tin đã lưu của 1 thread (không cap) — dùng cho thống kê nhóm.
+    /// Bảng `messages` thiếu (DB cũ) → `Ok(0)` thay vì lỗi.
+    pub fn count_messages(&self, thread_id: &str) -> Result<usize> {
+        if thread_id.is_empty() {
+            return Ok(0);
+        }
+        let n: i64 = match self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get(0),
+        ) {
+            Ok(n) => n,
+            Err(_) => return Ok(0),
+        };
+        Ok(n.max(0) as usize)
+    }
+
+    /// Đọc toàn bộ lịch sử đã lưu của 1 thread (cũ → mới, không cap).
+    /// Thread rất dài có thể nặng RAM — caller (stats) chỉ gọi khi cần số toàn DB.
+    pub fn messages_for_all(&self, thread_id: &str) -> Result<Vec<StoredMessage>> {
+        if thread_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = match self.conn.prepare(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM messages
+             WHERE thread_id = ?1
+             ORDER BY ts ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let rows = stmt.query_map(params![thread_id], |row| {
+            let is_outgoing_num: i64 = row.get(7)?;
+            Ok(StoredMessage {
+                msg_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                sender_id: row.get(2).unwrap_or_default(),
+                sender_name: row.get(3).unwrap_or_default(),
+                text: row.get(4).unwrap_or_default(),
+                msg_type: row.get(5).unwrap_or_default(),
+                ts: row.get(6)?,
+                is_outgoing: is_outgoing_num != 0,
+                raw_json: row.get(8).unwrap_or_default(),
+            })
+        })?;
         let mut list = Vec::new();
         for r in rows {
             list.push(r?);
@@ -2018,6 +2090,19 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_watch_normalizes_case_and_spaces_on_add_and_remove() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        assert!(store.add_group_watch("g1", "  Deadline  ").unwrap());
+        // trùng sau chuẩn hoá → không thêm mới.
+        assert!(!store.add_group_watch("g1", "deadline").unwrap());
+        assert_eq!(store.list_group_watch("g1"), vec!["deadline".to_string()]);
+        // xoá với padding + khác hoa/thường → gỡ được watch đã cài.
+        store.remove_group_watch("g1", "  DEADLINE  ").unwrap();
+        assert!(store.list_group_watch("g1").is_empty());
+    }
+
 
     #[test]
     fn local_time_when_hydrating_seconds_and_milliseconds() {

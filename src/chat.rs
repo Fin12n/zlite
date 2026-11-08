@@ -7168,22 +7168,27 @@ pub async fn request_phone_sync_with_temp_key(
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
-/// Request transfer-sync v2 from phone (`requestSyncMessage` @ `app.asar`, cmd `12888`, `file` endpoint, #68, #73).
-/// Mirrors `requestSyncMessage(reqId, data)` in `main-startup.js:14372356` & `shared-worker.js:282247`
-/// plus WebSocket `cmd 592` (`REQUEST_MOBILE_WAKE_UP`) and `cmd 590` (`SYNC_MESSAGE.REQUEST`).
+/// Request transfer-sync v2 từ điện thoại. Lệnh thật đi qua WebSocket
+/// `cmd 592` (wake-up) + `cmd 590` (SYNC_MESSAGE.REQUEST) — KHÔNG có HTTP REST
+/// `/api/transfer-sync-v2/request-sync` (404 mọi host, #87); cmd 12888 trong
+/// bundle Zalo chỉ là command-id, dispatch qua WS runner.
 pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
     let sync_id = crate::param_cipher::random_hex(32);
     let temp_key = crate::history_sync::latest_mobile_temp_key();
-    let (ik_pub, ek_pub) = match crate::history_sync::generate_sync_v2_keys() {
-        Ok(k) => (k.ik_pub, k.ek_pub),
-        Err(_) => (
-            crate::history_sync::generate_sync_v2_ed25519_public_key(0xA1),
-            crate::history_sync::generate_sync_v2_ed25519_public_key(0xB2),
-        ),
-    };
+    // Sync V2 BẮT BUỘC có keypair thật từ Node+WASM. Trước đây fallback sinh
+    // khóa giả (sha256 + prefix 0x05, không có private key) khiến điện thoại mã
+    // hoá vào khóa vô chủ, PC không bao giờ giải mã được (#108, #116).
+    // Fail rõ ở đây thay vì gửi request rác.
+    let keys = crate::history_sync::generate_sync_v2_keys().map_err(|e| {
+        anyhow::anyhow!(
+            "Không sinh được khóa Sync V2 (cần Node.js + file WASM Zalo): {e}. \
+             Cài Node.js và kiểm tra scripts/sync_v2_helper.js"
+        )
+    })?;
+    let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
     // 1. Wake up mobile master device over WebSocket (`cmd 592`)
     let _ = crate::socket::send_mobile_wakeup(&sync_id);
 

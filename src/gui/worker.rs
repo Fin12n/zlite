@@ -646,8 +646,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                 ctx_sync.request_repaint();
-                                                                let _ = crate::history_sync::import_sync_v2_meta(&s_sync, &url).await;
+                                                                match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
+                                                                    Ok(meta) => {
+                                                                        crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                                                                    }
+                                                                    Err(e) => {
+                                                                        let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                                    }
+                                                                }
                                                             } else if batch_type == 1 {
+                                                                // Chỉ giải mã khi sync_id này đã có metadata — tránh
+                                                                // dùng nhầm session của phiên cũ (#116).
+                                                                if !crate::history_sync::has_sync_v2_session(&sync_id) {
+                                                                    let err = format!("⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta");
+                                                                    crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                                    ctx_sync.request_repaint();
+                                                                    return;
+                                                                }
                                                                 let note = "📥 Đang tải và giải mã gói tin nhắn từ iPhone…".to_string();
                                                                 crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
@@ -1567,8 +1585,24 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                     ctx_sync.request_repaint();
-                                                                    let _ = crate::history_sync::import_sync_v2_meta(&s_sync, &url).await;
+                                                                    match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
+                                                                        Ok(meta) => {
+                                                                            crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                                                                        }
+                                                                        Err(e) => {
+                                                                            let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                                                                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                                        }
+                                                                    }
                                                                 } else if batch_type == 1 {
+                                                                    if !crate::history_sync::has_sync_v2_session(&sync_id) {
+                                                                        let err = format!("⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta");
+                                                                        crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                                        ctx_sync.request_repaint();
+                                                                        return;
+                                                                    }
                                                                     let note = "📥 Đang tải và giải mã gói tin nhắn từ iPhone…".to_string();
                                                                     crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));

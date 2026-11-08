@@ -112,23 +112,6 @@ pub fn last_mobile_sync_status() -> Option<String> {
     LAST_MOBILE_SYNC_STATUS.lock().ok().and_then(|g| g.clone())
 }
 
-/// Generate a 33-byte (`0x05` curve type prefix + 32-byte key) Base64 public key
-/// matching `zprotoEd25519GenerateKeyPair` in `libzproto_wasm_bg.wasm` for Sync v2 (`cmd 590`).
-pub fn generate_sync_v2_ed25519_public_key(domain_tag: u8) -> String {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let seed = crate::param_cipher::random_hex(32);
-    let mut hasher = Sha256::new();
-    hasher.update([domain_tag]);
-    hasher.update(seed.as_bytes());
-    let digest = hasher.finalize();
-    let mut raw = [0u8; 33];
-    raw[0] = 0x05; // Signal / ZaloTrustedSynced25519 DJB_TYPE = 0x05
-    raw[1..].copy_from_slice(&digest);
-    raw[1] &= 0xF8;
-    raw[32] = (raw[32] & 0x7F) | 0x40;
-    base64::engine::general_purpose::STANDARD.encode(raw)
-}
 
 static CURRENT_SYNC_KEYS: std::sync::Mutex<Option<(rsa::RsaPrivateKey, String)>> =
     std::sync::Mutex::new(None);
@@ -753,7 +736,14 @@ pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
     Ok(keys)
 }
 
-pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<()> {
+/// Kết quả giải mã metadata Sync V2: session id để đối chiếu với event batch.
+#[derive(Debug, Default)]
+pub struct SyncV2Meta {
+    pub session_id: String,
+    pub sender_identity: String,
+}
+
+pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
     let uin = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
     let sek = s.zpw_sek.clone().unwrap_or_default();
     let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
@@ -785,7 +775,34 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<()> {
     if !out.status.success() {
         anyhow::bail!("decrypt-meta failed: {}", String::from_utf8_lossy(&out.stderr));
     }
-    Ok(())
+    // Helper in JSON { sessionId, senderIdentity, ... } ra stdout — parse để
+    // caller đối chiếu session, thay vì Ok mù như trước.
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| anyhow::anyhow!("decrypt-meta trả JSON không hợp lệ: {e}"))?;
+    Ok(SyncV2Meta {
+        session_id: v.get("sessionId").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+        sender_identity: v.get("senderIdentity").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+    })
+}
+
+/// Đăng ký session Sync V2 đã giải mã xong metadata, key theo sync_id của event.
+/// Batch message chỉ được giải mã khi sync_id của nó đã có metadata — tránh
+/// dùng nhầm session của phiên cũ (#116).
+static SYNC_V2_SESSIONS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn record_sync_v2_session(sync_id: &str, session_id: &str) {
+    if let Ok(mut m) = SYNC_V2_SESSIONS.lock() {
+        m.retain(|(k, _)| k != sync_id);
+        m.push((sync_id.to_string(), session_id.to_string()));
+    }
+}
+
+pub fn has_sync_v2_session(sync_id: &str) -> bool {
+    SYNC_V2_SESSIONS
+        .lock()
+        .map(|m| m.iter().any(|(k, _)| k == sync_id))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Default)]
@@ -904,6 +921,32 @@ fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
     Some(part)
 }
 
+/// Giải nén payload Sync V2 tự nhận dạng: zstd (28 b5 2f fd) / gzip (1f 8b) /
+/// zlib (78 xx) / raw. Không bao giờ fail — trả nguyên bytes khi không nhận ra.
+pub fn decompress_sync_payload(buf: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    if buf.len() >= 4 && buf[0] == 0x28 && buf[1] == 0xb5 && buf[2] == 0x2f && buf[3] == 0xfd {
+        if let Ok(d) = zstd::decode_all(std::io::Cursor::new(buf)) {
+            return d;
+        }
+        return buf.to_vec();
+    }
+    if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
+        let mut out = Vec::new();
+        if flate2::read::GzDecoder::new(buf).read_to_end(&mut out).is_ok() {
+            return out;
+        }
+        return buf.to_vec();
+    }
+    if buf.len() >= 2 && buf[0] == 0x78 {
+        let mut out = Vec::new();
+        if flate2::read::ZlibDecoder::new(buf).read_to_end(&mut out).is_ok() {
+            return out;
+        }
+    }
+    buf.to_vec()
+}
+
 pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
     let mut parts = Vec::new();
     let mut offset = 0;
@@ -971,10 +1014,9 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     }
 
     let decrypted_bytes = std::fs::read(std::env::temp_dir().join("sync_v2_message.bin"))?;
-    let decompressed = match zstd::decode_all(std::io::Cursor::new(&decrypted_bytes)) {
-        Ok(d) => d,
-        Err(_) => decrypted_bytes,
-    };
+    // JS đã unpack, nhưng nếu nó trả raw còn nén thì Rust tự nhận dạng thêm
+    // (zstd/zlib/gzip — Zalo dùng cả 3 theo HistoryCodec mẫu).
+    let decompressed = decompress_sync_payload(&decrypted_bytes);
 
     let partitions = parse_sync_chunk(&decompressed).unwrap_or_default();
     let db_path = crate::store::db_path_for_account(&uin);
@@ -1085,19 +1127,6 @@ mod tests {
         assert_eq!(&raw[raw.len() - 5..], &[0x02, 0x03, 0x01, 0x00, 0x01]);
     }
 
-    #[test]
-    fn generate_sync_v2_ed25519_public_key_produces_33_byte_djb_curve_key() {
-        use base64::Engine;
-        let ik = generate_sync_v2_ed25519_public_key(0xA1);
-        let ek = generate_sync_v2_ed25519_public_key(0xB2);
-        assert_ne!(ik, ek);
-        assert!(ik.starts_with("B"), "DJB 0x05 prefix must base64-encode to 'B': {ik}");
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(&ik)
-            .expect("valid base64");
-        assert_eq!(raw.len(), 33);
-        assert_eq!(raw[0], 0x05);
-    }
 
     #[test]
     fn extract_mobile_sync_controls_parses_v1_and_v2_events() {
@@ -1142,5 +1171,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn decompress_sync_payload_detects_zlib_gzip_and_raw() {
+        use std::io::Write;
+        let raw = b"hello sync";
+        // zlib
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(raw).unwrap();
+        let zlib_bytes = enc.finish().unwrap();
+        assert_eq!(decompress_sync_payload(&zlib_bytes), raw);
+        // gzip
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(raw).unwrap();
+        let gzip_bytes = enc.finish().unwrap();
+        assert_eq!(decompress_sync_payload(&gzip_bytes), raw);
+        // raw passthrough
+        assert_eq!(decompress_sync_payload(raw), raw);
+        // zstd (encode bằng crate zstd đã có)
+        let zstd_bytes = zstd::encode_all(std::io::Cursor::new(raw), 1).unwrap();
+        assert_eq!(decompress_sync_payload(&zstd_bytes), raw);
+    }
+
+    #[test]
+    fn sync_v2_session_registry_gates_batches() {
+        assert!(!has_sync_v2_session("nope-sync"));
+        record_sync_v2_session("sync-1", "sess-aaa");
+        assert!(has_sync_v2_session("sync-1"));
+        assert!(!has_sync_v2_session("sync-2"));
+        // Ghi đè cùng sync_id không trùng lặp.
+        record_sync_v2_session("sync-1", "sess-bbb");
+        assert!(has_sync_v2_session("sync-1"));
     }
 }

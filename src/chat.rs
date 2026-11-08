@@ -5403,9 +5403,10 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
     {
         return false;
     }
-    // Direct image file extensions anywhere
+    // Direct image file extensions anywhere (kể cả jxl/heic/avif Zalo dùng, #118)
     if [
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".ico", ".jfif", ".tiff",
+        ".jxl", ".heic", ".heif", ".avif", ".svg",
     ]
     .iter()
     .any(|ext| path_part.ends_with(ext))
@@ -5418,6 +5419,7 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
         || u.contains("photo-aka")
         || u.contains("photo-link-talk")
         || u.contains("res-zalo")
+        || u.contains("zpsocial")
         || ((u.contains("zdn.vn") || u.contains("zadn.vn"))
             && (path_part.contains("/jpg/")
                 || path_part.contains("/png/")
@@ -5425,6 +5427,7 @@ pub fn is_zalo_photo_cdn_url(url: &str) -> bool {
                 || path_part.contains("/gif/")
                 || path_part.contains("/gr/")
                 || path_part.contains("/no/")
+                || path_part.contains("/jxl/")
                 || u.contains("zpcloud")
                 || u.contains("zpg-r")
                 || u.contains("zfcloud")))
@@ -5557,11 +5560,13 @@ fn extract_link_info(
             (None, None, None, None, None)
         }
         Value::Object(o) => {
-            let href = o
-                .get("href")
-                .and_then(Value::as_str)
+            // href là chính, nhưng nhiều payload ảnh chỉ có normalUrl/hdUrl/oriUrl/url
+            // hoặc mỗi thumb (#118) — fallback theo thứ tự để không mất URL.
+            let href = ["href", "normalUrl", "hdUrl", "oriUrl", "url", "thumb", "hd"]
+                .iter()
+                .filter_map(|k| o.get(*k).and_then(Value::as_str))
                 .map(str::trim)
-                .filter(|h| {
+                .find(|h| {
                     !h.is_empty() && (h.starts_with("http://") || h.starts_with("https://"))
                 })
                 .map(str::to_string);
@@ -8990,6 +8995,15 @@ mod send_identity_tests {
             "https://example.com/banner.webp?w=500"
         ));
         assert!(is_zalo_photo_cdn_url("local:///Users/mac/test.png"));
+        // #118: định dạng/host mới Zalo dùng
+        assert!(is_zalo_photo_cdn_url(
+            "https://zpsocial2-f9-org.zadn.vn/abc123.jxl"
+        ));
+        assert!(is_zalo_photo_cdn_url("https://example.com/photo.heic"));
+        assert!(is_zalo_photo_cdn_url("https://example.com/photo.avif"));
+        assert!(is_zalo_photo_cdn_url(
+            "https://f16-zpcloud.zdn.vn/123/jxl/abc"
+        ));
 
         // Non-images
         assert!(!is_zalo_photo_cdn_url(

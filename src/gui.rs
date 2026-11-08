@@ -1103,6 +1103,9 @@ impl ZaloGuiApp {
                         format!("Đã quét bởi {name} — Vui lòng bấm 'Đăng nhập' trên điện thoại…");
                 }
                 GuiEvent::LoginSuccess { name, uin, avatar } => {
+                    // Refresh (đã login) thì merge, KHÔNG clear — clear + nạp lại sẽ
+                    // khiến nhánh brand-new đếm toàn bộ history thành unread (#119).
+                    let is_refresh = self.is_logged_in;
                     self.is_logged_in = true;
                     self.pending_add_account_uin = None;
                     self.user_name = name;
@@ -1110,11 +1113,13 @@ impl ZaloGuiApp {
                     if avatar.is_some() {
                         self.user_avatar = avatar;
                     }
-                    self.threads.clear();
-                    self.unread_counts.clear();
-                    self.reaction_unread_counts.clear();
-                    self.history_reached_start.clear();
-                    self.selected_thread_index = 0;
+                    if !is_refresh {
+                        self.threads.clear();
+                        self.unread_counts.clear();
+                        self.reaction_unread_counts.clear();
+                        self.history_reached_start.clear();
+                        self.selected_thread_index = 0;
+                    }
                     self.login_in_progress = false;
                     self.composer_sticker_cache.retain(|_, v| !v.is_empty());
                     self.status_msg = "Trực tuyến · Đồng bộ thời gian thực".into();
@@ -1288,13 +1293,29 @@ impl ZaloGuiApp {
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
-                                // Brand-new thread: count incoming (non-own) messages as
-                                // unread exactly like the existing-thread path above.
+                                // Brand-new thread: đếm sau read-point đã lưu (#119).
                                 let is_thread_muted = settings_muted_until.is_some()
                                     || nt.presentation.muted
                                     || nt.unread.is_muted();
-                                let inc_cnt =
-                                    nt.messages.iter().filter(|m| !m.is_outgoing).count();
+                                let seen = nt.unread.last_seen_id.as_deref().unwrap_or("");
+                                let inc_cnt = nt
+                                    .messages
+                                    .iter()
+                                    .filter(|m| {
+                                        if m.is_outgoing {
+                                            return false;
+                                        }
+                                        if seen.is_empty() {
+                                            return true;
+                                        }
+                                        // Tin mới hơn read-point, hoặc id không so được
+                                        // (non-numeric) thì đếm cho chắc.
+                                        matches!(
+                                            crate::unread::compare_ids(&m.id, seen),
+                                            Some(std::cmp::Ordering::Greater) | None
+                                        )
+                                    })
+                                    .count();
                                 if inc_cnt > 0 && (nt.id != active_tid || !is_focused) {
                                     *self.unread_counts.entry(nt.id.clone()).or_insert(0) +=
                                         inc_cnt;

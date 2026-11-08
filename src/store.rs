@@ -31,6 +31,8 @@ pub struct StoredThread {
     pub vanish_duration_sec: i64,
     #[serde(default)]
     pub vanish_started_at_sec: i64,
+    #[serde(default)]
+    pub last_read_msg_id: String,
 }
 
 pub struct MessageStore {
@@ -80,7 +82,8 @@ impl MessageStore {
                 is_group INTEGER,
                 last_ts INTEGER,
                 vanish_duration_sec INTEGER NOT NULL DEFAULT 0,
-                vanish_started_at_sec INTEGER NOT NULL DEFAULT 0
+                vanish_started_at_sec INTEGER NOT NULL DEFAULT 0,
+                last_read_msg_id TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS thread_vanish (
                 thread_id TEXT PRIMARY KEY,
@@ -124,6 +127,12 @@ impl MessageStore {
     if !cols.iter().any(|c| c == "vanish_started_at_sec") {
         let _ = conn.execute(
             "ALTER TABLE threads ADD COLUMN vanish_started_at_sec INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+    }
+    if !cols.iter().any(|c| c == "last_read_msg_id") {
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN last_read_msg_id TEXT NOT NULL DEFAULT ''",
             [],
         );
     }
@@ -248,7 +257,12 @@ impl MessageStore {
                  is_group = excluded.is_group,
                  last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
                  vanish_duration_sec = excluded.vanish_duration_sec,
-                 vanish_started_at_sec = excluded.vanish_started_at_sec",
+                 vanish_started_at_sec = excluded.vanish_started_at_sec,
+                 last_read_msg_id = CASE
+                     WHEN excluded.last_read_msg_id IS NOT NULL AND excluded.last_read_msg_id != ''
+                     THEN excluded.last_read_msg_id
+                     ELSE threads.last_read_msg_id
+                 END",
             params![
                 t.thread_id,
                 t.name,
@@ -259,6 +273,18 @@ impl MessageStore {
             ],
         )?;
         self.upsert_thread_vanish(&t.thread_id, t.vanish_duration_sec, t.vanish_started_at_sec)?;
+        Ok(())
+    }
+
+    /// Lưu read-point (id tin cuối đã đọc) của 1 thread (#119). Upsert an toàn
+    /// kể cả khi thread chưa có row.
+    pub fn set_thread_read(&mut self, thread_id: &str, last_msg_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO threads (thread_id, last_read_msg_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET last_read_msg_id = excluded.last_read_msg_id",
+            params![thread_id, last_msg_id],
+        )?;
         Ok(())
     }
 
@@ -369,7 +395,21 @@ impl MessageStore {
                 cols.iter().any(|c| c == "vanish_duration_sec")
                     && cols.iter().any(|c| c == "vanish_started_at_sec")
             });
-        let sql = if has_vcols {
+        let has_read_col = self
+            .conn
+            .prepare("PRAGMA table_info(threads)")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map([], |r| r.get::<_, String>(1))
+                    .ok()
+                    .map(|rows| rows.flatten().any(|c| c == "last_read_msg_id"))
+            })
+            .unwrap_or(false);
+        let sql = if has_vcols && has_read_col {
+            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, last_read_msg_id
+             FROM threads
+             ORDER BY last_ts DESC"
+        } else if has_vcols {
             "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec
              FROM threads
              ORDER BY last_ts DESC"
@@ -388,6 +428,7 @@ impl MessageStore {
                 last_ts: row.get(3).unwrap_or(0),
                 vanish_duration_sec: row.get(4).unwrap_or(0),
                 vanish_started_at_sec: row.get(5).unwrap_or(0),
+                last_read_msg_id: row.get(6).unwrap_or_default(),
             })
         })?;
         let mut out = Vec::new();
@@ -417,6 +458,10 @@ impl MessageStore {
                 }
                 existing.is_group = existing.is_group || st.is_group;
                 apply_stored_vanish(existing, &st, self);
+                // Khôi phục read-point đã lưu (#119): thread đã đọc không bị đếm lại.
+                if !st.last_read_msg_id.is_empty() {
+                    existing.unread.last_seen_id = Some(st.last_read_msg_id.clone());
+                }
             } else if !st.is_group
                 && st.name.contains("Cloud của tôi")
                 && threads
@@ -440,9 +485,13 @@ impl MessageStore {
                     );
                 }
             } else {
+                let mut unread = crate::unread::UnreadState::default();
+                if !st.last_read_msg_id.is_empty() {
+                    unread.last_seen_id = Some(st.last_read_msg_id.clone());
+                }
                 threads.push(Thread {
                     presentation: Default::default(),
-                    unread: Default::default(),
+                    unread,
                     id: st.thread_id.clone(),
                     name: if st.name.is_empty() {
                         format!("Người dùng {}", st.thread_id)
@@ -804,6 +853,7 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
             last_ts,
             vanish_duration_sec: t.vanish.as_ref().map(|v| v.duration_sec).unwrap_or(0),
             vanish_started_at_sec: t.vanish.as_ref().map(|v| v.started_at_sec).unwrap_or(0),
+            last_read_msg_id: t.unread.last_seen_id.clone().unwrap_or_default(),
         };
         store.upsert_thread(&st)?;
 
@@ -1262,6 +1312,7 @@ fn import_message_table(
         last_ts,
         vanish_duration_sec: 0,
         vanish_started_at_sec: 0,
+        last_read_msg_id: String::new(),
     })?;
 
     dst.conn.execute_batch("BEGIN")?;
@@ -1745,6 +1796,7 @@ mod tests {
                 last_ts: 1793467800000,
                 vanish_duration_sec: 0,
                 vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
             })
             .unwrap();
         for (id, ts) in [("msg-0001", 1793467800), ("msg-0002", 1793467800000)] {
@@ -1883,10 +1935,36 @@ mod tests {
             last_ts,
             vanish_duration_sec: 0,
             vanish_started_at_sec: 0,
+            last_read_msg_id: String::new(),
         };
         store.upsert_thread(&st(300)).unwrap();
         store.upsert_thread(&st(100)).unwrap();
         assert_eq!(store.all_threads().unwrap()[0].last_ts, 300);
+    }
+
+    #[test]
+    fn thread_read_point_roundtrips_and_survives_reupsert() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store.set_thread_read("t1", "msg-100").unwrap();
+        let got = store.all_threads().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].last_read_msg_id, "msg-100");
+        // Upsert thread không mang read-point thì giữ cũ, không xóa.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "A".into(),
+                is_group: false,
+                last_ts: 1,
+                vanish_duration_sec: 0,
+                vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-100");
+        // Đọc tiếp thì cập nhật.
+        store.set_thread_read("t1", "msg-200").unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
     }
 
     #[test]
@@ -1958,6 +2036,7 @@ mod tests {
                 last_ts: 500,
                 vanish_duration_sec: 0,
                 vanish_started_at_sec: 0,
+                last_read_msg_id: String::new(),
             })
             .unwrap();
         store
@@ -2002,6 +2081,7 @@ mod tests {
                     last_ts: 999,
                     vanish_duration_sec: 0,
                     vanish_started_at_sec: 0,
+                    last_read_msg_id: String::new(),
                 })
                 .unwrap();
             src_store

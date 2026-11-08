@@ -1961,11 +1961,13 @@ pub(super) fn render_message_body(
         }
     }
 
-    // 5. Clean Domain line (`docs.google.com`, `drive.google.com`, `tiktok.com`)
+    // 5. URL rút gọn click được + domain (#111: trước đây chỉ hiện domain,
+    //    user không thấy/không copy được link gốc).
     ui.add_space(2.5);
+    let url_line = format!("{} · {}", clean_display_url(&url, 60), domain);
     let dom_resp = ui
         .add(
-            egui::Label::new(RichText::new(&domain).size(12.6).color(link_col))
+            egui::Label::new(RichText::new(&url_line).size(12.6).color(link_col))
                 .sense(Sense::click()),
         )
         .on_hover_cursor(CursorIcon::PointingHand)
@@ -1973,6 +1975,12 @@ pub(super) fn render_message_body(
     if dom_resp.clicked() {
         let _ = open_external_url(&url);
     }
+    dom_resp.context_menu(|ui| {
+        if ui.button("📋 Sao chép liên kết").clicked() {
+            ui.ctx().copy_text(url.clone());
+            ui.close_menu();
+        }
+    });
 
     body_action
 }
@@ -2488,6 +2496,15 @@ pub(super) fn photo_primary_url(msg: &ChatMessage) -> Option<&str> {
 pub(super) fn is_zalo_photo_message(msg: &ChatMessage) -> bool {
     if is_sticker_message(msg).is_some() || is_zalo_file_or_video_message(msg) {
         return false;
+    }
+    // msgType photo là authoritative (#118): server đã bảo đây là ảnh thì render
+    // ảnh, kể cả khi link_url lạ/không thuộc allowlist CDN (host mới, renewmedia).
+    let trimmed = msg.text.trim();
+    if msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+        || trimmed == "[Hình ảnh]"
+        || trimmed.starts_with("[Hình ảnh] ")
+    {
+        return true;
     }
     // If link_url points to a non-image webpage (e.g. YouTube, Google Docs, News), it is a rich link card, not a photo message.
     if let Some(ref lu) = msg.link_url {

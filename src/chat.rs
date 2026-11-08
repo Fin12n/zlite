@@ -2513,6 +2513,7 @@ pub async fn send_voice_message(
         .await
         .map_err(|e| anyhow::anyhow!("tải lên tin nhắn thoại thất bại: {e}"))?;
     let send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
+    eprintln!("[voice] upload {} ({} bytes, {}) resp: {}", file_name, voice_bytes.len(), mime, send_resp);
     let cm = parse_voice_send_response(&send_resp, client_id, duration_secs)?;
     Ok((send_resp, cm))
 }

@@ -1120,6 +1120,28 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Lưu ngay mọi ghi chú nhóm đang treo debounce (không chờ đủ ~1s).
+    /// Gọi khi đổi nhóm / nhận merge / đóng drawer, để không mất chữ đã gõ.
+    /// Chạy đồng bộ trên UI thread: 1 UPDATE SQLite nhỏ, rẻ như autosave.
+    fn flush_group_note_pending(&mut self) {
+        if self.group_note_edited_at.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = self.group_note_edited_at.keys().cloned().collect();
+        for tid in ids {
+            let draft = self.group_note_drafts.get(&tid).cloned().unwrap_or_default();
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            if let Ok(mut st) = crate::store::MessageStore::open(&db) {
+                if st.set_group_note(&tid, &draft, chrono::Local::now().timestamp()).is_ok() {
+                    let saved_at =
+                        crate::clock::message_time(chrono::Local::now().timestamp_millis());
+                    self.group_note_saved_label.insert(tid.clone(), format!("Đã lưu {saved_at}"));
+                    self.group_note_edited_at.remove(&tid);
+                }
+            }
+        }
+    }
+
     fn check_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -1165,6 +1187,9 @@ impl ZaloGuiApp {
                 GuiEvent::ThreadsUpdated(updates) => {
                     ensure_cjk_font(ctx, thread_texts(&updates));
                     if self.is_logged_in && !updates.is_empty() {
+                        // Group Workspace: flush ghi chú đang treo (debounce) trước khi merge —
+                        // đổi nhóm nhanh (drawer chưa mở/đóng) không mất chữ đã gõ.
+                        self.flush_group_note_pending();
                         let prev_selected = self.threads.get(self.selected_thread_index).cloned();
                         let live_ids: HashSet<String> = self
                             .threads
@@ -1186,7 +1211,9 @@ impl ZaloGuiApp {
                         let is_focused = ctx.input(|i| i.focused);
                         let mut new_incoming_alert = false;
                         let mut chat_banners: Vec<(String, String)> = Vec::new();
-
+                        // Group Workspace: toast khớp keyword gom ở đây để bắn sau merge
+                        // (tránh borrow `existing` + `self` cùng lúc trong vòng lặp).
+                        let mut watch_toasts: Vec<String> = Vec::new();
                         let now_ts = crate::login::unix_now() as i64;
                         for mut nt in updates {
                             let settings_muted_until = self
@@ -1333,14 +1360,12 @@ impl ZaloGuiApp {
                                                     &fresh,
                                                 );
                                             for h in hits {
-                                                self.status_msg = format!(
+                                                watch_toasts.push(format!(
                                                     "🔔 [{}] {}: {}",
                                                     h.keyword, h.sender, h.preview
-                                                );
-                                                let badge_key = format!(
-                                                    "watch:{}",
-                                                    existing.id
-                                                );
+                                                ));
+                                                let badge_key =
+                                                    format!("watch:{}", existing.id);
                                                 *self
                                                     .unread_counts
                                                     .entry(badge_key)
@@ -1421,7 +1446,10 @@ impl ZaloGuiApp {
                                 self.threads.push(nt);
                             }
                         }
-
+                        // Group Workspace: bắn toast khớp keyword sau merge (ưu tiên, sau cùng thắng).
+                        for toast in watch_toasts {
+                            self.show_toast(toast);
+                        }
                         if new_incoming_alert && self.settings.enable_notifications {
                             if self.settings.play_notification_sound {
                                 crate::media::play_notification_chime();
@@ -1441,7 +1469,6 @@ impl ZaloGuiApp {
                             }
                         }
                         crate::chat::deduplicate_threads(&mut self.threads, Some(&live_ids));
-
                         // Restore selected thread by exact `id` first so contacts sharing the
                         // same Zalo display name never jump to each other's chat window (#63).
                         if let Some(prev) = prev_selected {
@@ -1484,6 +1511,16 @@ impl ZaloGuiApp {
                     self.threads.clear();
                     self.selected_thread_index = 0;
                     self.status_msg = "Đã xoá dữ liệu tin nhắn cục bộ (session giữ nguyên)".into();
+                    // Group Workspace cache theo DB cũ → xoá cùng.
+                    self.group_note_drafts.clear();
+                    self.group_note_loaded.clear();
+                    self.group_note_edited_at.clear();
+                    self.group_note_saved_label.clear();
+                    self.group_watch_inputs.clear();
+                    self.group_watch_cache.clear();
+                    self.group_stats_cache.clear();
+                    self.group_summary_pending = None;
+                    self.group_jump_pending = None;
                 }
                 GuiEvent::LoggedOut => {
                     self.is_logged_in = false;
@@ -1494,6 +1531,16 @@ impl ZaloGuiApp {
                     self.qr_texture = None;
                     self.qr_status = "Đang xin mã QR mới…".into();
                     self.status_msg = "Đã đăng xuất".into();
+                    // Đăng xuất → cache nhóm không còn giá trị.
+                    self.group_note_drafts.clear();
+                    self.group_note_loaded.clear();
+                    self.group_note_edited_at.clear();
+                    self.group_note_saved_label.clear();
+                    self.group_watch_inputs.clear();
+                    self.group_watch_cache.clear();
+                    self.group_stats_cache.clear();
+                    self.group_summary_pending = None;
+                    self.group_jump_pending = None;
                 }
                 GuiEvent::AccountSwitched {
                     uin,
@@ -1511,6 +1558,16 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Đã chuyển sang tài khoản {name}");
                     self.show_toast(format!("Đã chuyển sang tài khoản {name}"));
                     self.history_reached_start.clear();
+                    // Group Workspace cache theo tài khoản cũ → xoá để nạp lại từ DB mới.
+                    self.group_note_drafts.clear();
+                    self.group_note_loaded.clear();
+                    self.group_note_edited_at.clear();
+                    self.group_note_saved_label.clear();
+                    self.group_watch_inputs.clear();
+                    self.group_watch_cache.clear();
+                    self.group_stats_cache.clear();
+                    self.group_summary_pending = None;
+                    self.group_jump_pending = None;
                 }
                 GuiEvent::MessageSent {
                     client_message_id,

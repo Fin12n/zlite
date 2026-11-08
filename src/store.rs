@@ -293,6 +293,15 @@ impl MessageStore {
             "DELETE FROM threads WHERE thread_id = ?1",
             params![thread_id],
         )?;
+        // Group Workspace: thread mất thì ghi chú + từ khóa theo dõi cũng mất.
+        let _ = self.conn.execute(
+            "DELETE FROM group_notes WHERE thread_id = ?1",
+            params![thread_id],
+        );
+        let _ = self.conn.execute(
+            "DELETE FROM group_watch WHERE thread_id = ?1",
+            params![thread_id],
+        );
         Ok(())
     }
 

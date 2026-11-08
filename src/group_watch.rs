@@ -53,13 +53,22 @@ pub fn match_new_messages(
     if lowered.is_empty() {
         return Vec::new();
     }
+    match_keywords(&lowered, fresh)
+}
+
+/// So khớp thuần (không chạm DB): `keywords` là (gốc, thường hoá), `fresh` là tin mới.
+/// Tách riêng để test hermetic, không đụng CWD/HOME toàn cục.
+pub fn match_keywords(
+    keywords: &[(String, String)],
+    fresh: &[&ChatMessage],
+) -> Vec<WatchHit> {
     let mut hits = Vec::new();
     for m in fresh {
         let hay = m.text.to_lowercase();
         if hay.is_empty() {
             continue;
         }
-        for (kw, needle) in &lowered {
+        for (kw, needle) in keywords {
             if hay.contains(needle) {
                 hits.push(WatchHit {
                     keyword: kw.clone(),
@@ -96,5 +105,22 @@ mod tests {
         let m = msg("m1", "An", "báo cáo");
         assert!(match_new_messages("u", "", &[&m]).is_empty());
         assert!(match_new_messages("u", "g1", &[]).is_empty());
+    }
+
+    #[test]
+    fn keyword_match_is_case_insensitive_and_reports_preview() {
+        // Hermetic: gọi thẳng matcher thuần, không chạm DB/CWD/HOME.
+        let kws = vec![("Báo Cáo".to_string(), "báo cáo".to_string())];
+        let hit = msg("m1", "An", "gửi BÁO CÁO quý 3 nhé, file dài hơn 96 ký tự để kiểm tra cắt ngắn preview cho toast hiển thị gọn gàng hơn nữa");
+        let miss = msg("m2", "Bình", "ok nhé");
+        let empty = msg("m3", "An", "   ");
+        let hits = match_keywords(&kws, &[&hit, &miss, &empty]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].keyword, "Báo Cáo");
+        assert_eq!(hits[0].msg_id, "m1");
+        assert_eq!(hits[0].sender, "An");
+        assert!(hits[0].preview.ends_with('…'));
+        assert!(hits[0].preview.chars().count() <= 97);
+        assert!(match_keywords(&[], &[&hit]).is_empty());
     }
 }

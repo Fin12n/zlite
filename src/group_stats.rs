@@ -94,12 +94,19 @@ pub fn compute_group_stats(store: Option<&MessageStore>, thread: Option<&Thread>
         if let Ok(rows) = s.messages_for(&t.id, 100_000) {
             for r in rows {
                 let kind = MessageKind::from_wire_name(&r.msg_type);
+                // raw_json giữ link_src đã persist (ảnh/file/voice) để classify đúng.
+                let link_src: Option<String> = serde_json::from_str::<serde_json::Value>(&r.raw_json)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("link_src")
+                            .and_then(|x| x.as_str())
+                            .map(|x| x.to_string())
+                    });
                 by_id
                     .entry(r.msg_id.clone())
                     .or_insert((r.sender_name.clone(), r.text.clone(), r.ts, ""));
                 let e = by_id.get_mut(&r.msg_id).unwrap();
-                let label = classify(kind, None, &e.1);
-                e.3 = label;
+                e.3 = classify(kind, link_src.as_deref(), &e.1);
             }
         }
     }

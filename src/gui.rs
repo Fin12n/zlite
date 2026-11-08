@@ -129,6 +129,8 @@ pub enum GuiEvent {
         thread_id: String,
         msg_id: String,
         text: String,
+        /// Generation lúc request được gửi; stale completion bị bỏ qua.
+        generation: u64,
     },
     GroupMembersLoaded {
         group_id: String,
@@ -684,6 +686,10 @@ pub struct ZaloGuiApp {
     reaction_unread_counts: HashMap<String, usize>,
     link_metadata_cache: HashMap<String, crate::chat::LinkMetadata>,
     loading_link_previews: HashSet<String>,
+    /// Tin đang chờ dịch (translate_request_key) → disable menu Dịch.
+    translate_pending: HashSet<String>,
+    /// Generation mới nhất của mỗi request dịch → bỏ stale completion.
+    translate_generation: HashMap<String, u64>,
     dismissed_link_preview_for: String,
     friend_status_map: HashMap<String, crate::chat::FriendshipStatus>,
     checking_friend_status: HashSet<String>,
@@ -966,6 +972,8 @@ impl ZaloGuiApp {
             reaction_unread_counts: HashMap::new(),
             link_metadata_cache: HashMap::new(),
             loading_link_previews: HashSet::new(),
+            translate_pending: HashSet::new(),
+            translate_generation: HashMap::new(),
             dismissed_link_preview_for: String::new(),
             friend_status_map: HashMap::new(),
             checking_friend_status: HashSet::new(),
@@ -2105,9 +2113,25 @@ impl ZaloGuiApp {
                     thread_id,
                     msg_id,
                     text,
+                    generation,
                 } => {
+                    let key = crate::chat::translate_request_key(&thread_id, &msg_id);
+                    // Bỏ completion cũ (user đã bấm Dịch lại với target khác).
+                    if self.translate_generation.get(&key).copied().unwrap_or(0) != generation {
+                        return;
+                    }
+                    self.translate_generation.remove(&key);
+                    self.translate_pending.remove(&key);
                     if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
-                        if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                        if let Some(m) = t
+                            .messages
+                            .iter_mut()
+                            .find(|m| crate::message_navigation::message_matches_reference(m, &msg_id))
+                        {
+                            // Từ chối kết quả tới sau khi tin đã vanish.
+                            if crate::chat::is_vanished_message(m) {
+                                return;
+                            }
                             m.translation = Some(text);
                         }
                     }

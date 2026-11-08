@@ -527,6 +527,7 @@ pub fn apply_vanish_expiry(msg: &mut ChatMessage) -> bool {
         return false;
     }
     msg.text = VANISH_EXPIRED_TEXT.to_string();
+    msg.translation = None;
     msg.link_url = None;
     msg.link_title = None;
     msg.link_desc = None;
@@ -2536,10 +2537,25 @@ pub async fn send_voice_message(
     };
     Ok((send_resp, cm))
 }
-
-/// Đoán ngôn ngữ nguồn để dịch. Trả None khi text đã là tiếng Việt (có dấu)
-/// hoặc quá ngắn/không có chữ → không cần dịch.
+/// Đoán ngôn ngữ nguồn để dịch (target mặc định vi). Trả None khi text đã
+/// đúng ngôn ngữ đích hoặc quá ngắn/không có chữ → không cần dịch.
 pub fn guess_translate_source(text: &str) -> Option<&'static str> {
+    translate_source_for_target(text, "vi")
+}
+
+/// So sánh mã ngôn ngữ user nhập (case/space-insensitive, rỗng = vi).
+fn lang_is(code: &str, want: &str) -> bool {
+    let t = code.trim();
+    if want == "vi" {
+        return t.is_empty() || t.eq_ignore_ascii_case("vi");
+    }
+    t.eq_ignore_ascii_case(want)
+}
+
+/// Đoán ngôn ngữ nguồn cho target cụ thể. "Tự động" vẫn là heuristic chữ
+/// viết — MyMemory autodetect không đáng tin (fr→vi cho ra EN) nên Latin
+/// ngoài en (es/fr/…) cần user chọn nguồn thủ công ở menu Dịch.
+pub fn translate_source_for_target(text: &str, target: &str) -> Option<&'static str> {
     let mut latin = 0u32;
     let mut vi_mark = 0u32;
     let mut cjk = 0u32;
@@ -2548,14 +2564,19 @@ pub fn guess_translate_source(text: &str) -> Option<&'static str> {
     let mut cyrillic = 0u32;
     for ch in text.chars() {
         match ch {
-            // Dấu tiếng Việt đặc trưng (đ, ă, â, ê, ô, ơ, ư + nguyên âm dấu).
+            // Dấu tiếng Việt (đ, ă, â, ê, ô, ơ, ư + nguyên âm dấu, cả HOA).
             'đ' | 'Đ' | 'ă' | 'Ă' | 'â' | 'Â' | 'ê' | 'Ê' | 'ô' | 'Ô' | 'ơ' | 'Ơ'
             | 'ư' | 'Ư' | 'á' | 'à' | 'ả' | 'ã' | 'ạ' | 'ắ' | 'ằ' | 'ẳ' | 'ẵ' | 'ặ'
             | 'ấ' | 'ầ' | 'ẩ' | 'ẫ' | 'ậ' | 'é' | 'è' | 'ẻ' | 'ẽ' | 'ẹ' | 'ế' | 'ề'
             | 'ể' | 'ễ' | 'ệ' | 'í' | 'ì' | 'ỉ' | 'ĩ' | 'ị' | 'ó' | 'ò' | 'ỏ' | 'õ'
             | 'ọ' | 'ố' | 'ồ' | 'ổ' | 'ỗ' | 'ộ' | 'ớ' | 'ờ' | 'ở' | 'ỡ' | 'ợ'
             | 'ú' | 'ù' | 'ủ' | 'ũ' | 'ụ' | 'ứ' | 'ừ' | 'ử' | 'ữ' | 'ự'
-            | 'ý' | 'ỳ' | 'ỷ' | 'ỹ' | 'ỵ' => vi_mark += 1,
+            | 'ý' | 'ỳ' | 'ỷ' | 'ỹ' | 'ỵ' | 'Á' | 'À' | 'Ả' | 'Ã' | 'Ạ' | 'Ắ'
+            | 'Ằ' | 'Ẳ' | 'Ẵ' | 'Ặ' | 'Ấ' | 'Ầ' | 'Ẩ' | 'Ẫ' | 'Ậ' | 'É' | 'È'
+            | 'Ẻ' | 'Ẽ' | 'Ẹ' | 'Ế' | 'Ề' | 'Ể' | 'Ễ' | 'Ệ' | 'Í' | 'Ì' | 'Ỉ'
+            | 'Ĩ' | 'Ị' | 'Ó' | 'Ò' | 'Ỏ' | 'Õ' | 'Ọ' | 'Ố' | 'Ồ' | 'Ổ' | 'Ỗ'
+            | 'Ộ' | 'Ớ' | 'Ờ' | 'Ở' | 'Ỡ' | 'Ợ' | 'Ú' | 'Ù' | 'Ủ' | 'Ũ' | 'Ụ'
+            | 'Ứ' | 'Ừ' | 'Ử' | 'Ữ' | 'Ự' | 'Ý' | 'Ỳ' | 'Ỷ' | 'Ỹ' | 'Ỵ' => vi_mark += 1,
             'a'..='z' | 'A'..='Z' => latin += 1,
             '\u{3040}'..='\u{30ff}' => kana += 1,
             '\u{4e00}'..='\u{9fff}' => cjk += 1,
@@ -2564,26 +2585,111 @@ pub fn guess_translate_source(text: &str) -> Option<&'static str> {
             _ => {}
         }
     }
-    if vi_mark > 0 {
-        return None; // Đã là tiếng Việt.
+    // Dấu lẻ tẻ kiểu "café" chưa đủ kết luận là Việt: cần ≥2 dấu, hoặc
+    // đúng 1 dấu mà chữ Latin rất ngắn; còn lại coi như Latin → dịch tiếp.
+    let is_vietnamese = vi_mark >= 2 || (vi_mark == 1 && latin <= 3);
+    if is_vietnamese {
+        if lang_is(target, "vi") {
+            return None; // Đã đúng ngôn ngữ đích.
+        }
+        return Some("vi");
     }
     // Ưu tiên script phi-Latin (rõ ràng nhất).
     if kana > 0 {
-        return Some("ja");
+        return if lang_is(target, "ja") { None } else { Some("ja") };
     }
     if hangul > 0 {
-        return Some("ko");
+        return if lang_is(target, "ko") { None } else { Some("ko") };
     }
     if cyrillic > cjk && cyrillic > latin {
-        return Some("ru");
+        return if lang_is(target, "ru") { None } else { Some("ru") };
     }
     if cjk > 0 {
-        return Some("zh");
+        return if lang_is(target, "zh") { None } else { Some("zh") };
     }
     if latin >= 3 {
-        return Some("en");
+        return if lang_is(target, "en") { None } else { Some("en") };
     }
     None
+}
+/// Key ổn định cho 1 request dịch (thread + msg id).
+pub fn translate_request_key(thread_id: &str, msg_id: &str) -> String {
+    format!("{thread_id}\u{1f}{msg_id}")
+}
+
+
+/// Lỗi dịch đã phân loại để GUI toast thân thiện.
+#[derive(Debug, PartialEq)]
+pub enum TranslateError {
+    Quota,
+    Empty,
+    Rejected(String),
+}
+
+impl std::fmt::Display for TranslateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Quota => write!(f, "Hết quota dịch miễn phí trong ngày, thử lại mai"),
+            Self::Empty => write!(f, "Không dịch được (server trả rỗng)"),
+            Self::Rejected(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// Parse JSON MyMemory thuần (không mạng) để test offline được.
+/// Chấp nhận responseStatus số hoặc chuỗi; 403 + diagnostic trong
+/// translatedText (vd "PLEASE SELECT TWO DISTINCT LANGUAGES",
+/// "INVALID EMAIL") phải bị từ chối, không hiện như bản dịch.
+pub fn parse_mymemory_response(resp: &Value, sent: &str) -> Result<String, TranslateError> {
+    // Quota trước: 429 bản thân đã là status lỗi, không lẫn với Rejected.
+    let quota_out = resp
+        .get("quotaFinished")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let status_429 = matches!(
+        resp.get("responseStatus"),
+        Some(Value::String(s)) if s.trim() == "429"
+    ) || matches!(resp.get("responseStatus"), Some(Value::Number(n)) if n.as_i64() == Some(429));
+    if quota_out || status_429 {
+        return Err(TranslateError::Quota);
+    }
+    let status_ok = match resp.get("responseStatus") {
+        Some(Value::Number(n)) => n.as_i64() == Some(200),
+        Some(Value::String(s)) => s.trim() == "200",
+        _ => false,
+    };
+    if !status_ok {
+        let detail = resp
+            .get("responseDetails")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if detail.is_empty() {
+            return Err(TranslateError::Rejected("Dịch thất bại (mã lỗi không rõ)".into()));
+        }
+        return Err(TranslateError::Rejected(format!("Dịch thất bại ({detail})")));
+    }
+    let out = resp
+        .get("responseData")
+        .and_then(|d| d.get("translatedText"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // Diagnostic MyMemory nhét vào translatedText dù status 200 (vd khi
+    // langpair trùng nhau "en|en" → "PLEASE SELECT TWO DISTINCT LANGUAGES").
+    let upper = out.to_ascii_uppercase();
+    let is_diagnostic = out.is_empty()
+        || out == sent
+        || upper.contains("PLEASE SELECT TWO DISTINCT LANGUAGES")
+        || upper.contains("INVALID EMAIL")
+        || upper.contains("QUERY LENGTH LIMIT EXCEEDED")
+        || upper.contains("NO QUERY SPECIFIED")
+        || upper.contains("MYMEMORY WARNING");
+    if is_diagnostic {
+        return Err(TranslateError::Empty);
+    }
+    Ok(out)
 }
 
 /// Dịch text qua MyMemory API miễn phí (không key, ~5000 từ/ngày/IP).
@@ -2598,40 +2704,29 @@ pub async fn translate_via_mymemory(
     if text.is_empty() {
         anyhow::bail!("Tin nhắn trống, không có gì để dịch");
     }
-    // MyMemory giới hạn ~500 ký tự/query (q>500 hay 413) → cắt an toàn.
+    // MyMemory giới hạn ~500 ký tự/query (q>500 hay 413) → chỉ dịch 450 ký tự
+    // đầu và đánh dấu "[dịch 1 phần]" để user biết phần còn lại bị bỏ.
+    let truncated = text.chars().count() > 450;
     let short: String = text.chars().take(450).collect();
-    let resp: Value = http
+    let http_resp = http
         .get("https://api.mymemory.translated.net/get")
         .query(&[("q", short.as_str()), ("langpair", &format!("{source}|{target}"))])
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("Không gọi được dịch vụ dịch ({e})"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Dịch vụ dịch lỗi HTTP ({e})"))?;
+    let resp: Value = http_resp
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("Dịch vụ dịch trả về không hợp lệ ({e})"))?;
-    let quota_out = resp
-        .get("quotaFinished")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let status_429 = matches!(
-        resp.get("responseStatus"),
-        Some(Value::String(s)) if s == "429"
-    ) || matches!(resp.get("responseStatus"), Some(Value::Number(n)) if n.as_i64() == Some(429));
-    if quota_out || status_429 {
-        anyhow::bail!("Hết quota dịch miễn phí trong ngày, thử lại mai");
+    let out = parse_mymemory_response(&resp, &short).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if truncated {
+        Ok(format!("{out}\n[dịch 1 phần]"))
+    } else {
+        Ok(out)
     }
-    let out = resp
-        .get("responseData")
-        .and_then(|d| d.get("translatedText"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if out.is_empty() || out == short {
-        anyhow::bail!("Không dịch được (server trả rỗng)");
-    }
-    Ok(out)
 }
 
 
@@ -9359,8 +9454,38 @@ mod send_identity_tests {
         assert_eq!(guess_translate_source("Привет мир"), Some("ru"));
         // Đã Việt / quá ngắn / số → không dịch.
         assert_eq!(guess_translate_source("Xin chào bạn"), None);
+        assert_eq!(guess_translate_source("CHÀO BẠN"), None);
+        assert_eq!(guess_translate_source("XIN CHÀO BẠN"), None);
+        // Dấu lẻ tẻ kiểu "café" chưa đủ kết luận Việt → dịch bình thường.
+        assert_eq!(guess_translate_source("Let's meet at the café"), Some("en"));
         assert_eq!(guess_translate_source("ok"), None);
         assert_eq!(guess_translate_source("12345"), None);
         assert_eq!(guess_translate_source(""), None);
+        // Phân biệt "đã đúng target" vs "quá ngắn": tin Việt + target en vẫn dịch.
+        assert_eq!(translate_source_for_target("Xin chào bạn", "en"), Some("vi"));
+        assert_eq!(translate_source_for_target("Xin chào bạn", "vi"), None);
+        assert_eq!(translate_source_for_target("Hello world", "en"), None);
+        assert_eq!(translate_source_for_target("Hello world", "vi"), Some("en"));
+    }
+
+    #[test]
+    fn parse_mymemory_response_offline() {
+        use serde_json::json;
+        let ok = json!({"responseStatus": 200, "responseData": {"translatedText": "Xin chào"}});
+        assert_eq!(parse_mymemory_response(&ok, "Hello").unwrap(), "Xin chào");
+        let ok_str = json!({"responseStatus": "200", "responseData": {"translatedText": "Xin chào"}});
+        assert_eq!(parse_mymemory_response(&ok_str, "Hello").unwrap(), "Xin chào");
+        let quota = json!({"responseStatus": 200, "quotaFinished": true, "responseData": {"translatedText": "x"}});
+        assert_eq!(parse_mymemory_response(&quota, "Hello").unwrap_err(), TranslateError::Quota);
+        for status in [json!(429), json!("429")] {
+            let r = json!({"responseStatus": status, "responseData": {"translatedText": "x"}});
+            assert_eq!(parse_mymemory_response(&r, "Hello").unwrap_err(), TranslateError::Quota);
+        }
+        let diag = json!({"responseStatus": 200, "responseData": {"translatedText": "PLEASE SELECT TWO DISTINCT LANGUAGES"}});
+        assert_eq!(parse_mymemory_response(&diag, "Hello").unwrap_err(), TranslateError::Empty);
+        let echo = json!({"responseStatus": 200, "responseData": {"translatedText": "Hello"}});
+        assert_eq!(parse_mymemory_response(&echo, "Hello").unwrap_err(), TranslateError::Empty);
+        let bad = json!({"responseStatus": 403, "responseDetails": "INVALID EMAIL", "responseData": {"translatedText": "INVALID EMAIL"}});
+        assert!(matches!(parse_mymemory_response(&bad, "Hello").unwrap_err(), TranslateError::Rejected(_)));
     }
 }

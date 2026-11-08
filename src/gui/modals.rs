@@ -1704,15 +1704,15 @@ impl ZaloGuiApp {
                                                                     .desired_width(60.0)
                                                                     .hint_text("vi"),
                                                             );
-                                                            if resp.changed() {
-                                                                self.settings.translate_target = self
-                                                                    .settings
-                                                                    .translate_target
-                                                                    .trim()
-                                                                    .to_ascii_lowercase();
-                                                                if self.settings.translate_target.is_empty() {
-                                                                    self.settings.translate_target = "vi".into();
-                                                                }
+                                                            // Cho phép xoá rỗng khi đang gõ; chỉ chuẩn hoá
+                                                            // + default "vi" khi rời ô (mất focus).
+                                                            if resp.lost_focus() {
+                                                                let norm = self.settings.translate_target.trim().to_ascii_lowercase();
+                                                                self.settings.translate_target =
+                                                                    if norm.is_empty() { "vi".into() } else { norm };
+                                                                self.settings.save();
+                                                            } else if resp.changed() {
+                                                                // Lưu draft thô (kể cả rỗng) để user gõ tiếp.
                                                                 self.settings.save();
                                                             }
                                                         });

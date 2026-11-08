@@ -124,6 +124,10 @@ pub enum WorkerCmd {
         msg_id: String,
         text: String,
         target_lang: String,
+        /// Nguồn do user chọn ("auto" = heuristic), đi kèm để worker báo đúng.
+        source_lang: String,
+        /// Generation do GUI cấp, tăng mỗi lần bấm Dịch trên cùng tin.
+        generation: u64,
     },
     LookupPhone {
         phone: String,
@@ -2965,33 +2969,60 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             msg_id,
                             text,
                             target_lang,
+                            source_lang,
+                            generation,
                         } => {
                             let session_clone = session.clone();
                             let gui_tx_clone = gui_tx.clone();
                             let ctx_clone = egui_ctx.clone();
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
-                                let Some(source) = crate::chat::guess_translate_source(&text)
-                                else {
-                                    let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
-                                        "Tin nhắn đã là tiếng Việt (hoặc quá ngắn), không cần dịch".into(),
-                                    ));
-                                    ctx_clone.request_repaint();
-                                    return;
+                                let target_norm = target_lang.trim();
+                                let target_norm = if target_norm.is_empty() { "vi" } else { target_norm };
+                                let manual_src = {
+                                    let m = source_lang.trim();
+                                    if m.is_empty() || m.eq_ignore_ascii_case("auto") {
+                                        None
+                                    } else {
+                                        Some(m.to_ascii_lowercase())
+                                    }
                                 };
-                                match crate::chat::translate_via_mymemory(
-                                    &s.http,
-                                    &text,
-                                    source,
-                                    &target_lang,
-                                )
-                                .await
-                                {
+                                // Tách 2 nhánh để tránh Box::leak lifetime: manual dùng
+                                // String sở hữu riêng, auto dùng &'static từ heuristic.
+                                let send_result = if let Some(m) = manual_src {
+                                    if m.eq_ignore_ascii_case(target_norm) {
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                            "Tin nhắn đã đúng ngôn ngữ đích, không cần dịch".into(),
+                                        ));
+                                        ctx_clone.request_repaint();
+                                        return;
+                                    }
+                                    crate::chat::translate_via_mymemory(&s.http, &text, &m, target_norm).await
+                                } else {
+                                    let Some(source) = crate::chat::translate_source_for_target(&text, target_norm)
+                                    else {
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                            "Tin nhắn đã đúng ngôn ngữ đích (hoặc quá ngắn), không cần dịch".into(),
+                                        ));
+                                        ctx_clone.request_repaint();
+                                        return;
+                                    };
+                                    if source.eq_ignore_ascii_case(target_norm) {
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                            "Tin nhắn đã đúng ngôn ngữ đích, không cần dịch".into(),
+                                        ));
+                                        ctx_clone.request_repaint();
+                                        return;
+                                    }
+                                    crate::chat::translate_via_mymemory(&s.http, &text, source, target_norm).await
+                                };
+                                match send_result {
                                     Ok(translated) => {
                                         let _ = gui_tx_clone.send(GuiEvent::MessageTranslated {
                                             thread_id,
                                             msg_id,
                                             text: translated,
+                                            generation,
                                         });
                                     }
                                     Err(e) => {

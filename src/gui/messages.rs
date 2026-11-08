@@ -2608,6 +2608,7 @@ pub(super) fn render_chat_bubble(
     emoji_textures: &HashMap<String, TextureHandle>,
     idx: usize,
     vanish_remain: Option<i64>,
+    pending_translate: bool,
 ) -> Option<BubbleAction> {
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
@@ -2961,6 +2962,7 @@ pub(super) fn render_chat_bubble(
                             emoji_textures,
                             has_interactive_card,
                             "Bạn",
+                            pending_translate,
                         )
                     })
             });
@@ -3117,6 +3119,7 @@ pub(super) fn render_chat_bubble(
                             emoji_textures,
                             has_interactive_card,
                             display_sender,
+                            pending_translate,
                         )
                     })
             })
@@ -3161,6 +3164,7 @@ pub(super) enum BubbleAction {
         msg_id: String,
     },
     Translate,
+    TranslateFrom(&'static str),
 }
 
 fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) -> egui::Response {
@@ -3183,9 +3187,11 @@ pub(super) fn bubble_context_menu(
     _emoji_textures: &HashMap<String, TextureHandle>,
     _has_interactive_card: bool,
     _display_sender: &str,
+    pending_translate: bool,
 ) -> Option<BubbleAction> {
     let ctx_menu_key = Id::new("active_bubble_context_menu");
     let open_time_key = Id::new("bubble_context_menu_open_time");
+    let translate_sub_key = Id::new("bubble_translate_submenu");
     let this_key = format!("{}_{}", msg.id, msg.ts);
 
     let pointer_pos = ui
@@ -3287,13 +3293,57 @@ pub(super) fn bubble_context_menu(
                         ui.ctx().copy_text(msg.text.clone());
                         close_menu = true;
                     }
-                    // 3b. Dịch tin nhắn (qua MyMemory, miễn phí)
-                    if !vanished
-                        && !msg.text.trim().is_empty()
-                        && menu_item(ui, "🌐", "Dịch tin nhắn", pal.text_primary).clicked()
-                    {
-                        action = Some(BubbleAction::Translate);
-                        close_menu = true;
+                    // 3b. Dịch tin nhắn (qua MyMemory). Có bản dịch → "Ẩn bản
+                    // dịch"; đang pending → disable; còn lại chọn nguồn
+                    // ("Tự động" = heuristic; Latin ngoài en nên chọn tay vì
+                    // MyMemory autodetect không đáng tin).
+                    if !vanished && !msg.text.trim().is_empty() {
+                        if msg.translation.is_some() {
+                            if menu_item(ui, "🌐", "Ẩn bản dịch", pal.text_primary).clicked() {
+                                action = Some(BubbleAction::Translate);
+                                close_menu = true;
+                            }
+                        } else if pending_translate {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(
+                                    RichText::new("🌐   Đang dịch…").size(13.0).color(pal.text_muted),
+                                ),
+                            );
+                        } else {
+                            let resp = menu_item(ui, "🌐", "Dịch tin nhắn ▸", pal.text_primary);
+                            if resp.clicked() {
+                                action = Some(BubbleAction::TranslateFrom("auto"));
+                                close_menu = true;
+                            }
+                            // Hover mở dải chọn nguồn ngay dưới (trong cùng menu).
+                            if resp.hovered() {
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(translate_sub_key, true);
+                                });
+                            }
+                            let sub_open: bool = ui
+                                .ctx()
+                                .data(|d| d.get_temp(translate_sub_key).unwrap_or(false));
+                            if sub_open {
+                                for (code, label) in [
+                                    ("auto", "Tự động"),
+                                    ("en", "Tiếng Anh"),
+                                    ("zh", "Tiếng Trung"),
+                                    ("ja", "Tiếng Nhật"),
+                                    ("ko", "Tiếng Hàn"),
+                                    ("fr", "Tiếng Pháp"),
+                                    ("es", "Tây Ban Nha"),
+                                    ("de", "Tiếng Đức"),
+                                    ("ru", "Tiếng Nga"),
+                                ] {
+                                    if menu_item(ui, "·", label, pal.text_primary).clicked() {
+                                        action = Some(BubbleAction::TranslateFrom(code));
+                                        close_menu = true;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     let pin_label = if msg.is_pinned {
@@ -3451,6 +3501,8 @@ pub(super) fn bubble_context_menu(
     if close_menu {
         ui.ctx()
             .data_mut(|d| d.remove::<(String, Pos2, usize)>(ctx_menu_key));
+        ui.ctx()
+            .data_mut(|d| d.remove::<bool>(translate_sub_key));
         ui.ctx().request_repaint();
     }
 
@@ -3933,6 +3985,7 @@ mod quote_navigation_tests {
                                 &HashMap::new(),
                                 0,
                                 None,
+                                false,
                             );
                         });
                     },
@@ -4056,6 +4109,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },
@@ -4087,6 +4141,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },
@@ -4118,6 +4173,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },
@@ -4143,6 +4199,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },
@@ -4189,6 +4246,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },
@@ -4221,6 +4279,7 @@ mod quote_navigation_tests {
                         &HashMap::new(),
                         false,
                         "Tester",
+                        false,
                     );
                 });
             },

@@ -4738,6 +4738,9 @@ impl ZaloGuiApp {
                                                             let ts_ms = crate::clock::normalize_ts_ms(msg.ts);
                                                             v.remaining_ms(ts_ms, vanish_now_ms)
                                                         }),
+                                                        self.translate_pending.contains(
+                                                            &crate::chat::translate_request_key(&thread_id, &msg.id),
+                                                        ),
                                                     ) {
                                                         pending_action = Some((idx, action));
                                                     }
@@ -5037,7 +5040,7 @@ impl ZaloGuiApp {
                                     });
                                 }
                                 BubbleAction::Translate => {
-                                    // Toggle: đã dịch rồi → ẩn bản dịch; chưa → gửi worker.
+                                    // Đã dịch rồi → ẩn bản dịch.
                                     if m.translation.is_some() {
                                         if let Some(t) = self
                                             .threads
@@ -5047,7 +5050,22 @@ impl ZaloGuiApp {
                                                 mm.translation = None;
                                             }
                                         }
+                                    }
+                                }
+                                BubbleAction::TranslateFrom(source) => {
+                                    let key = crate::chat::translate_request_key(&thread_id, &m.id);
+                                    // Guard: đang pending → không gửi trùng.
+                                    if self.translate_pending.contains(&key) {
+                                        self.show_toast("⏳ Đang dịch tin này…");
                                     } else {
+                                        let generation = self
+                                            .translate_generation
+                                            .get(&key)
+                                            .copied()
+                                            .unwrap_or(0)
+                                            .wrapping_add(1);
+                                        self.translate_generation.insert(key.clone(), generation);
+                                        self.translate_pending.insert(key);
                                         self.show_toast("🌐 Đang dịch…");
                                         if let Some(tx) = WORKER_TX.get() {
                                             let _ = tx.send(WorkerCmd::TranslateMessage {
@@ -5058,6 +5076,8 @@ impl ZaloGuiApp {
                                                     .settings
                                                     .translate_target
                                                     .clone(),
+                                                source_lang: source.to_string(),
+                                                generation,
                                             });
                                         }
                                     }

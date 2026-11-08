@@ -1735,7 +1735,7 @@ pub(super) fn render_message_body(
     };
 
     let link_col = if pal.is_dark {
-        Color32::from_rgb(97, 175, 239) // #61AFEF Zalo/Atom clean link blue
+        Color32::from_rgb(102, 166, 255) // #66A6FF Zalo dark link blue
     } else {
         pal.primary
     };
@@ -2705,7 +2705,7 @@ pub(super) fn render_chat_bubble(
     let v_margin = if has_sticker || is_frameless_photo {
         2.0_f32
     } else {
-        8.5_f32
+        10.0_f32
     };
     let total_bubble_w = content_width + h_margin * 2.0;
 
@@ -2742,11 +2742,11 @@ pub(super) fn render_chat_bubble(
                     };
                     Stroke::new(1.2_f32, border_col)
                 } else if !pal.is_dark {
-                    Stroke::new(1.0_f32, Color32::from_rgb(186, 214, 255))
+                    Stroke::new(1.0_f32, Color32::from_rgb(199, 224, 255))
                 } else {
-                    Stroke::new(1.0_f32, Color32::from_rgb(53, 76, 104))
+                    Stroke::NONE
                 };
-                let rounding = Rounding::same(8.0);
+                let rounding = Rounding::same(12.0);
 
                 let mut card_action = None;
                 let mut quote_action = None;
@@ -3341,27 +3341,25 @@ pub(super) fn render_quote_block(
     max_w: f32,
 ) -> Option<BubbleAction> {
     let qt = msg.reply_to_text.as_ref()?;
-    let (text_col, meta_col) = if outgoing {
+    let (_text_col, meta_col) = if outgoing {
         (pal.bubble_out_text, pal.bubble_out_meta)
     } else {
         (pal.bubble_in_text, pal.bubble_in_meta)
     };
-    let bar_col = if outgoing && pal.is_dark {
-        Color32::from_rgb(147, 197, 253)
-    } else {
-        pal.primary
-    };
+    let bar_col = Color32::from_rgb(102, 166, 255); // #66A6FF
     let bg_col = if outgoing && pal.is_dark {
         Color32::from_rgba_unmultiplied(0, 0, 0, 42)
     } else if outgoing {
         Color32::from_rgba_unmultiplied(255, 255, 255, 150)
+    } else if pal.is_dark {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 42)
     } else {
-        text_col.linear_multiply(0.06)
+        Color32::from_rgb(229, 241, 255)
     };
     let inner_col_w = (max_w - 28.0).max(72.0);
     let frame = egui::Frame::none()
         .fill(bg_col)
-        .rounding(Rounding::same(7.0))
+        .rounding(Rounding::same(8.0))
         .inner_margin(Margin::symmetric(8.0, 5.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3672,11 +3670,11 @@ pub(super) fn render_reactions(
             if total > 0 {
                 // One compact pill like Zalo: up to 3 icons + the total. Separate pills per icon
                 // grew wider than a sticker bubble and were clipped at the window edge.
-                let fr_resp = egui::Frame::none()
-                    .fill(pal.bg_elevated)
-                    .stroke(Stroke::new(1.0_f32, pal.border))
-                    .rounding(Rounding::same(11.0))
-                    .inner_margin(Margin::symmetric(6.0, 2.5))
+            let fr_resp = egui::Frame::none()
+                .fill(pal.bg_elevated)
+                .stroke(Stroke::new(1.0_f32, pal.border))
+                .rounding(Rounding::same(17.5))
+                .inner_margin(Margin::symmetric(8.0, 3.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);

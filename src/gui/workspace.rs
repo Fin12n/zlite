@@ -153,7 +153,7 @@ impl ZaloGuiApp {
                         ui.painter().rect_filled(
                             badge_rect,
                             Rounding::same(7.5),
-                            Color32::from_rgb(239, 56, 56),
+                            pal.danger,
                         );
                         ui.painter().rect_stroke(
                             badge_rect,
@@ -527,12 +527,12 @@ impl ZaloGuiApp {
                                 );
                                 ui.painter().rect_filled(
                                     sbox_rect,
-                                    Rounding::same(8.0),
+                                    Rounding::same(16.0),
                                     pal.bg_input,
                                 );
                                 ui.painter().rect_stroke(
                                     sbox_rect,
-                                    Rounding::same(8.0),
+                                    Rounding::same(16.0),
                                     Stroke::new(
                                         1.0_f32,
                                         if has_q {
@@ -1042,23 +1042,10 @@ impl ZaloGuiApp {
                                 Color32::TRANSPARENT
                             };
 
-                            ui.painter().rect_filled(row_rect, Rounding::same(11.0), bg);
-
-                            // Left active indicator bar (`w-1 bg-zalo-500 rounded-r-full`)
-                            if is_selected {
-                                let bar_rect = Rect::from_min_size(
-                                    Pos2::new(row_rect.left() + 1.0, row_rect.top() + 10.0),
-                                    Vec2::new(3.5, 38.0),
-                                );
-                                ui.painter().rect_filled(
-                                    bar_rect,
-                                    Rounding::same(2.0),
-                                    pal.primary,
-                                );
-                            }
+                            ui.painter().rect_filled(row_rect, Rounding::same(6.0), bg);
 
                             // Avatar circle with real user/group image & Cutout Status Dot
-                            let av_radius = if is_narrow_w { 18.0 } else { 20.5 };
+                            let av_radius = if is_narrow_w { 19.0 } else { 22.0 };
                             let avatar_center = if is_narrow_w {
                                 row_rect.center()
                             } else {
@@ -1139,18 +1126,20 @@ impl ZaloGuiApp {
                                     Pos2::new(name_x, row_rect.top() + 12.0),
                                     egui::Align2::LEFT_TOP,
                                     display_name,
-                                    FontId::proportional(13.6),
+                                    FontId::proportional(14.0),
                                     name_color,
                                 );
 
                                 // Pin icon + Timestamp (top-right)
                                 let time_right = row_rect.right() - 9.0;
                                 if !t.time.is_empty() {
+                                    let is_thread_unread = self.unread_counts.get(&t.id).copied().unwrap_or(0) > 0;
+                                    let time_col = if is_thread_unread { pal.primary } else { pal.text_muted };
                                     let tw = ui.fonts(|f| {
                                         f.layout_no_wrap(
                                             t.time.clone(),
-                                            FontId::proportional(11.0),
-                                            pal.text_muted,
+                                            FontId::proportional(11.5),
+                                            time_col,
                                         )
                                         .size()
                                         .x
@@ -1159,8 +1148,8 @@ impl ZaloGuiApp {
                                         Pos2::new(time_right, row_rect.top() + 13.5),
                                         egui::Align2::RIGHT_TOP,
                                         &t.time,
-                                        FontId::proportional(11.0),
-                                        pal.text_muted,
+                                        FontId::proportional(11.5),
+                                        time_col,
                                     );
                                     let mut icon_right = time_right - tw - 9.0;
                                     if is_pinned_cloud {
@@ -1250,7 +1239,7 @@ impl ZaloGuiApp {
                                     Pos2::new(text_left, row_rect.top() + 33.5),
                                     egui::Align2::LEFT_TOP,
                                     snippet,
-                                    FontId::proportional(12.0),
+                                    FontId::proportional(12.5),
                                     if is_typing_in_t {
                                         pal.primary
                                     } else if unread_n > 0 {
@@ -1276,7 +1265,7 @@ impl ZaloGuiApp {
                                     ui.painter().rect_filled(
                                         b_rect,
                                         Rounding::same(8.5),
-                                        pal.danger,
+                                        pal.primary,
                                     );
                                     ui.painter().text(
                                         b_rect.center(),
@@ -4828,9 +4817,10 @@ impl ZaloGuiApp {
                         }
                     }
 
-                    // 4. Bottom Message Composer Bar (Compact Icon Actions + Spacious Input + Padded Send Button)
+                    // 4. Bottom Message Composer Bar — Zalo PC style
                     let composer_frame = egui::Frame::none()
                         .fill(pal.bg_sidebar)
+                        .rounding(Rounding::same(12.0))
                         .inner_margin(Margin::symmetric(14.0, 10.0))
                         .stroke(Stroke::new(1.0_f32, pal.border))
                         .show(ui, |ui| {
@@ -4898,9 +4888,9 @@ impl ZaloGuiApp {
 
                             egui::Frame::none()
                                 .fill(pal.bg_input)
-                                .rounding(Rounding::same(11.0))
+                                .rounding(Rounding::same(8.0))
                                 .stroke(Stroke::new(1.0_f32, pal.border))
-                                .inner_margin(Margin::symmetric(8.0, 5.0))
+                                .inner_margin(Margin::symmetric(10.0, 6.0))
                                 .show(ui, |ui| {
                                     let mut send_clicked = false;
                                     let mut send_selected_sticker: Option<
@@ -5203,7 +5193,7 @@ impl ZaloGuiApp {
                                                 - 16.0)
                                                 .max(50.0);
                                             let hint_str = format!(
-                                                "Nhập tin nhắn tới {}...",
+                                                "Nhập @, tin nhắn tới {}",
                                                 truncate_chars(&thread_name, 18)
                                             );
                                             let resp = if is_multiline {
@@ -5335,7 +5325,7 @@ impl ZaloGuiApp {
                                             };
                                             ui.painter().rect_filled(
                                                 send_rect,
-                                                Rounding::same(8.0),
+                                                Rounding::same(17.0),
                                                 send_bg,
                                             );
                                             if !is_narrow_w {

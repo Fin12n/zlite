@@ -2388,7 +2388,7 @@ impl ZaloGuiApp {
                                                                                 se: 0.0,
                                                                             },
                                                                             Color32::from_rgb(
-                                                                                235, 242, 252,
+                                                                                229, 241, 255,
                                                                             ),
                                                                         );
                                                                         ui.painter().rect_filled(
@@ -2400,7 +2400,7 @@ impl ZaloGuiApp {
                                                                                 se: 8.0,
                                                                             },
                                                                             Color32::from_rgb(
-                                                                                24, 26, 31,
+                                                                                29, 32, 37,
                                                                             ),
                                                                         );
                                                                     } else {
@@ -2409,11 +2409,11 @@ impl ZaloGuiApp {
                                                                             Rounding::same(8.0),
                                                                             if is_dark_val {
                                                                                 Color32::from_rgb(
-                                                                                    24, 26, 31,
+                                                                                    29, 32, 37,
                                                                                 )
                                                                             } else {
                                                                                 Color32::from_rgb(
-                                                                                    235, 242, 252,
+                                                                                    255, 255, 255,
                                                                                 )
                                                                             },
                                                                         );
@@ -2437,7 +2437,7 @@ impl ZaloGuiApp {
                                                                         ),
                                                                         5.5,
                                                                         Color32::from_rgb(
-                                                                            82, 139, 255,
+                                                                            0, 104, 255,
                                                                         ),
                                                                     );
                                                                     let mock_in = Rect::from_min_size(
@@ -2454,7 +2454,7 @@ impl ZaloGuiApp {
                                                                             && mode_key != "light"
                                                                         {
                                                                             Color32::from_rgb(
-                                                                                76, 82, 94,
+                                                                                40, 45, 51,
                                                                             )
                                                                         } else {
                                                                             Color32::WHITE
@@ -2472,7 +2472,7 @@ impl ZaloGuiApp {
                                                                         mock_out,
                                                                         Rounding::same(4.0),
                                                                         Color32::from_rgb(
-                                                                            82, 139, 255,
+                                                                            0, 104, 255,
                                                                         ),
                                                                     );
 

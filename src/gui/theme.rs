@@ -34,61 +34,62 @@ pub(super) struct ThemePalette {
 
 impl ThemePalette {
     pub(super) fn dark() -> Self {
-        // Official Atom One Dark (`one-dark-ui` + `one-dark-syntax`) color system
+        // Zalo PC dark tokens
         Self {
             is_dark: true,
-            bg_app: Color32::from_rgb(24, 26, 31), // #181A1F Activity Bar & Title Bar
-            bg_sidebar: Color32::from_rgb(33, 37, 43), // #21252B Tree-View / Sidebar / Header
-            bg_chat_canvas: Color32::from_rgb(40, 44, 52), // #282C34 Atom One Dark Editor Canvas
-            bg_elevated: Color32::from_rgb(44, 49, 58), // #2C313A Elevated Card / Modal / Popover
-            bg_hover: Color32::from_rgb(50, 56, 66), // #323842 List Hover Surface
-            bg_selected: Color32::from_rgb(58, 63, 75), // #3A3F4B Active Selection Row
-            bg_input: Color32::from_rgb(29, 31, 35), // #1D1F23 Input / Search Well
-            border: Color32::from_rgb(52, 57, 66), // #343942 Subtle Panel Divider
-            text_primary: Color32::from_rgb(215, 218, 224), // #D7DAE0 Bright Foreground
-            text_secondary: Color32::from_rgb(171, 178, 191), // #ABB2BF Atom @mono-1
-            text_muted: Color32::from_rgb(118, 126, 142), // #767E8E Atom @mono-3 (readable muted)
-            primary: Color32::from_rgb(82, 139, 255), // #528BFF Atom UI Accent Blue
-            primary_hover: Color32::from_rgb(97, 175, 239), // #61AFEF Atom @hue-2 Cyan-Blue
-            accent_online: Color32::from_rgb(152, 195, 121), // #98C379 Atom @hue-4 Green
-            danger: Color32::from_rgb(224, 108, 117), // #E06C75 Atom @hue-5 Coral Red
-            warning: Color32::from_rgb(229, 192, 123), // #E5C07B Atom @hue-62 Warm Gold
-            bubble_out_bg: Color32::from_rgb(37, 55, 77), // #25374D Zalo Dark Slate-Navy Outgoing Bubble
-            bubble_out_text: Color32::from_rgb(235, 240, 246), // #EBF0F6
-            bubble_out_meta: Color32::from_rgb(154, 171, 192), // #9AABC0
-            bubble_in_bg: Color32::from_rgb(50, 56, 66),  // #323842 Atom Elevated Incoming Bubble
-            bubble_in_border: Color32::from_rgb(62, 68, 81), // #3E4451 Atom Gutter Border
-            bubble_in_text: Color32::from_rgb(215, 218, 224), // #D7DAE0
-            bubble_in_meta: Color32::from_rgb(142, 150, 165), // #8E96A5
+            bg_app: Color32::from_rgb(34, 38, 43), // #22262B
+            bg_sidebar: Color32::from_rgb(34, 38, 43), // #22262B
+            bg_chat_canvas: Color32::from_rgb(29, 32, 37), // #1D2025
+            bg_elevated: Color32::from_rgb(40, 45, 51), // #282D33
+            bg_hover: Color32::from_rgb(46, 51, 58),
+            bg_selected: Color32::from_rgb(31, 52, 77), // #1F344D selected row
+            bg_input: Color32::from_rgb(40, 45, 51), // #282D33
+            border: Color32::from_rgb(55, 61, 69),
+            text_primary: Color32::from_rgb(230, 233, 238),
+            text_secondary: Color32::from_rgb(170, 178, 190),
+            text_muted: Color32::from_rgb(139, 150, 167), // #8B96A7
+            primary: Color32::from_rgb(51, 132, 255), // #3384FF
+            primary_hover: Color32::from_rgb(102, 166, 255), // #66A6FF
+            accent_online: Color32::from_rgb(55, 179, 97), // #37B361
+            danger: Color32::from_rgb(233, 73, 73), // #E94949
+            warning: Color32::from_rgb(229, 192, 123),
+            bubble_out_bg: Color32::from_rgb(31, 52, 77), // #1F344D
+            bubble_out_text: Color32::from_rgb(235, 240, 246),
+            bubble_out_meta: Color32::from_rgb(154, 171, 192),
+            bubble_in_bg: Color32::from_rgb(40, 45, 51), // #282D33
+            bubble_in_border: Color32::from_rgb(55, 61, 69),
+            bubble_in_text: Color32::from_rgb(230, 233, 238),
+            bubble_in_meta: Color32::from_rgb(139, 150, 167),
         }
     }
 
     pub(super) fn light() -> Self {
+        // Zalo PC light tokens
         Self {
             is_dark: false,
             bg_app: Color32::from_rgb(255, 255, 255), // #FFFFFF
-            bg_sidebar: Color32::from_rgb(255, 255, 255), // #FFFFFF
-            bg_chat_canvas: Color32::from_rgb(235, 240, 247), // Authentic Zalo PC cool blue-gray canvas
-            bg_elevated: Color32::from_rgb(255, 255, 255),    // #FFFFFF
-            bg_hover: Color32::from_rgb(241, 245, 249),       // #F1F5F9
-            bg_selected: Color32::from_rgb(229, 241, 255),    // #E5F1FF Zalo active row
-            bg_input: Color32::from_rgb(248, 250, 252),       // #F8FAFC
-            border: Color32::from_rgb(226, 232, 240),         // #E2E8F0
-            text_primary: Color32::from_rgb(15, 23, 42),      // #0F172A (16.1:1 contrast)
-            text_secondary: Color32::from_rgb(71, 85, 105),   // #475569 (7.2:1 contrast)
-            text_muted: Color32::from_rgb(100, 116, 139),     // #64748B (4.6:1 contrast)
-            primary: Color32::from_rgb(0, 104, 255),          // #0068FF Zalo Blue
-            primary_hover: Color32::from_rgb(37, 99, 235),    // #2563EB
-            accent_online: Color32::from_rgb(5, 150, 105),    // #059669 Emerald
-            danger: Color32::from_rgb(220, 38, 38),           // #DC2626
-            warning: Color32::from_rgb(217, 119, 6),          // #D97706
-            bubble_out_bg: Color32::from_rgb(229, 239, 255), // Zalo Desktop Light Outgoing (#E5EFFF)
-            bubble_out_text: Color32::from_rgb(15, 23, 42),  // Crisp dark text on light blue (14:1)
-            bubble_out_meta: Color32::from_rgb(71, 92, 122),
+            bg_sidebar: Color32::from_rgb(255, 255, 255),
+            bg_chat_canvas: Color32::from_rgb(255, 255, 255),
+            bg_elevated: Color32::from_rgb(255, 255, 255),
+            bg_hover: Color32::from_rgb(241, 242, 244), // #F1F2F4
+            bg_selected: Color32::from_rgb(229, 241, 255), // #E5F1FF
+            bg_input: Color32::from_rgb(255, 255, 255),
+            border: Color32::from_rgb(229, 231, 235), // #E5E7EB
+            text_primary: Color32::from_rgb(8, 27, 58), // #081B3A
+            text_secondary: Color32::from_rgb(90, 105, 129), // #5A6981
+            text_muted: Color32::from_rgb(139, 150, 167), // #8B96A7
+            primary: Color32::from_rgb(0, 104, 255), // #0068FF
+            primary_hover: Color32::from_rgb(0, 88, 220),
+            accent_online: Color32::from_rgb(55, 179, 97), // #37B361
+            danger: Color32::from_rgb(195, 24, 24), // #C31818
+            warning: Color32::from_rgb(217, 119, 6),
+            bubble_out_bg: Color32::from_rgb(229, 241, 255), // #E5F1FF
+            bubble_out_text: Color32::from_rgb(8, 27, 58),
+            bubble_out_meta: Color32::from_rgb(90, 105, 129),
             bubble_in_bg: Color32::WHITE,
-            bubble_in_border: Color32::from_rgb(216, 224, 236),
-            bubble_in_text: Color32::from_rgb(15, 23, 42),
-            bubble_in_meta: Color32::from_rgb(100, 116, 139),
+            bubble_in_border: Color32::from_rgb(229, 231, 235), // #E5E7EB
+            bubble_in_text: Color32::from_rgb(8, 27, 58),
+            bubble_in_meta: Color32::from_rgb(139, 150, 167),
         }
     }
 
@@ -110,7 +111,7 @@ impl ThemePalette {
                 .linear_multiply(if self.is_dark { 0.45 } else { 0.22 });
         visuals.selection.stroke = Stroke::new(1.5_f32, self.primary);
 
-        let r = Rounding::same(8.0);
+        let r = Rounding::same(6.0);
         visuals.widgets.noninteractive.bg_fill = self.bg_app;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
@@ -134,10 +135,13 @@ impl ThemePalette {
         visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
         visuals.widgets.active.rounding = r;
 
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
         style.spacing.button_padding = Vec2::new(10.0, 6.0);
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = 6.0;
+        style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+        style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
         style.visuals = visuals;
         ctx.set_style(style);
     }

@@ -1542,7 +1542,7 @@ impl ZaloGuiApp {
                     let reactions_notify_on = self.settings.enable_notifications;
                     let reactions_sound_on =
                         self.settings.enable_notifications && self.settings.play_notification_sound;
-                    let now_ts_react = crate::login::unix_now() as i64;
+                    let now_ts_react = crate::login::unix_now();
                     for ev in &events {
                         if ev.r_type < 0 || ev.historical {
                             continue;

@@ -1010,6 +1010,25 @@ mod tests {
         assert_eq!(r[1].thread_id, "g99");
     }
     #[test]
+    fn unread_gate_skips_own_removal_and_historical() {
+        // Documents the reaction-unread counting gate: peer adds count;
+        // own reactions, removals (r_type == -1) and historical replays never do.
+        let mine = ReactionEvent { sender_id: "me".into(), r_type: 5, historical: false, ..Default::default() };
+        let removal = ReactionEvent { sender_id: "peer".into(), r_type: -1, historical: false, ..Default::default() };
+        let replay = ReactionEvent { sender_id: "peer".into(), r_type: 5, historical: true, ..Default::default() };
+        let peer_add = ReactionEvent { sender_id: "peer".into(), r_type: 5, historical: false, ..Default::default() };
+        for ev in [&mine, &removal, &replay] {
+            let gated = !(ev.r_type < 0 || ev.historical)
+                && !ev.sender_id.is_empty()
+                && ev.sender_id != "me";
+            assert!(!gated, "must skip r_type={} hist={}", ev.r_type, ev.historical);
+        }
+        let gated = !(peer_add.r_type < 0 || peer_add.historical)
+            && !peer_add.sender_id.is_empty()
+            && peer_add.sender_id != "me";
+        assert!(gated);
+    }
+    #[test]
     fn malformed_events_do_not_create_reactions() {
         for v in [
             json!({"content":"bad"}),

@@ -35,6 +35,10 @@ pub mod updater;
 pub mod scheduler;
 /// Local HTTP REST API, MCP JSON-RPC 2.0 server, and auto-reply rules (#35).
 pub mod api_mcp;
+/// Fire-and-forget OS desktop banners + notification sound for chat events.
+/// Shared backend for chat/message/reaction banners
+/// (DailyNotifier is intentionally NOT used: its payload is hardcoded generic).
+pub mod os_notify;
 
 /// Native notification authorization without delivery.
 pub mod native_notifications;

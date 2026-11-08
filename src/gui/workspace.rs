@@ -1095,7 +1095,25 @@ impl ZaloGuiApp {
                                 ui.painter()
                                     .circle_filled(badge_pos, 4.0, pal.accent_online);
                             }
-                            // Only show text labels when sidebar is expanded
+                            if self.reaction_unread_counts.get(&t.id).copied().unwrap_or(0) > 0
+                            {
+                                let react_dot = Pos2::new(
+                                    avatar_center.x + av_radius * 0.71,
+                                    avatar_center.y - av_radius * 0.71,
+                                );
+                                ui.painter().circle_filled(
+                                    react_dot,
+                                    5.5,
+                                    Color32::from_rgb(236, 72, 153),
+                                );
+                                ui.painter().text(
+                                    react_dot,
+                                    egui::Align2::CENTER_CENTER,
+                                    "\u{2764}",
+                                    FontId::proportional(7.5),
+                                    Color32::WHITE,
+                                );
+                            }
                             if !is_narrow_w {
                                 // Thread Name
                                 let text_left = row_rect.left() + 58.0;
@@ -1268,8 +1286,48 @@ impl ZaloGuiApp {
                                         Color32::WHITE,
                                     );
                                 }
+                                // Separate reaction indicator (Zalo PC style).
+                                // Message badge stays bottom-right; reaction pill sits just
+                                // left of it (or alone) so counts never mix.
+                                let react_n =
+                                    self.reaction_unread_counts.get(&t.id).copied().unwrap_or(0);
+                                if react_n > 0 {
+                                    let react_txt = if react_n > 99 {
+                                        "99+".to_string()
+                                    } else {
+                                        react_n.to_string()
+                                    };
+                                    let rw = if react_n >= 10 { 22.0 } else { 18.0 };
+                                    let msg_bw = if unread_n >= 10 { 22.0 } else { 18.0 };
+                                    let x_off = if unread_n > 0 { msg_bw + 6.0 } else { 0.0 };
+                                    let r_rect = Rect::from_min_size(
+                                        Pos2::new(
+                                            row_rect.right() - rw - 8.0 - x_off,
+                                            row_rect.top() + 31.5,
+                                        ),
+                                        Vec2::new(rw, 17.0),
+                                    );
+                                    ui.painter().rect_filled(
+                                        r_rect,
+                                        Rounding::same(8.5),
+                                        Color32::from_rgb(236, 72, 153),
+                                    );
+                                    ui.painter().text(
+                                        r_rect.center() + Vec2::new(-5.0, 0.0),
+                                        egui::Align2::CENTER_CENTER,
+                                        "\u{2764}",
+                                        FontId::proportional(9.0),
+                                        Color32::WHITE,
+                                    );
+                                    ui.painter().text(
+                                        r_rect.center() + Vec2::new(4.5, 0.0),
+                                        egui::Align2::CENTER_CENTER,
+                                        react_txt,
+                                        FontId::proportional(10.2),
+                                        Color32::WHITE,
+                                    );
+                                }
                             }
-
                             let row_resp = row_resp.on_hover_cursor(CursorIcon::PointingHand);
                             let row_resp = if is_narrow_w {
                                 row_resp.on_hover_text(&t.name)
@@ -1286,7 +1344,6 @@ impl ZaloGuiApp {
                             row_resp.context_menu(|ui| {
                                 ui.set_min_width(205.0);
                                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-                                ui.spacing_mut().button_padding = Vec2::new(10.0, 6.5);
 
                                 // 1. Ghim / Bỏ ghim hội thoại
                                 let pin_label = if is_user_pinned {
@@ -1688,6 +1745,7 @@ impl ZaloGuiApp {
                         self.chat_render_window = (tid.clone(), CHAT_RENDER_STEP);
                     }
                     self.selected_thread_index = resolved_idx;
+                    self.reaction_unread_counts.remove(&tid);
                     if self.unread_counts.remove(&tid).is_some() {
                         let total_unread: usize = self.unread_counts.values().sum();
                         let title = if total_unread > 0 {
@@ -1774,7 +1832,7 @@ impl ZaloGuiApp {
                                 self.show_toast("Đã đánh dấu chưa đọc");
                             } else {
                                 self.unread_counts.remove(&tid);
-                                self.show_toast("Đã đánh dấu đã đọc");
+                                self.reaction_unread_counts.remove(&tid);
                             }
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
@@ -1871,6 +1929,7 @@ impl ZaloGuiApp {
                                         self.threads.len().saturating_sub(1);
                                 }
                                 self.unread_counts.remove(&tid);
+                                self.reaction_unread_counts.remove(&tid);
                                 self.settings.pinned_threads.retain(|x| x != &tid);
                                 self.settings.save();
                                 self.persist_threads_async();

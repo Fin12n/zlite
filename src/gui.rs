@@ -40,6 +40,27 @@ fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
     crate::chat::merge_sent_message(thread, message);
 }
 
+/// Display name for a reaction sender inside a thread: group member name when
+/// resolved, the sender id as-is when numeric/unknown, thread name otherwise.
+fn resolve_reactor_name(thread: &Thread, sender_id: &str) -> String {
+    if sender_id.trim().is_empty() {
+        return thread.name.clone();
+    }
+    if let Some(member) = thread
+        .presentation
+        .members
+        .iter()
+        .find(|m| m.id == sender_id && !m.name.trim().is_empty())
+    {
+        return member.name.clone();
+    }
+    // 1-1 threads carry the peer name on the thread itself.
+    if !thread.is_group && !thread.name.trim().is_empty() {
+        return thread.name.clone();
+    }
+    sender_id.to_string()
+}
+
 pub enum GuiEvent {
     /// Terminal response for a Settings authorization action.
     NotificationAuthorization {
@@ -635,6 +656,7 @@ pub struct ZaloGuiApp {
     composer_focus_pending: bool,
     pending_clipboard_image: Option<(std::path::PathBuf, u32, u32, TextureHandle)>,
     unread_counts: HashMap<String, usize>,
+    reaction_unread_counts: HashMap<String, usize>,
     link_metadata_cache: HashMap<String, crate::chat::LinkMetadata>,
     loading_link_previews: HashSet<String>,
     dismissed_link_preview_for: String,
@@ -888,6 +910,7 @@ impl ZaloGuiApp {
             composer_focus_pending: false,
             pending_clipboard_image: None,
             unread_counts: HashMap::new(),
+            reaction_unread_counts: HashMap::new(),
             link_metadata_cache: HashMap::new(),
             loading_link_previews: HashSet::new(),
             dismissed_link_preview_for: String::new(),
@@ -1060,6 +1083,7 @@ impl ZaloGuiApp {
                     }
                     self.threads.clear();
                     self.unread_counts.clear();
+                    self.reaction_unread_counts.clear();
                     self.history_reached_start.clear();
                     self.selected_thread_index = 0;
                     self.login_in_progress = false;
@@ -1093,6 +1117,7 @@ impl ZaloGuiApp {
                             .unwrap_or_default();
                         let is_focused = ctx.input(|i| i.focused);
                         let mut new_incoming_alert = false;
+                        let mut chat_banners: Vec<(String, String)> = Vec::new();
 
                         let now_ts = crate::login::unix_now() as i64;
                         for mut nt in updates {
@@ -1210,14 +1235,15 @@ impl ZaloGuiApp {
                                                     self.incoming_popup =
                                                         Some(IncomingPopupState {
                                                             thread_id: existing.id.clone(),
-                                                            sender_name: sender_label,
-                                                            preview_text: preview_short,
+                                                            sender_name: sender_label.clone(),
+                                                            preview_text: preview_short.clone(),
                                                             avatar_url: avt_url,
                                                             is_group: existing.is_group,
                                                             unread_total: unread_for_thread,
                                                             created_at: std::time::Instant::now(),
                                                             reply_draft: String::new(),
                                                         });
+                                                    chat_banners.push((sender_label, preview_short));
                                                 }
                                             }
                                         }
@@ -1233,6 +1259,49 @@ impl ZaloGuiApp {
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
                             } else if !nt.id.is_empty() && nt.id != "0" {
+                                // Brand-new thread: count incoming (non-own) messages as
+                                // unread exactly like the existing-thread path above.
+                                let is_thread_muted = settings_muted_until.is_some()
+                                    || nt.presentation.muted
+                                    || nt.unread.is_muted();
+                                let inc_cnt =
+                                    nt.messages.iter().filter(|m| !m.is_outgoing).count();
+                                if inc_cnt > 0 && (nt.id != active_tid || !is_focused) {
+                                    *self.unread_counts.entry(nt.id.clone()).or_insert(0) +=
+                                        inc_cnt;
+                                }
+                                if !is_thread_muted
+                                    && inc_cnt > 0
+                                    && (nt.id != active_tid || !is_focused)
+                                {
+                                    new_incoming_alert = true;
+                                    if let Some(latest) = nt
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| !m.is_outgoing)
+                                    {
+                                        let sender = if nt.is_group && !latest.sender.is_empty() {
+                                            format!("{} · {}", latest.sender, nt.name)
+                                        } else {
+                                            nt.name.clone()
+                                        };
+                                        let preview_raw = latest.text.trim();
+                                        let preview_short: String =
+                                            if preview_raw.chars().count() > 96 {
+                                                let s: String = preview_raw
+                                                    .chars()
+                                                    .take(96)
+                                                    .collect();
+                                                format!("{s}…")
+                                            } else if preview_raw.is_empty() {
+                                                "[ Đính kèm / Nhãn dán ]".to_string()
+                                            } else {
+                                                preview_raw.to_string()
+                                            };
+                                        chat_banners.push((sender, preview_short));
+                                    }
+                                }
                                 self.threads.push(nt);
                             }
                         }
@@ -1241,6 +1310,7 @@ impl ZaloGuiApp {
                             if self.settings.play_notification_sound {
                                 crate::media::play_notification_chime();
                             }
+                            crate::os_notify::notify_chat_batch(&chat_banners);
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
                                 format!("({total_unread}) ctdozlite")
@@ -1464,6 +1534,116 @@ impl ZaloGuiApp {
                     );
                     if changed {
                         self.persist_threads_async();
+                    }
+                    // Reaction banners for peer reactions onto MY OWN messages
+                    // (gate: skip own/removal/historical; respect mute + master toggle).
+                    let mut reaction_banners: Vec<(String, String)> = Vec::new();
+                    let my_uid = self.user_uin.clone();
+                    let reactions_notify_on = self.settings.enable_notifications;
+                    let reactions_sound_on =
+                        self.settings.enable_notifications && self.settings.play_notification_sound;
+                    let now_ts_react = crate::login::unix_now() as i64;
+                    for ev in &events {
+                        if ev.r_type < 0 || ev.historical {
+                            continue;
+                        }
+                        if ev.sender_id.is_empty() || ev.sender_id == my_uid {
+                            continue;
+                        }
+                        for t in &self.threads {
+                            let muted = self
+                                .settings
+                                .muted_threads
+                                .get(&t.id)
+                                .copied()
+                                .filter(|&u| u == -1 || u > now_ts_react)
+                                .is_some()
+                                || t.presentation.muted
+                                || t.unread.is_muted();
+                            if muted || !reactions_notify_on {
+                                continue;
+                            }
+                            let hit = t.messages.iter().find(|m| {
+                                (!ev.message_id.is_empty() && m.id == ev.message_id)
+                                    || (!ev.client_message_id.is_empty()
+                                        && m.client_message_id == ev.client_message_id)
+                                    || (ev.ts > 0 && m.ts == ev.ts)
+                            });
+                            let Some(m) = hit else { continue };
+                            if !m.is_outgoing {
+                                continue;
+                            }
+                            let reactor = resolve_reactor_name(t, &ev.sender_id);
+                            let body = crate::os_notify::reaction_banner_body(
+                                &reactor,
+                                &ev.emoji,
+                                &m.text,
+                            );
+                            reaction_banners.push((t.name.clone(), body));
+                            break;
+                        }
+                    }
+                    // Per-thread reaction unread counts (in-memory only; summaries persist).
+                    // Gate mirrors the banner block + focus/active-thread skip.
+                    let active_tid_now = self
+                        .threads
+                        .get(self.selected_thread_index)
+                        .map(|t| t.id.clone())
+                        .unwrap_or_default();
+                    let is_focused_now = ctx.input(|i| i.focused);
+                    let my_uid_count = self.user_uin.clone();
+                    for ev in &events {
+                        if ev.r_type < 0 || ev.historical {
+                            continue;
+                        }
+                        if ev.sender_id.is_empty() || ev.sender_id == my_uid_count {
+                            continue;
+                        }
+                        let mut hit_tid: Option<String> = None;
+                        for t in &self.threads {
+                            let hit = t.messages.iter().find(|m| {
+                                (!ev.message_id.is_empty() && m.id == ev.message_id)
+                                    || (!ev.client_message_id.is_empty()
+                                        && m.client_message_id == ev.client_message_id)
+                                    || (ev.ts > 0 && m.ts == ev.ts)
+                            });
+                            if hit.is_some() && !ev.thread_id.is_empty() {
+                                hit_tid = Some(ev.thread_id.clone());
+                                break;
+                            } else if hit.is_some() {
+                                hit_tid = Some(t.id.clone());
+                                break;
+                            }
+                        }
+                        let Some(tid) = hit_tid else { continue };
+                        let is_muted = self
+                            .settings
+                            .muted_threads
+                            .get(&tid)
+                            .copied()
+                            .filter(|&u| u == -1 || u > now_ts_react)
+                            .is_some()
+                            || self
+                                .threads
+                                .iter()
+                                .find(|t| t.id == tid)
+                                .map(|t| t.presentation.muted || t.unread.is_muted())
+                                .unwrap_or(false);
+                        if is_muted {
+                            continue;
+                        }
+                        if tid == active_tid_now && is_focused_now {
+                            continue;
+                        }
+                        *self.reaction_unread_counts.entry(tid).or_insert(0) += 1;
+                    }
+                    if !reaction_banners.is_empty() && reactions_notify_on {
+                        for (title, body) in &reaction_banners {
+                            crate::os_notify::notify(title, body);
+                        }
+                        if reactions_sound_on {
+                            crate::os_notify::play_notification_sound();
+                        }
                     }
                 }
                 GuiEvent::MessageDeleted {

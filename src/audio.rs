@@ -123,14 +123,157 @@ pub(crate) fn voice_temp_dir(tag: i64) -> Result<std::path::PathBuf> {
 /// resample về 16 kHz → cập nhật `MIC_LEVEL_PERMILLE` cho meter. Encode MP3 bằng
 /// `rusty_mp3` (pure-Rust, không thêm C-FFI); không dùng `ffmpeg` ngoài để khỏi
 /// phụ thuộc máy user.
+/// Đích resample của voice: mọi mic đều về mono 16 kHz trước khi encode.
+const VOICE_TARGET_RATE: u32 = 16_000;
+/// Giữ tối đa 10 phút thu (16 kHz mono).
+const VOICE_MAX_SAMPLES: usize = 16000 * 600;
+
+/// Resampler tuyến tính có nhớ phase, dùng chung cho callback mic (gọi nhiều
+/// lần, mỗi lần một buffer) và cho test thuần.
+struct RecResampler {
+    /// Số frame input cho mỗi mẫu 16 kHz (`in_rate/16000`; < 1 khi upsample).
+    ratio: f64,
+    /// Frame mono input chưa tiêu thụ (đuôi carried qua callbacks).
+    buf: Vec<f32>,
+    /// Vị trí nguồn kế tiếp (tính theo `buf`), giữ phần lẻ qua callbacks.
+    src: f64,
+}
+
+impl RecResampler {
+    fn new(in_rate: u32) -> Self {
+        Self {
+            ratio: in_rate.max(1) as f64 / VOICE_TARGET_RATE as f64,
+            buf: Vec::new(),
+            src: 0.0,
+        }
+    }
+
+    /// Đẩy thêm frame mono input, trả các mẫu 16 kHz hoàn chỉnh.
+    fn push_frames(&mut self, frames: &[f32]) -> Vec<f32> {
+        self.buf.extend_from_slice(frames);
+        let len = self.buf.len();
+        let mut out = Vec::with_capacity((frames.len() as f64 / self.ratio).ceil() as usize + 1);
+        while self.src + 1.0 < len as f64 {
+            let i0 = self.src as usize;
+            let frac = (self.src - i0 as f64) as f32;
+            let a = self.buf[i0];
+            out.push(a + (self.buf[i0 + 1] - a) * frac);
+            self.src += self.ratio;
+        }
+        let consumed = (self.src as usize).min(self.buf.len());
+        self.buf.drain(..consumed);
+        self.src -= consumed as f64;
+        out
+    }
+
+    /// Xả đuôi còn lại khi dừng thu (không mất mẫu cuối).
+    fn flush(&mut self) -> Vec<f32> {
+        let mut out = Vec::new();
+        let len = self.buf.len();
+        while self.src < len as f64 {
+            out.push(self.buf[(self.src as usize).min(len.saturating_sub(1))]);
+            self.src += self.ratio;
+        }
+        self.buf.clear();
+        self.src = 0.0;
+        out
+    }
+}
+
+/// Hàm thuần để test: mono `input` ở `in_rate` → mono 16 kHz.
+#[cfg(test)]
+pub(crate) fn resample_mono_to_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
+    let mut r = RecResampler::new(in_rate);
+    let mut out = r.push_frames(input);
+    out.extend(r.flush());
+    out
+}
+
+/// State chia sẻ giữa `VoiceRecorder` và callback mic (`'static`).
+#[derive(Clone)]
+struct RecIngest {
+    pcm: Arc<Mutex<Vec<f32>>>,
+    resamp: Arc<Mutex<RecResampler>>,
+    stop: Arc<AtomicBool>,
+    last_peak: Arc<Mutex<f32>>,
+}
+
+/// Downmix interleaved `data` (mỗi frame `channels` mẫu) về mono, resample về
+/// 16 kHz, append vào `pcm`, cập nhật meter. `sample` convert 1 mẫu về f32.
+fn ingest_interleaved<S: Copy>(
+    st: &RecIngest,
+    data: &[S],
+    channels: usize,
+    sample: fn(S) -> f32,
+) {
+    if st.stop.load(Ordering::Relaxed) {
+        return;
+    }
+    let ch = channels.max(1);
+    let total_frames = data.len() / ch;
+    if total_frames == 0 {
+        return;
+    }
+    // Downmix về mono trước để resampler chỉ làm việc trên 1 kênh.
+    let mut mono = Vec::with_capacity(total_frames);
+    for f in 0..total_frames {
+        let mut sum = 0.0f32;
+        for c in 0..ch {
+            sum += sample(data[f * ch + c]);
+        }
+        mono.push(sum / ch as f32);
+    }
+    let mut peak = 0.0f32;
+    if let (Ok(mut resamp), Ok(mut pcm)) = (st.resamp.lock(), st.pcm.lock()) {
+        for v in resamp.push_frames(&mono) {
+            let a = v.abs();
+            if a > peak {
+                peak = a;
+            }
+            pcm.push(v);
+        }
+        if pcm.len() > VOICE_MAX_SAMPLES {
+            let drop_n = pcm.len() - VOICE_MAX_SAMPLES;
+            pcm.drain(..drop_n);
+        }
+    }
+    crate::media::set_mic_level_from_peak(peak);
+    if let Ok(mut g) = st.last_peak.lock() {
+        *g = peak;
+    }
+}
+
+/// Xóa meter của recorder, nhưng không đè level của call đang active: chỉ xóa
+/// khi mức hiện tại đúng là mức recorder đã đặt (so sánh sau lượng tử hóa
+/// permille — call active ghi giá trị khác sẽ không khớp nên được giữ nguyên).
+fn clear_recorder_meter(last_peak: &Arc<Mutex<f32>>) {
+    let ours = last_peak
+        .lock()
+        .map(|g| (g.clamp(0.0, 1.0) * 1000.0) as u32)
+        .unwrap_or(u32::MAX);
+    if crate::media::mic_level_permille() == ours {
+        crate::media::set_mic_level_from_peak(0.0);
+    }
+}
 pub struct VoiceRecorder {
     stop: Arc<AtomicBool>,
     // Giữ `Stream` trực tiếp: cpal::Stream không Send nên không spawn thread giữ
     // được — callback mic sống chừng nào struct còn sống (GUI giữ tới lúc gửi/huỷ).
     _stream: Option<cpal::Stream>,
     pcm: Arc<Mutex<Vec<f32>>>,
+    resamp: Arc<Mutex<RecResampler>>,
+    last_peak: Arc<Mutex<f32>>,
     error: Arc<Mutex<Option<String>>>,
     started_at: std::time::Instant,
+}
+
+impl Drop for VoiceRecorder {
+    /// Mọi đường dừng (cancel / stop_and_encode Ok+Err / rớt giữa chừng) đều
+    /// tắt callback và xóa meter của recorder (không đè call đang active).
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        clear_recorder_meter(&self.last_peak);
+    }
 }
 
 impl VoiceRecorder {
@@ -145,61 +288,78 @@ impl VoiceRecorder {
         let in_cfg = input_dev
             .default_input_config()
             .map_err(|e| mic_friendly_error("Không mở được micro", &e.to_string()))?;
-        let in_rate = in_cfg.sample_rate().0.max(8000);
+        let in_rate = in_cfg.sample_rate().0.max(1);
         let in_channels = (in_cfg.channels() as usize).max(1);
+        let sample_format = in_cfg.sample_format();
+        let in_cfg_std: cpal::StreamConfig = in_cfg.into();
         let pcm: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(16000 * 8)));
-        let pcm_in = pcm.clone();
+        let resamp: Arc<Mutex<RecResampler>> =
+            Arc::new(Mutex::new(RecResampler::new(in_rate)));
+        let last_peak: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_cb = stop.clone();
+        let st = RecIngest {
+            pcm: pcm.clone(),
+            resamp: resamp.clone(),
+            stop: stop.clone(),
+            last_peak: last_peak.clone(),
+        };
         let error = Arc::new(Mutex::new(None::<String>));
-        let err_cb = error.clone();
-        let stream = input_dev
-            .build_input_stream(
-                &in_cfg.into(),
-                move |data: &[f32], _| {
-                    if stop_cb.load(Ordering::Relaxed) {
-                        return;
+        // Mỗi nhánh match cần err-callback riêng (closure không Copy).
+        let mk_err = |err_cb: Arc<Mutex<Option<String>>>| {
+            move |e: cpal::StreamError| {
+                if let Ok(mut g) = err_cb.lock() {
+                    if g.is_none() {
+                        *g = Some(
+                            mic_friendly_error("Lỗi micro khi đang thu", &e.to_string()).to_string(),
+                        );
                     }
-                    if let Ok(mut b) = pcm_in.lock() {
-                        // Downmix stereo → mono + resample nearest về 16 kHz (pattern media.rs).
-                        let total_frames = data.len() / in_channels.max(1);
-                        let step = (in_rate as f32 / 16000.0).max(1.0);
-                        let out_frames = (total_frames as f32 / step) as usize;
-                        let mut peak: f32 = 0.0;
-                        for i in 0..out_frames {
-                            let src_idx = ((i as f32 * step) as usize)
-                                .min(total_frames.saturating_sub(1));
-                            let mut sum = 0.0f32;
-                            for ch in 0..in_channels {
-                                sum += data[src_idx * in_channels + ch];
-                            }
-                            let mono = sum / in_channels as f32;
-                            if mono.abs() > peak {
-                                peak = mono.abs();
-                            }
-                            b.push(mono);
-                        }
-                        crate::media::set_mic_level_from_peak(peak);
-                        // Giữ tối đa 10 phút thu.
-                        if b.len() > 16000 * 600 {
-                            let drop_n = b.len() - 16000 * 600;
-                            b.drain(0..drop_n);
-                        }
-                    }
-                },
-                move |e| {
-                    if let Ok(mut g) = err_cb.lock() {
-                        if g.is_none() {
-                            *g = Some(
-                                mic_friendly_error("Lỗi micro khi đang thu", &e.to_string())
-                                    .to_string(),
-                            );
-                        }
-                    }
-                },
-                None,
-            )
-            .map_err(|e| mic_friendly_error("Không mở được micro để thu", &e.to_string()))?;
+                }
+            }
+        };
+        // Build theo đúng sample format thiết bị quảng cáo (mic chỉ nhận
+        // integer sẽ fail nếu ép f32), convert về f32 rồi xử lý chung.
+        let stream = match sample_format {
+            cpal::SampleFormat::F32 => {
+                let st = st.clone();
+                input_dev.build_input_stream(
+                    &in_cfg_std,
+                    move |data: &[f32], _| ingest_interleaved(&st, data, in_channels, |v| v),
+                    mk_err(error.clone()),
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let st = st.clone();
+                input_dev.build_input_stream(
+                    &in_cfg_std,
+                    move |data: &[i16], _| {
+                        ingest_interleaved(&st, data, in_channels, |v| v as f32 / 32768.0)
+                    },
+                    mk_err(error.clone()),
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let st = st.clone();
+                input_dev.build_input_stream(
+                    &in_cfg_std,
+                    move |data: &[u16], _| {
+                        ingest_interleaved(&st, data, in_channels, |v| {
+                            (v as f32 - 32768.0) / 32768.0
+                        })
+                    },
+                    mk_err(error.clone()),
+                    None,
+                )
+            }
+            fmt => {
+                return Err(mic_friendly_error(
+                    "Không mở được micro để thu",
+                    &format!("định dạng mẫu không hỗ trợ ({fmt:?})"),
+                ));
+            }
+        }
+        .map_err(|e| mic_friendly_error("Không mở được micro để thu", &e.to_string()))?;
         stream.play().map_err(|e| {
             anyhow::anyhow!("Không bắt đầu thu được ({e}). Kiểm tra quyền Micro trong System Settings → Privacy & Security → Microphone.")
         })?;
@@ -207,6 +367,8 @@ impl VoiceRecorder {
             stop,
             _stream: Some(stream),
             pcm,
+            resamp,
+            last_peak,
             error,
             started_at: std::time::Instant::now(),
         })
@@ -227,20 +389,24 @@ impl VoiceRecorder {
         self.error.lock().ok().and_then(|mut g| g.take())
     }
 
-    /// Hủy thu, bỏ dữ liệu (nút X).
+    /// Hủy thu, bỏ dữ liệu (nút X). `Drop` xóa meter của recorder.
     pub fn cancel(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         drop(self._stream.take());
-        crate::media::set_mic_level_from_peak(0.0);
     }
 
     /// Dừng thu, encode PCM → M4A/AAC (ffmpeg) hoặc MP3 fallback, ghi vào thư
     /// mục tạm owner-only. Trả `Err` thân thiện khi chưa thu được mẫu nào.
     /// Caller (worker) MUST gọi [`VoiceRecord::cleanup`] sau upload, cả khi lỗi.
+    /// `Drop` xóa meter của recorder trên mọi đường về (Ok lẫn Err).
     pub fn stop_and_encode(mut self) -> Result<VoiceRecord> {
         self.stop.store(true, Ordering::Relaxed);
         // Drop stream: callback mic dừng ngay, không cần join thread.
         drop(self._stream.take());
+        // Xả đuôi resampler (không mất mẫu cuối dở dang giữa callback).
+        if let (Ok(mut resamp), Ok(mut pcm)) = (self.resamp.lock(), self.pcm.lock()) {
+            pcm.extend(resamp.flush());
+        }
         let samples_vec: Vec<f32> = self.pcm.lock().map(|b| b.clone()).unwrap_or_default();
         if samples_vec.is_empty() {
             anyhow::bail!("Chưa thu được âm thanh nào — hãy giữ micro và nói to hơn.");
@@ -508,5 +674,62 @@ mod voice_tests {
     #[test]
     fn encode_rejects_empty_pcm() {
         assert!(encode_mono_mp3_16k(&[]).is_err());
+    }
+
+    fn sine_1s(in_rate: u32, freq: f32) -> Vec<f32> {
+        (0..in_rate)
+            .map(|n| (2.0 * std::f32::consts::PI * freq * n as f32 / in_rate as f32).sin())
+            .collect()
+    }
+
+    /// 8 kHz → 16 kHz phải giữ đúng duration (gấp đôi số mẫu, ±1), không còn
+    /// bug cũ phát nhanh gấp đôi.
+    #[test]
+    fn resample_8k_to_16k_preserves_duration() {
+        let out = resample_mono_to_16k(&sine_1s(8000, 440.0), 8000);
+        assert!(
+            (out.len() as i64 - 16000).abs() <= 1,
+            "8k 1s -> 16k mẫu, got {}",
+            out.len()
+        );
+        // Sine 440 Hz còn nguyên hình (không phải noise/clamp sai): RMS > 0.5.
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms > 0.5, "sine méo sau upsample, rms={rms}");
+    }
+
+    /// 44.1 kHz → 16 kHz đúng số mẫu ±1.
+    #[test]
+    fn resample_441k_to_16k_frame_count() {
+        let out = resample_mono_to_16k(&sine_1s(44100, 440.0), 44100);
+        assert!(
+            (out.len() as i64 - 16000).abs() <= 1,
+            "44.1k 1s -> 16k mẫu, got {}",
+            out.len()
+        );
+    }
+
+    /// Phase accumulator qua callbacks: chia buffer thành từng chunk nhỏ phải
+    /// cho cùng số mẫu (±1) như đẩy một lần — không mất ~0.57s/phút ở 44.1 kHz.
+    #[test]
+    fn resampler_phase_survives_callback_boundaries() {
+        let input = sine_1s(44100, 440.0);
+        let one_shot = resample_mono_to_16k(&input, 44100);
+        let mut r = RecResampler::new(44100);
+        let mut chunked = Vec::new();
+        for chunk in input.chunks(128) {
+            chunked.extend(r.push_frames(chunk));
+        }
+        chunked.extend(r.flush());
+        assert!(
+            (chunked.len() as i64 - one_shot.len() as i64).abs() <= 1,
+            "chunked {} vs one-shot {}",
+            chunked.len(),
+            one_shot.len()
+        );
+        assert!(
+            (chunked.len() as i64 - 16000).abs() <= 2,
+            "44.1k 1s chunked -> 16k mẫu, got {}",
+            chunked.len()
+        );
     }
 }

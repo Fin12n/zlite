@@ -4518,6 +4518,32 @@ impl ZaloGuiApp {
                                         play_voice_attachment(&url, &file_name, &msg_id, &download_dir);
                                     });
                                 }
+                                BubbleAction::Translate => {
+                                    // Toggle: đã dịch rồi → ẩn bản dịch; chưa → gửi worker.
+                                    if m.translation.is_some() {
+                                        if let Some(t) = self
+                                            .threads
+                                            .get_mut(self.selected_thread_index)
+                                        {
+                                            if let Some(mm) = t.messages.get_mut(idx) {
+                                                mm.translation = None;
+                                            }
+                                        }
+                                    } else {
+                                        self.show_toast("🌐 Đang dịch…");
+                                        if let Some(tx) = WORKER_TX.get() {
+                                            let _ = tx.send(WorkerCmd::TranslateMessage {
+                                                thread_id: thread_id.clone(),
+                                                msg_id: m.id.clone(),
+                                                text: m.text.clone(),
+                                                target_lang: self
+                                                    .settings
+                                                    .translate_target
+                                                    .clone(),
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

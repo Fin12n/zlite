@@ -117,6 +117,12 @@ pub enum WorkerCmd {
     ParseLinkPreview {
         url: String,
     },
+    TranslateMessage {
+        thread_id: String,
+        msg_id: String,
+        text: String,
+        target_lang: String,
+    },
     LookupPhone {
         phone: String,
     },
@@ -2950,6 +2956,49 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     let _ = gui_tx_clone.send(GuiEvent::LinkPreviewReady(meta));
                                     ctx_clone.request_repaint();
                                 }
+                            });
+                        }
+                        WorkerCmd::TranslateMessage {
+                            thread_id,
+                            msg_id,
+                            text,
+                            target_lang,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                let Some(source) = crate::chat::guess_translate_source(&text)
+                                else {
+                                    let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                        "Tin nhắn đã là tiếng Việt (hoặc quá ngắn), không cần dịch".into(),
+                                    ));
+                                    ctx_clone.request_repaint();
+                                    return;
+                                };
+                                match crate::chat::translate_via_mymemory(
+                                    &s.http,
+                                    &text,
+                                    source,
+                                    &target_lang,
+                                )
+                                .await
+                                {
+                                    Ok(translated) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::MessageTranslated {
+                                            thread_id,
+                                            msg_id,
+                                            text: translated,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
+                                            "⚠️ Lỗi dịch: {e}"
+                                        )));
+                                    }
+                                }
+                                ctx_clone.request_repaint();
                             });
                         }
                         WorkerCmd::PickAndSendAttachment {

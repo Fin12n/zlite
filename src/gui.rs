@@ -125,6 +125,11 @@ pub enum GuiEvent {
         items: Vec<crate::chat::StickerItem>,
     },
     LinkPreviewReady(crate::chat::LinkMetadata),
+    MessageTranslated {
+        thread_id: String,
+        msg_id: String,
+        text: String,
+    },
     GroupMembersLoaded {
         group_id: String,
         members: Vec<crate::chat::SidebarMember>,
@@ -389,6 +394,8 @@ struct AppSettings {
     autostart_on_boot: bool,
     remember_login: bool,
     download_dir: String,
+    /// Mã ngôn ngữ đích cho dịch tin nhắn (vi/en/zh/ja/ko...). Mặc định vi.
+    translate_target: String,
     // 2. Quyền riêng tư
     show_birthday: String,
     show_online_status: bool,
@@ -460,6 +467,7 @@ impl Default for AppSettings {
             autostart_on_boot: true,
             remember_login: true,
             download_dir: default_dl,
+            translate_target: "vi".into(),
             show_birthday: "Không hiện".into(),
             show_online_status: true,
             show_seen_status: true,
@@ -1976,6 +1984,17 @@ impl ZaloGuiApp {
                     self.link_metadata_cache.insert(meta.url.clone(), meta);
                     if updated_any {
                         self.persist_threads_async();
+                    }
+                }
+                GuiEvent::MessageTranslated {
+                    thread_id,
+                    msg_id,
+                    text,
+                } => {
+                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                        if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                            m.translation = Some(text);
+                        }
                     }
                 }
                 GuiEvent::GroupMembersLoaded { group_id, members } => {

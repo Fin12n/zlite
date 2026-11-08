@@ -2899,6 +2899,7 @@ pub(super) fn render_chat_bubble(
                                     loading_stickers,
                                 );
                             }
+                            render_translation(ui, msg, pal);
                             if let Some(act) = render_reactions(ui, msg, pal, emoji_textures) {
                                 reaction_action = Some(act);
                             }
@@ -3069,6 +3070,7 @@ pub(super) fn render_chat_bubble(
                                     loading_stickers,
                                 );
                             }
+                            render_translation(ui, msg, pal);
                             if let Some(act) = render_reactions(ui, msg, pal, emoji_textures) {
                                 reaction_action = Some(act);
                             }
@@ -3162,6 +3164,7 @@ pub(super) enum BubbleAction {
         file_name: String,
         msg_id: String,
     },
+    Translate,
 }
 
 fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) -> egui::Response {
@@ -3288,8 +3291,15 @@ pub(super) fn bubble_context_menu(
                         ui.ctx().copy_text(msg.text.clone());
                         close_menu = true;
                     }
+                    // 3b. Dịch tin nhắn (qua MyMemory, miễn phí)
+                    if !vanished
+                        && !msg.text.trim().is_empty()
+                        && menu_item(ui, "🌐", "Dịch tin nhắn", pal.text_primary).clicked()
+                    {
+                        action = Some(BubbleAction::Translate);
+                        close_menu = true;
+                    }
 
-                    // 4. Ghim tin nhắn
                     let pin_label = if msg.is_pinned {
                         "Bỏ ghim tin nhắn"
                     } else {
@@ -3707,6 +3717,21 @@ pub(super) fn render_hover_reaction_bar(
     }
 
     action
+}
+
+/// Vẽ bản dịch dưới tin gốc: đường kẻ + text nghiêng màu muted.
+pub(super) fn render_translation(ui: &mut egui::Ui, msg: &ChatMessage, pal: &ThemePalette) {
+    let Some(tr) = msg.translation.as_deref().filter(|t| !t.trim().is_empty()) else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.separator();
+    ui.label(
+        RichText::new(format!("🌐 {tr}"))
+            .size(12.5)
+            .color(pal.text_muted)
+            .italics(),
+    );
 }
 
 pub(super) fn render_reactions(

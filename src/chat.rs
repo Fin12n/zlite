@@ -69,6 +69,9 @@ pub struct ChatMessage {
     pub history_source: Option<Value>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub resolved_mention_uids: std::collections::BTreeMap<String, String>,
+    /// Bản dịch hiển thị dưới tin gốc (session-only, không persist).
+    #[serde(skip)]
+    pub translation: Option<String>,
 }
 
 impl ChatMessage {
@@ -2533,6 +2536,103 @@ pub async fn send_voice_message(
         ..Default::default()
     };
     Ok((send_resp, cm))
+}
+
+/// Đoán ngôn ngữ nguồn để dịch. Trả None khi text đã là tiếng Việt (có dấu)
+/// hoặc quá ngắn/không có chữ → không cần dịch.
+pub fn guess_translate_source(text: &str) -> Option<&'static str> {
+    let mut latin = 0u32;
+    let mut vi_mark = 0u32;
+    let mut cjk = 0u32;
+    let mut kana = 0u32;
+    let mut hangul = 0u32;
+    let mut cyrillic = 0u32;
+    for ch in text.chars() {
+        match ch {
+            // Dấu tiếng Việt đặc trưng (đ, ă, â, ê, ô, ơ, ư + nguyên âm dấu).
+            'đ' | 'Đ' | 'ă' | 'Ă' | 'â' | 'Â' | 'ê' | 'Ê' | 'ô' | 'Ô' | 'ơ' | 'Ơ'
+            | 'ư' | 'Ư' | 'á' | 'à' | 'ả' | 'ã' | 'ạ' | 'ắ' | 'ằ' | 'ẳ' | 'ẵ' | 'ặ'
+            | 'ấ' | 'ầ' | 'ẩ' | 'ẫ' | 'ậ' | 'é' | 'è' | 'ẻ' | 'ẽ' | 'ẹ' | 'ế' | 'ề'
+            | 'ể' | 'ễ' | 'ệ' | 'í' | 'ì' | 'ỉ' | 'ĩ' | 'ị' | 'ó' | 'ò' | 'ỏ' | 'õ'
+            | 'ọ' | 'ố' | 'ồ' | 'ổ' | 'ỗ' | 'ộ' | 'ớ' | 'ờ' | 'ở' | 'ỡ' | 'ợ'
+            | 'ú' | 'ù' | 'ủ' | 'ũ' | 'ụ' | 'ứ' | 'ừ' | 'ử' | 'ữ' | 'ự'
+            | 'ý' | 'ỳ' | 'ỷ' | 'ỹ' | 'ỵ' => vi_mark += 1,
+            'a'..='z' | 'A'..='Z' => latin += 1,
+            '\u{3040}'..='\u{30ff}' => kana += 1,
+            '\u{4e00}'..='\u{9fff}' => cjk += 1,
+            '\u{ac00}'..='\u{d7af}' => hangul += 1,
+            '\u{0400}'..='\u{04ff}' => cyrillic += 1,
+            _ => {}
+        }
+    }
+    if vi_mark > 0 {
+        return None; // Đã là tiếng Việt.
+    }
+    // Ưu tiên script phi-Latin (rõ ràng nhất).
+    if kana > 0 {
+        return Some("ja");
+    }
+    if hangul > 0 {
+        return Some("ko");
+    }
+    if cyrillic > cjk && cyrillic > latin {
+        return Some("ru");
+    }
+    if cjk > 0 {
+        return Some("zh");
+    }
+    if latin >= 3 {
+        return Some("en");
+    }
+    None
+}
+
+/// Dịch text qua MyMemory API miễn phí (không key, ~5000 từ/ngày/IP).
+/// Trả Err thân thiện khi quota hết/mạng lỗi để GUI toast.
+pub async fn translate_via_mymemory(
+    http: &reqwest::Client,
+    text: &str,
+    source: &str,
+    target: &str,
+) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        anyhow::bail!("Tin nhắn trống, không có gì để dịch");
+    }
+    // MyMemory giới hạn ~500 ký tự/query (q>500 hay 413) → cắt an toàn.
+    let short: String = text.chars().take(450).collect();
+    let resp: Value = http
+        .get("https://api.mymemory.translated.net/get")
+        .query(&[("q", short.as_str()), ("langpair", &format!("{source}|{target}"))])
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Không gọi được dịch vụ dịch ({e})"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Dịch vụ dịch trả về không hợp lệ ({e})"))?;
+    let quota_out = resp
+        .get("quotaFinished")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let status_429 = matches!(
+        resp.get("responseStatus"),
+        Some(Value::String(s)) if s == "429"
+    ) || matches!(resp.get("responseStatus"), Some(Value::Number(n)) if n.as_i64() == Some(429));
+    if quota_out || status_429 {
+        anyhow::bail!("Hết quota dịch miễn phí trong ngày, thử lại mai");
+    }
+    let out = resp
+        .get("responseData")
+        .and_then(|d| d.get("translatedText"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if out.is_empty() || out == short {
+        anyhow::bail!("Không dịch được (server trả rỗng)");
+    }
+    Ok(out)
 }
 
 
@@ -9251,5 +9351,19 @@ mod send_identity_tests {
         assert!(set_thread_vanish(&mut t, 0, now_ms / 1000));
         t.messages.push(m("after", "sau khi tắt", now_ms));
         assert!(sweep_thread_vanish(&mut t, now_ms + 10_000_000).is_empty());
+    }
+
+    #[test]
+    fn guess_translate_source_detects_script() {
+        assert_eq!(guess_translate_source("Hello world, how are you"), Some("en"));
+        assert_eq!(guess_translate_source("你好世界"), Some("zh"));
+        assert_eq!(guess_translate_source("こんにちは"), Some("ja"));
+        assert_eq!(guess_translate_source("안녕하세요"), Some("ko"));
+        assert_eq!(guess_translate_source("Привет мир"), Some("ru"));
+        // Đã Việt / quá ngắn / số → không dịch.
+        assert_eq!(guess_translate_source("Xin chào bạn"), None);
+        assert_eq!(guess_translate_source("ok"), None);
+        assert_eq!(guess_translate_source("12345"), None);
+        assert_eq!(guess_translate_source(""), None);
     }
 }

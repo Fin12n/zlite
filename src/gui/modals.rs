@@ -1695,6 +1695,28 @@ impl ZaloGuiApp {
                                                             }
                                                         });
                                                     });
+                                                    ui.add_space(8.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Dịch tin nhắn sang (mã: vi/en/zh/ja/ko/…)").color(pal.text_primary).size(13.2));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            let resp = ui.add(
+                                                                egui::TextEdit::singleline(&mut self.settings.translate_target)
+                                                                    .desired_width(60.0)
+                                                                    .hint_text("vi"),
+                                                            );
+                                                            if resp.changed() {
+                                                                self.settings.translate_target = self
+                                                                    .settings
+                                                                    .translate_target
+                                                                    .trim()
+                                                                    .to_ascii_lowercase();
+                                                                if self.settings.translate_target.is_empty() {
+                                                                    self.settings.translate_target = "vi".into();
+                                                                }
+                                                                self.settings.save();
+                                                            }
+                                                        });
+                                                    });
                                                 });
                                             ui.add_space(14.0);
 

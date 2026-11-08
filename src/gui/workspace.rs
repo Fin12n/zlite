@@ -1697,6 +1697,21 @@ impl ZaloGuiApp {
                         };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
                     }
+                    // Persist the read-point so reopening the app does not recount read messages (#119).
+                    if let Some(t) = self.threads.get_mut(resolved_idx) {
+                        if let Some(last) = t.messages.last() {
+                            let mid = last.id.clone();
+                            t.unread.last_seen_id = Some(mid.clone());
+                            let tid_c = tid.clone();
+                            let uin_c = self.user_uin.clone();
+                            std::thread::spawn(move || {
+                                let db = crate::store::db_path_for_account(&uin_c);
+                                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                                    let _ = store.set_thread_read(&tid_c, &mid);
+                                }
+                            });
+                        }
+                    }
                     if !self.settings.block_seen {
                         let last_mid = self
                             .threads

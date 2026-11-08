@@ -690,6 +690,24 @@ pub struct ZaloGuiApp {
     group_members_map: HashMap<String, Vec<crate::chat::SidebarMember>>,
     fetching_group_members: HashSet<String>,
     group_member_search: String,
+    /// Group Workspace: ghi chú đang sửa theo thread (thread_id → text).
+    group_note_drafts: HashMap<String, String>,
+    /// Thread đã nạp ghi chú từ SQLite (tránh đọc lại mỗi frame).
+    group_note_loaded: HashSet<String>,
+    /// Lần sửa ghi chú cuối (thread_id → instant) để auto-save debounce ~1s.
+    group_note_edited_at: HashMap<String, std::time::Instant>,
+    /// Trạng thái lưu ghi chú hiển thị dưới editor ("Đã lưu HH:MM" / "Đang lưu…").
+    group_note_saved_label: HashMap<String, String>,
+    /// Từ khóa mới đang nhập trong ô theo dõi (theo thread).
+    group_watch_inputs: HashMap<String, String>,
+    /// Cache keyword DB để render list (thread_id → keywords).
+    group_watch_cache: HashMap<String, Vec<String>>,
+    /// Stats nhóm đang hiển thị (thread_id → (fetched_at, stats)).
+    group_stats_cache: HashMap<String, (std::time::Instant, crate::group_stats::GroupStats)>,
+    /// Toast tóm tắt nhóm chờ hiển thị sau khi vẽ xong workspace (tránh borrow ui).
+    group_summary_pending: Option<String>,
+    /// Nhảy tới tin khớp chờ thực hiện sau khi vẽ xong workspace.
+    group_jump_pending: Option<(String, String)>,
     user_online_map: HashMap<String, (bool, String)>,
     allow_quit: bool,
     settings_modal_open: bool,
@@ -740,7 +758,6 @@ pub struct ZaloGuiApp {
     phone_sync_status: String,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
-
     // Background channels
     event_rx: Receiver<GuiEvent>,
     #[allow(dead_code)]
@@ -955,6 +972,15 @@ impl ZaloGuiApp {
             group_members_map: HashMap::new(),
             fetching_group_members: HashSet::new(),
             group_member_search: String::new(),
+            group_note_drafts: HashMap::new(),
+            group_note_loaded: HashSet::new(),
+            group_note_edited_at: HashMap::new(),
+            group_note_saved_label: HashMap::new(),
+            group_watch_inputs: HashMap::new(),
+            group_watch_cache: HashMap::new(),
+            group_stats_cache: HashMap::new(),
+            group_summary_pending: None,
+            group_jump_pending: None,
             user_online_map: HashMap::new(),
             allow_quit: false,
             settings_modal_open: false,
@@ -1287,6 +1313,38 @@ impl ZaloGuiApp {
                                                         });
                                                     chat_banners.push((sender_label, preview_short));
                                                 }
+                                            }
+                                        }
+                                    }
+                                    // Group Workspace: tin mới khớp từ khóa theo dõi → toast ưu tiên.
+                                    if existing.is_group {
+                                        let fresh: Vec<&ChatMessage> = existing
+                                            .messages
+                                            .iter()
+                                            .rev()
+                                            .take(added)
+                                            .filter(|m| !m.is_outgoing)
+                                            .collect();
+                                        if !fresh.is_empty() {
+                                            let hits =
+                                                crate::group_watch::match_new_messages(
+                                                    &self.user_uin,
+                                                    &existing.id,
+                                                    &fresh,
+                                                );
+                                            for h in hits {
+                                                self.status_msg = format!(
+                                                    "🔔 [{}] {}: {}",
+                                                    h.keyword, h.sender, h.preview
+                                                );
+                                                let badge_key = format!(
+                                                    "watch:{}",
+                                                    existing.id
+                                                );
+                                                *self
+                                                    .unread_counts
+                                                    .entry(badge_key)
+                                                    .or_insert(0) += 1;
                                             }
                                         }
                                     }

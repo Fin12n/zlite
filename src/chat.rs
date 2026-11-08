@@ -2446,29 +2446,28 @@ pub async fn send_attachment_ext(
 /// `{file}/api/message/voicemp3` (cmd 11148), nhóm `POST {file}/api/group/sendmp3`
 /// (cmd 11169); multipart field `fileContent` + `params={toid|grid, clientId-string}`).
 ///
-/// Lựa chọn format: gửi **MP3** (encode pure-Rust `rusty_mp3`, không C-FFI mới).
-/// Zalo PC đặt tên endpoint là `voicemp3` và nhận diện `audio/*` qua magic bytes
-/// (`audio/mpeg` nằm trong allow-list); AMR (`#!AMR`) chỉ được nhận diện ở chiều
-/// *tải về* (file-type sniff), còn chiều *gửi* không có encoder AMR nào trong
-/// bundle — nên MP3 là format chắc chắn phát được cả hai đầu.
+/// Lựa chọn format: **M4A/AAC** (ffmpeg) — đúng chuẩn voice Zalo (bundle map
+/// `MSG_VOICE → aac`). Thực nghiệm: gửi MP3 thì server tạo message nhưng không
+/// gắn URL voice, bên nhận chỉ thấy chữ "[Tin nhắn thoại]".
 pub async fn send_voice_message(
     s: &Session,
     to_id: &str,
     is_group: bool,
-    mp3_path: &std::path::Path,
+    voice_path: &std::path::Path,
+    mime: &str,
     duration_secs: u64,
 ) -> Result<(Value, ChatMessage)> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let mp3_bytes = std::fs::read(mp3_path)?;
-    if mp3_bytes.is_empty() {
+    let voice_bytes = std::fs::read(voice_path)?;
+    if voice_bytes.is_empty() {
         anyhow::bail!("File ghi âm rỗng (0 byte)");
     }
-    let file_name = mp3_path
+    let file_name = voice_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("voice.mp3")
+        .unwrap_or("voice.m4a")
         .to_string();
     let file_host = if s.domains.file.is_empty() {
         "https://tt-files-wpa.zaloapp.com"
@@ -2501,7 +2500,7 @@ pub async fn send_voice_message(
     let params = s.encoded_params(&params_obj)?;
     let url = format!("{file_host}{upload_ep}?{}&params={params}&type={target_type}", s.common_params());
     let up_raw = s
-        .post_multipart(&url, "fileContent", &file_name, "audio/mpeg", &mp3_bytes)
+        .post_multipart(&url, "fileContent", &file_name, mime, &voice_bytes)
         .await
         .map_err(|e| anyhow::anyhow!("tải lên tin nhắn thoại thất bại: {e}"))?;
     let send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;

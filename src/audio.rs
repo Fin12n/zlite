@@ -44,10 +44,12 @@ impl Drop for AudioHandle {
         }
     }
 }
-/// Kết quả một lần thu tin nhắn thoại: file MP3 đã encode + thời lượng (giây).
+/// Kết quả một lần thu tin nhắn thoại: file audio đã encode + thời lượng (giây).
 pub struct VoiceRecord {
-    /// Đường dẫn file MP3 tạm (trong `std::env::temp_dir()`), caller tự xoá sau khi gửi.
+    /// Đường dẫn file tạm (trong `std::env::temp_dir()`), caller tự xoá sau khi gửi.
     pub path: std::path::PathBuf,
+    /// MIME để upload (`audio/mp4` cho M4A/AAC, `audio/mpeg` cho MP3 fallback).
+    pub mime: String,
     /// Thời lượng thu, làm tròn lên giây.
     pub duration_secs: u64,
     /// Số mẫu PCM 16 kHz đã thu (để test/unit tính duration).
@@ -181,14 +183,24 @@ impl VoiceRecorder {
         if samples_vec.is_empty() {
             anyhow::bail!("Chưa thu được âm thanh nào — hãy giữ micro và nói to hơn.");
         }
+        let duration_secs = (samples_vec.len() as u64).div_ceil(16000).max(1);
+        let tag = crate::login::unix_now();
+        // Ưu tiên AAC/M4A đúng chuẩn Zalo; không có ffmpeg thì MP3 fallback.
+        if let Ok(path) = encode_mono_m4a_16k(&samples_vec, tag) {
+            return Ok(VoiceRecord {
+                path,
+                mime: "audio/mp4".into(),
+                duration_secs,
+                samples: samples_vec.len() as u64,
+            });
+        }
         let mp3_bytes = encode_mono_mp3_16k(&samples_vec)?;
-        let duration_secs = (samples_vec.len() as u64).div_ceil(16000);
-        let path = std::env::temp_dir()
-            .join(format!("ctdozlite_voice_{}.mp3", crate::login::unix_now()));
+        let path = std::env::temp_dir().join(format!("ctdozlite_voice_{tag}.mp3"));
         std::fs::write(&path, &mp3_bytes)?;
         Ok(VoiceRecord {
             path,
-            duration_secs: duration_secs.max(1),
+            mime: "audio/mpeg".into(),
+            duration_secs,
             samples: samples_vec.len() as u64,
         })
     }
@@ -233,6 +245,44 @@ pub fn encode_mono_mp3_16k(pcm_mono_16k: &[f32]) -> Result<Vec<u8>> {
         anyhow::bail!("encode MP3 cho ra 0 byte");
     }
     Ok(out)
+}
+
+/// Encode PCM mono 16 kHz float → file M4A/AAC qua ffmpeg (stdin raw f32le).
+/// Err khi không có ffmpeg hoặc ffmpeg fail → caller fallback MP3.
+pub fn encode_mono_m4a_16k(pcm_mono_16k: &[f32], tag: i64) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+    if pcm_mono_16k.is_empty() {
+        anyhow::bail!("Không có mẫu âm thanh để encode");
+    }
+    let path = std::env::temp_dir().join(format!("ctdozlite_voice_{tag}.m4a"));
+    let mut child = std::process::Command::new("ffmpeg")
+        .args([
+            "-y", "-loglevel", "error",
+            "-f", "f32le", "-ar", "16000", "-ac", "1", "-i", "pipe:0",
+            "-c:a", "aac", "-b:a", "64k",
+            path.to_string_lossy().as_ref(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Không chạy được ffmpeg ({e})"))?;
+    let mut pcm_bytes = Vec::with_capacity(pcm_mono_16k.len() * 4);
+    for s in pcm_mono_16k {
+        pcm_bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Không mở được stdin của ffmpeg"))?
+        .write_all(&pcm_bytes)
+        .map_err(|e| anyhow::anyhow!("Ghi PCM vào ffmpeg thất bại ({e})"))?;
+    let status = child.wait().map_err(|e| anyhow::anyhow!("ffmpeg lỗi ({e})"))?;
+    if !status.success() || path.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("ffmpeg encode AAC thất bại");
+    }
+    Ok(path)
 }
 
 fn run_pass_through(stop: Arc<AtomicBool>) -> Result<()> {

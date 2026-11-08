@@ -92,7 +92,8 @@ pub enum WorkerCmd {
     SendVoice {
         to_id: String,
         is_group: bool,
-        mp3_path: std::path::PathBuf,
+        voice_path: std::path::PathBuf,
+        mime: String,
         duration_secs: u64,
     },
     SendTyping {
@@ -3072,7 +3073,8 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                         WorkerCmd::SendVoice {
                             to_id,
                             is_group,
-                            mp3_path,
+                            voice_path,
+                            mime,
                             duration_secs,
                         } => {
                             let session_clone = session.clone();
@@ -3083,14 +3085,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     "⏳ Đang tải lên và gửi tin nhắn thoại…".into(),
                                 ));
                                 ctx_clone.request_repaint();
-                                // send_voice_message tự đọc file mp3 + trả (resp, ChatMessage).
+                                // send_voice_message tự đọc file voice + trả (resp, ChatMessage).
                                 let s = session_clone.lock().await.clone();
-                                let path_clone = mp3_path.clone();
+                                let path_clone = voice_path.clone();
                                 match crate::chat::send_voice_message(
                                     &s,
                                     &to_id,
                                     is_group,
                                     &path_clone,
+                                    &mime,
                                     duration_secs,
                                 )
                                 .await
@@ -3100,7 +3103,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             thread_id: to_id,
                                             msg: cm,
                                         });
-                                        let _ = std::fs::remove_file(&mp3_path);
+                                        let _ = std::fs::remove_file(&voice_path);
                                     }
                                     Err(e) => {
                                         let err_s = e.to_string();

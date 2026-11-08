@@ -1976,6 +1976,55 @@ impl ZaloGuiApp {
         let show_info_drawer = self.info_drawer_open && !is_compact_w;
         let drawer_w = (screen_w * 0.26).clamp(240.0, 310.0);
 
+        // Pre-load group workspace state (note + watch cache) when a group is selected,
+        // so opening the drawer shows the note immediately. Cheap: one SELECT per table.
+        // Auto-save debounce ~1s: ghi chú đổi quá 1s → persist SQLite (UPDATE nhỏ, chạy
+        // trực tiếp trên UI thread).
+        if show_info_drawer {
+            if let Some((d_id, _, _, d_is_group, _, _)) = &thread_meta {
+                if *d_is_group && !self.group_note_loaded.contains(d_id) {
+                    let db = crate::store::db_path_for_account(&self.user_uin);
+                    let (note, watch) = match crate::store::MessageStore::open(&db) {
+                        Ok(store) => (store.get_group_note(d_id), store.list_group_watch(d_id)),
+                        Err(_) => (String::new(), Vec::new()),
+                    };
+                    self.group_note_drafts.insert(d_id.clone(), note);
+                    self.group_watch_cache.insert(d_id.clone(), watch);
+                    self.group_note_loaded.insert(d_id.clone());
+                }
+                if *d_is_group {
+                    if let Some(edited) = self.group_note_edited_at.get(d_id).copied() {
+                        if edited.elapsed() >= std::time::Duration::from_secs(1) {
+                            let draft =
+                                self.group_note_drafts.get(d_id).cloned().unwrap_or_default();
+                            let db = crate::store::db_path_for_account(&self.user_uin);
+                            let saved_at = crate::clock::message_time(
+                                chrono::Local::now().timestamp_millis(),
+                            );
+                            let ok = crate::store::MessageStore::open(&db).and_then(|mut st| {
+                                st.set_group_note(d_id, &draft, chrono::Local::now().timestamp())
+                            });
+                            match ok {
+                                Ok(()) => {
+                                    self.group_note_saved_label.insert(
+                                        d_id.clone(),
+                                        format!("Đã lưu {saved_at}"),
+                                    );
+                                }
+                                Err(_) => {
+                                    self.group_note_saved_label.insert(
+                                        d_id.clone(),
+                                        "Lưu thất bại, sẽ thử lại".to_string(),
+                                    );
+                                }
+                            }
+                            self.group_note_edited_at.remove(d_id);
+                        }
+                    }
+                }
+            }
+        }
+
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count, _)) = thread_meta {
                 let shared_photos: Vec<(String, String, String, String)> = self
@@ -2418,6 +2467,475 @@ impl ZaloGuiApp {
 
                             ui.add(egui::Separator::default().spacing(1.0));
                         }
+
+                        // Group Workspace: ghi chú + thống kê + theo dõi (chỉ nhóm).
+                        if d_is_group {
+                            let ws_id = d_id.clone();
+                            // Ghi chú: đảm bảo draft (preload ở trên đã nạp từ SQLite).
+                            let draft = self
+                                .group_note_drafts
+                                .entry(ws_id.clone())
+                                .or_default()
+                                .clone();
+                            let mut draft_new = draft.clone();
+                            let saved_label = self
+                                .group_note_saved_label
+                                .get(&ws_id)
+                                .cloned()
+                                .unwrap_or_default();
+                                                        egui::Frame::none()
+                                .inner_margin(Margin::symmetric(16.0, 14.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Workspace nhóm")
+                                                .size(12.5)
+                                                .color(pal.text_primary)
+                                                .strong(),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if !saved_label.is_empty() {
+                                                    ui.label(
+                                                        RichText::new(&saved_label)
+                                                            .size(10.5)
+                                                            .color(pal.text_muted),
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(6.0);
+                                    // a. Ghi chú (multiline, auto-save debounce ~1s).
+                                    let note_resp = ui.add(
+                                        egui::TextEdit::multiline(&mut draft_new)
+                                            .hint_text("Ghi chú riêng cho nhóm này…")
+                                            .desired_rows(3)
+                                            .desired_width(f32::INFINITY)
+                                            .margin(Margin::symmetric(6.0, 4.0)),
+                                    );
+                                    if note_resp.changed() {
+                                        self.group_note_drafts.insert(ws_id.clone(), draft_new);
+                                        self.group_note_edited_at
+                                            .insert(ws_id.clone(), std::time::Instant::now());
+                                        self.group_note_saved_label.insert(
+                                            ws_id.clone(),
+                                            "Đang nhập…".to_string(),
+                                        );
+                                    }
+                                    ui.add_space(10.0);
+                                    // b. Thống kê (tính từ DB + RAM, rẻ). Nút Làm mới buộc tính lại.
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Thống kê")
+                                                .size(12.0)
+                                                .color(pal.text_primary)
+                                                .strong(),
+                                        );
+                                        ui.with_layout(
+                                            Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                let rb = egui::Button::new(
+                                                    RichText::new("Làm mới")
+                                                        .size(10.5)
+                                                        .color(pal.text_secondary),
+                                                )
+                                                .fill(Color32::TRANSPARENT)
+                                                .frame(false);
+                                                if ui
+                                                    .add(rb)
+                                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                                    .on_hover_text("Tính lại thống kê")
+                                                    .clicked()
+                                                {
+                                                    self.group_stats_cache.remove(&ws_id);
+                                                }
+                                            },
+                                        );
+                                    });
+                                    // Cache 30s để không tính lại mỗi frame.
+                                    let stats_fresh = self
+                                        .group_stats_cache
+                                        .get(&ws_id)
+                                        .is_some_and(|(at, _)| {
+                                            at.elapsed() < std::time::Duration::from_secs(30)
+                                        });
+                                    if !stats_fresh {
+                                        let db = crate::store::db_path_for_account(&self.user_uin);
+                                        let thread_now = self
+                                            .threads
+                                            .iter()
+                                            .find(|t| t.id == ws_id)
+                                            .cloned();
+                                        if let Ok(store) =
+                                            crate::store::MessageStore::open(&db)
+                                        {
+                                            let st = crate::group_stats::compute_group_stats(
+                                                Some(&store),
+                                                thread_now.as_ref(),
+                                            );
+                                            self.group_stats_cache.insert(
+                                                ws_id.clone(),
+                                                (std::time::Instant::now(), st),
+                                            );
+                                        }
+                                    }
+                                    if let Some((_, st)) =
+                                        self.group_stats_cache.get(&ws_id)
+                                    {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Tổng {} tin · 7 ngày {} tin",
+                                                st.total, st.last_7d
+                                            ))
+                                            .size(11.0)
+                                            .color(pal.text_secondary),
+                                        );
+                                        // Bar mini 7 ngày (rect vẽ tay, cũ → mới).
+                                        let max_day = st.daily.iter().max().copied().unwrap_or(0);
+                                        if max_day > 0 {
+                                            let (bar_rect, _) = ui.allocate_exact_size(
+                                                Vec2::new(ui.available_width(), 28.0),
+                                                Sense::hover(),
+                                            );
+                                            let bw = (bar_rect.width() - 6.0 * 6.0) / 7.0;
+                                            for (i, c) in st.daily.iter().enumerate() {
+                                                let h = if max_day == 0 {
+                                                    0.0
+                                                } else {
+                                                    (*c as f32 / max_day as f32) * 22.0
+                                                };
+                                                let x0 = bar_rect.left()
+                                                    + i as f32 * (bw + 6.0);
+                                                let r = Rect::from_min_size(
+                                                    Pos2::new(x0, bar_rect.bottom() - h),
+                                                    Vec2::new(bw, h.max(2.0)),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    r,
+                                                    Rounding::same(3.0),
+                                                    if i == 6 {
+                                                        pal.primary
+                                                    } else {
+                                                        pal.primary.linear_multiply(0.45)
+                                                    },
+                                                );
+                                            }
+                                        }
+                                        if !st.top_senders.is_empty() {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new("Top người gửi")
+                                                    .size(11.0)
+                                                    .color(pal.text_primary)
+                                                    .strong(),
+                                            );
+                                            for (name, cnt) in st.top_senders.iter().take(5) {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(truncate_chars(name, 18))
+                                                            .size(11.0)
+                                                            .color(pal.text_secondary),
+                                                    );
+                                                    ui.with_layout(
+                                                        Layout::right_to_left(Align::Center),
+                                                        |ui| {
+                                                            ui.label(
+                                                                RichText::new(format!("{cnt}"))
+                                                                    .size(11.0)
+                                                                    .color(pal.primary_hover)
+                                                                    .strong(),
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                            }
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Ảnh {} · File {} · Link {} · Voice {}",
+                                                st.photos, st.files, st.links, st.voices
+                                            ))
+                                            .size(11.0)
+                                            .color(pal.text_secondary),
+                                        );
+                                        let peak_txt = match st.peak_hour {
+                                            Some(h) => format!(
+                                                "Giờ sôi động: {:02}h ({} tin)",
+                                                h, st.peak_hour_count
+                                            ),
+                                            None => "Giờ sôi động: —".to_string(),
+                                        };
+                                        ui.label(
+                                            RichText::new(peak_txt)
+                                                .size(11.0)
+                                                .color(pal.text_secondary),
+                                        );
+                                    }
+                                    ui.add_space(10.0);
+                                    // c. Theo dõi từ khóa.
+                                    ui.label(
+                                        RichText::new("Theo dõi từ khóa")
+                                            .size(12.0)
+                                            .color(pal.text_primary)
+                                            .strong(),
+                                    );
+                                    ui.add_space(4.0);
+                                    let mut watch_input = self
+                                        .group_watch_inputs
+                                        .get(&ws_id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    ui.horizontal(|ui| {
+                                        let ie = egui::TextEdit::singleline(&mut watch_input)
+                                            .hint_text("Thêm từ khóa, Enter để theo dõi…")
+                                            .desired_width(ui.available_width() - 52.0)
+                                            .margin(Margin::symmetric(6.0, 3.0));
+                                        let iresp = ui.add(ie);
+                                        let add_clicked = ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("＋")
+                                                        .size(13.0)
+                                                        .color(pal.primary_hover),
+                                                )
+                                                .fill(Color32::TRANSPARENT)
+                                                .frame(false),
+                                            )
+                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                            .clicked();
+                                        let enter_pressed = iresp.lost_focus()
+                                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        if add_clicked || enter_pressed {
+                                            let kw = watch_input.trim().to_string();
+                                            if !kw.is_empty() {
+                                                let db =
+                                                    crate::store::db_path_for_account(&self.user_uin);
+                                                let added = crate::store::MessageStore::open(&db)
+                                                    .map(|mut s| {
+                                                        s.add_group_watch(&ws_id, &kw)
+                                                    })
+                                                    .unwrap_or(Ok(false));
+                                                match added {
+                                                    Ok(true) => {
+                                                        let list =
+                                                            crate::store::MessageStore::open(&db)
+                                                                .map(|s| {
+                                                                    s.list_group_watch(&ws_id)
+                                                                })
+                                                                .unwrap_or_default();
+                                                        self.group_watch_cache
+                                                            .insert(ws_id.clone(), list);
+                                                        watch_input.clear();
+                                                        iresp.request_focus();
+                                                    }
+                                                    _ => {
+                                                        self.show_toast(
+                                                            "Từ khóa đã có hoặc lưu thất bại",
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                    self.group_watch_inputs.insert(ws_id.clone(), watch_input);
+                                    // List keyword + nút xóa từng cái.
+                                    let kws = self
+                                        .group_watch_cache
+                                        .get(&ws_id)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let mut removed_kw: Option<String> = None;
+                                    for kw in &kws {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(format!("🔎 {kw}"))
+                                                    .size(11.0)
+                                                    .color(pal.text_secondary),
+                                            );
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new("✕")
+                                                                    .size(10.5)
+                                                                    .color(pal.text_muted),
+                                                            )
+                                                            .fill(Color32::TRANSPARENT)
+                                                            .frame(false),
+                                                        )
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .on_hover_text("Bỏ theo dõi từ khóa")
+                                                        .clicked()
+                                                    {
+                                                        removed_kw = Some(kw.clone());
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    if let Some(kw) = removed_kw {
+                                        let db = crate::store::db_path_for_account(&self.user_uin);
+                                        if let Ok(mut s) =
+                                            crate::store::MessageStore::open(&db)
+                                        {
+                                            let _ = s.remove_group_watch(&ws_id, &kw);
+                                            self.group_watch_cache.insert(
+                                                ws_id.clone(),
+                                                s.list_group_watch(&ws_id),
+                                            );
+                                        }
+                                    }
+                                    // Tin khớp mới nhất (10 tin, click nhảy tới tin dùng QuoteJump).
+                                    if !kws.is_empty() {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new("Tin khớp mới nhất")
+                                                .size(11.0)
+                                                .color(pal.text_primary)
+                                                .strong(),
+                                        );
+                                        let lower_kws: Vec<String> =
+                                            kws.iter().map(|k| k.to_lowercase()).collect();
+                                        let hits: Vec<(String, String, String, String)> = self
+                                            .threads
+                                            .iter()
+                                            .find(|t| t.id == ws_id)
+                                            .map(|t| {
+                                                t.messages
+                                                    .iter()
+                                                    .rev()
+                                                    .filter(|m| {
+                                                        let hay = m.text.to_lowercase();
+                                                        !hay.is_empty()
+                                                            && lower_kws.iter().any(|k| {
+                                                                !k.is_empty() && hay.contains(k)
+                                                            })
+                                                    })
+                                                    .take(10)
+                                                    .map(|m| {
+                                                        (
+                                                            m.id.clone(),
+                                                            m.sender.clone(),
+                                                            m.time.clone(),
+                                                            m.text.clone(),
+                                                        )
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        if hits.is_empty() {
+                                            ui.label(
+                                                RichText::new("Chưa có tin nào khớp từ khóa.")
+                                                    .size(11.0)
+                                                    .color(pal.text_muted),
+                                            );
+                                        } else {
+                                            for (mid, sender, mtime, mtext) in hits {
+                                                let preview: String = if mtext.chars().count() > 48
+                                                {
+                                                    let s: String =
+                                                        mtext.chars().take(48).collect();
+                                                    format!("{s}…")
+                                                } else {
+                                                    mtext.clone()
+                                                };
+                                                let btn = egui::Button::new(
+                                                    RichText::new(format!(
+                                                        "{sender} · {mtime}\n{preview}"
+                                                    ))
+                                                    .size(11.0)
+                                                    .color(pal.text_secondary),
+                                                )
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(6.0))
+                                                .min_size(Vec2::new(ui.available_width(), 0.0))
+                                                .wrap();
+                                                if ui
+                                                    .add(btn)
+                                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                                    .on_hover_text("Nhảy tới tin nhắn")
+                                                    .clicked()
+                                                {
+                                                    self.group_jump_pending = Some((ws_id.clone(), mid));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ui.add_space(10.0);
+                                    // LLM: nút tóm tắt (StubProvider → toast "sắp có").
+                                    let sum_btn = egui::Button::new(
+                                        RichText::new("✨ Tóm tắt nhóm (sắp có)")
+                                            .size(11.5)
+                                            .color(pal.primary_hover),
+                                    )
+                                    .fill(pal.primary.linear_multiply(0.12))
+                                    .stroke(Stroke::new(1.0_f32, pal.primary))
+                                    .rounding(Rounding::same(6.0))
+                                    .min_size(Vec2::new(ui.available_width(), 28.0));
+                                    if ui
+                                        .add(sum_btn)
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        let db = crate::store::db_path_for_account(&self.user_uin);
+                                        let msg = match crate::store::MessageStore::open(&db) {
+                                            Ok(store) => {
+                                                let gctx = crate::group_llm::build_group_context(
+                                                    &store,
+                                                    &self.threads,
+                                                    &ws_id,
+                                                );
+                                                let p = crate::group_llm::StubProvider;
+                                                match crate::group_llm::LlmProvider::summarize(
+                                                    &p, &gctx,
+                                                ) {
+                                                    Ok(s) => s,
+                                                    Err(e) => e.to_string(),
+                                                }
+                                            }
+                                            Err(_) => "chưa cấu hình LLM — tính năng tóm tắt nhóm sắp có".to_string(),
+                                        };
+                                        self.group_summary_pending = Some(msg);
+                                    }
+                                });
+                        }
+                            if let Some(m) = self.group_summary_pending.take() {
+                                self.show_toast(m);
+                            }
+                            if let Some((tid, reference)) = self.group_jump_pending.take() {
+                                let index = self
+                                    .threads
+                                    .iter()
+                                    .find(|t| t.id == tid)
+                                    .and_then(|thread| {
+                                        crate::message_navigation::unique_reference_index(
+                                            &thread.messages,
+                                            &reference,
+                                        )
+                                    });
+                                if index.is_some() {
+                                    self.filter_starred_only = false;
+                                    self.in_chat_search_open = false;
+                                    self.in_chat_search_query.clear();
+                                    self.quote_jump = Some(QuoteJump {
+                                        thread_id: tid,
+                                        reference,
+                                        highlight_until: std::time::Instant::now()
+                                            + std::time::Duration::from_secs(3),
+                                        scroll_pending: true,
+                                    });
+                                    ctx.request_repaint();
+                                } else {
+                                    self.show_toast("Chưa tải tin nhắn gốc — hãy tải thêm lịch sử rồi thử lại.");
+                                }
+                            }
+                            ui.add(egui::Separator::default().spacing(1.0));
 
                         // Shared Media Grid (`Ảnh / Video đã chia sẻ`)
                         egui::Frame::none()
@@ -5849,7 +6367,8 @@ impl ZaloGuiApp {
                     let _ = tx.send(WorkerCmd::SendVoice {
                         to_id: thread_id.to_string(),
                         is_group,
-                        mp3_path: record.path,
+                        voice_path: record.path,
+                        mime: record.mime,
                         duration_secs: record.duration_secs,
                     });
                 }

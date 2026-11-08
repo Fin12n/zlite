@@ -91,10 +91,11 @@ impl MessageStore {
                 started_at_sec INTEGER NOT NULL
             );",
         )?;
-        // Migration 2: vanish columns / side table on DBs created before vanish slice.
+        // Migration: vanish columns / side table on DBs created before vanish slice.
         Self::ensure_vanish_schema(&conn)?;
+        // Group workspace tables (notes + keyword watch): safe re-run on old DBs.
+        Self::ensure_group_workspace_schema(&conn)?;
         // Migration 1: one-time cleanup of placeholder rows. This DELETE used to run (a full
-        // table scan) on every hydrate; new rows are filtered in `persist_threads` instead.
         if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
             conn.execute_batch(
                 "BEGIN;
@@ -145,6 +146,97 @@ impl MessageStore {
     )?;
     Ok(())
 }
+
+    /// Tạo bảng workspace nhóm nếu DB cũ chưa có (group notes + keyword watch).
+    /// Chạy an toàn nhiều lần: chỉ `CREATE TABLE IF NOT EXISTS`.
+    fn ensure_group_workspace_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_notes (
+                thread_id TEXT PRIMARY KEY,
+                note TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS group_watch (
+                thread_id TEXT NOT NULL,
+                keyword TEXT NOT NULL,
+                PRIMARY KEY (thread_id, keyword)
+            );
+            CREATE INDEX IF NOT EXISTS idx_group_watch_thread ON group_watch(thread_id);",
+        )?;
+        Ok(())
+    }
+
+    /// Đọc ghi chú của 1 nhóm. Chưa có → `""`.
+    pub fn get_group_note(&self, thread_id: &str) -> String {
+        if thread_id.is_empty() {
+            return String::new();
+        }
+        self.conn
+            .query_row(
+                "SELECT note FROM group_notes WHERE thread_id = ?1",
+                params![thread_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+    }
+
+    /// Lưu ghi chú của 1 nhóm (upsert, kèm mốc cập nhật giây).
+    pub fn set_group_note(&mut self, thread_id: &str, note: &str, updated_at: i64) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO group_notes (thread_id, note, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(thread_id) DO UPDATE SET note = excluded.note,
+                 updated_at = excluded.updated_at",
+            params![thread_id, note, updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Thêm từ khóa theo dõi cho 1 nhóm (chuẩn hoá trim, bỏ trống).
+    pub fn add_group_watch(&mut self, thread_id: &str, keyword: &str) -> Result<bool> {
+        let kw = keyword.trim();
+        if thread_id.is_empty() || kw.is_empty() {
+            return Ok(false);
+        }
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO group_watch (thread_id, keyword) VALUES (?1, ?2)",
+            params![thread_id, kw],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Xoá 1 từ khóa theo dõi của nhóm.
+    pub fn remove_group_watch(&mut self, thread_id: &str, keyword: &str) -> Result<()> {
+        if thread_id.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "DELETE FROM group_watch WHERE thread_id = ?1 AND keyword = ?2",
+            params![thread_id, keyword],
+        )?;
+        Ok(())
+    }
+
+    /// Liệt kê từ khóa theo dõi của 1 nhóm (sắp xếp A–Z).
+    pub fn list_group_watch(&self, thread_id: &str) -> Vec<String> {
+        if thread_id.is_empty() {
+            return Vec::new();
+        }
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT keyword FROM group_watch WHERE thread_id = ?1 ORDER BY keyword ASC")
+        {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![thread_id], |r| r.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
 
     /// Insert a message. Returns `true` if a new row was inserted, `false` if already existed.
     pub fn upsert_message(&mut self, msg: &StoredMessage) -> Result<bool> {
@@ -2108,6 +2200,30 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "Tin nhắn cũ đã migrate");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_note_and_watch_roundtrip() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        // Chưa có ghi chú → rỗng.
+        assert_eq!(store.get_group_note("g1"), "");
+        store.set_group_note("g1", "kế hoạch sprint", 111).unwrap();
+        assert_eq!(store.get_group_note("g1"), "kế hoạch sprint");
+        store.set_group_note("g1", "đã cập nhật", 222).unwrap();
+        assert_eq!(store.get_group_note("g1"), "đã cập nhật");
+        // Nhóm khác độc lập.
+        store.set_group_note("g2", "riêng", 1).unwrap();
+        assert_eq!(store.get_group_note("g2"), "riêng");
+        assert_eq!(store.get_group_note("g1"), "đã cập nhật");
+        // Watch: thêm / trùng / liệt kê / xoá.
+        assert!(store.list_group_watch("g1").is_empty());
+        assert!(store.add_group_watch("g1", "  báo cáo  ").unwrap());
+        assert!(!store.add_group_watch("g1", "báo cáo").unwrap());
+        assert!(!store.add_group_watch("g1", "   ").unwrap());
+        assert!(store.add_group_watch("g1", "deadline").unwrap());
+        assert_eq!(store.list_group_watch("g1"), vec!["báo cáo", "deadline"]);
+        store.remove_group_watch("g1", "báo cáo").unwrap();
+        assert_eq!(store.list_group_watch("g1"), vec!["deadline"]);
     }
 
     #[test]

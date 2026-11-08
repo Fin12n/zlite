@@ -651,6 +651,139 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     });
                 }
                 {
+                    // Script per-thread trigger on_interval: nhịp 60s, chỉ DB acc đang dùng.
+                    // RẺ: mở DB 1 lần/tick, chỉ chạy script tới hạn; outbox drain qua SendMessage.
+                    let gui_tx_script = gui_tx.clone();
+                    let ctx_script = egui_ctx.clone();
+                    let login_uin = session
+                        .blocking_lock()
+                        .login
+                        .as_ref()
+                        .map(|l| l.uin.clone())
+                        .unwrap_or_default();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(Duration::from_secs(60));
+                        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        loop {
+                            tick.tick().await;
+                            let now_sec = crate::login::unix_now();
+                            let due: Vec<(
+                                String,
+                                String,
+                                Vec<crate::chat::Thread>,
+                                Vec<crate::thread_script::ThreadScript>,
+                            )> = tokio::task::spawn_blocking({
+                                let login_uin = login_uin.clone();
+                                move || {
+                                    let mut out = Vec::new();
+                                    // DB của acc đang dùng (per-acc path).
+                                    let mut dbs = vec![crate::store::db_path_for_account(&login_uin)];
+                                    // Fallback DB mặc định khi chưa login.
+                                    if dbs[0].is_empty() || dbs[0] == "zalo_history.db" {
+                                        dbs = vec!["zalo_history.db".to_string()];
+                                    }
+                                    for db in dbs {
+                                        let store = match crate::store::MessageStore::open(&db) {
+                                            Ok(s) => s,
+                                            Err(_) => continue,
+                                        };
+                                        let enabled = store.all_enabled_scripts();
+                                        if enabled.is_empty() {
+                                            continue;
+                                        }
+                                        // RAM snapshot threads từ cache disk (không block UI).
+                                        let threads = crate::chat::load_threads_cache();
+                                        // Gom theo thread: chỉ script interval + tới hạn.
+                                        let mut by_thread: std::collections::HashMap<
+                                            String,
+                                            Vec<crate::thread_script::ThreadScript>,
+                                        > = std::collections::HashMap::new();
+                                        for s in enabled {
+                                            if let crate::thread_script::TriggerKind::OnInterval(
+                                                every,
+                                            ) = crate::thread_script::parse_trigger(
+                                                &s.trigger,
+                                                &s.trigger_arg,
+                                            ) {
+                                                let last: i64 = store
+                                                    .thread_kv_get(
+                                                        &s.thread_id,
+                                                        &crate::thread_script::last_run_key(s.id),
+                                                    )
+                                                    .and_then(|v| v.parse().ok())
+                                                    .unwrap_or(0);
+                                                if crate::thread_script::interval_due(
+                                                    last, every, now_sec,
+                                                ) {
+                                                    by_thread
+                                                        .entry(s.thread_id.clone())
+                                                        .or_default()
+                                                        .push(s);
+                                                }
+                                            }
+                                        }
+                                        for (tid, scripts) in by_thread {
+                                            out.push((db.clone(), tid, threads.clone(), scripts));
+                                        }
+                                    }
+                                    out
+                                }
+                            })
+                            .await
+                            .unwrap_or_default();
+                            for (db, tid, snapshot, scripts) in due {
+                                let ev = crate::thread_script::ScriptEvent::interval();
+                                for s in &scripts {
+                                    match crate::thread_script::run_script(
+                                        &db, &snapshot, &tid, s, &ev,
+                                    ) {
+                                        Ok(res) => {
+                                            for o in res.outbox {
+                                                if let Some(wtx) = WORKER_TX.get() {
+                                                    let is_group = snapshot
+                                                        .iter()
+                                                        .find(|t| t.id == o.thread_id)
+                                                        .map(|t| t.is_group)
+                                                        .unwrap_or(false);
+                                                    // Drain outbox qua SendMessage có sẵn.
+                                                    let _ = wtx.send(WorkerCmd::SendMessage {
+                                                        to_id: o.thread_id.clone(),
+                                                        text: o.text.clone(),
+                                                        is_group,
+                                                    });
+                                                }
+                                            }
+                                            for t in res.toasts {
+                                                let _ = gui_tx_script.send(
+                                                    GuiEvent::ScriptToast {
+                                                        thread_id: tid.clone(),
+                                                        message: t,
+                                                    },
+                                                );
+                                            }
+                                            let _ = gui_tx_script.send(
+                                                GuiEvent::ScriptLogsUpdated { thread_id: tid.clone() },
+                                            );
+                                            ctx_script.request_repaint();
+                                        }
+                                        Err(e) => {
+                                            crate::thread_script::persist_error_log(
+                                                &db,
+                                                &tid,
+                                                &s.name,
+                                                &e.to_string(),
+                                            );
+                                            let _ = gui_tx_script.send(
+                                                GuiEvent::ScriptLogsUpdated { thread_id: tid.clone() },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                {
                     let s_kw = session.clone();
                     let gui_tx_kw = gui_tx.clone();
                     let ctx_kw = egui_ctx.clone();

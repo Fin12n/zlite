@@ -44,6 +44,7 @@ getrandom = { version = "0.3", features = ["std"] }
 zip = "9.4.2"
 quick-xml = "0.42.0"
 pdf-extract = "0.12.1"
+rhai = "1"
 
 [lib]
 name = "zalo_rust"

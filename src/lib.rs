@@ -44,6 +44,7 @@ pub mod api_mcp;
 /// Shared backend for chat/message/reaction banners
 /// (DailyNotifier is intentionally NOT used: its payload is hardcoded generic).
 pub mod os_notify;
+pub mod thread_script;
 
 /// Native notification authorization without delivery.
 pub mod native_notifications;

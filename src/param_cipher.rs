@@ -79,9 +79,12 @@ impl ParamCipher {
         let (a_even, mut a_odd) = split_even_odd(&zcid);
         a_odd.reverse();
 
-        let key: String = n_even.iter().take(8).collect::<String>()
-            + &a_even.iter().take(12).collect::<String>()
-            + &a_odd.iter().take(12).collect::<String>();
+        let key: String = format!(
+            "{}{}{}",
+            n_even.iter().take(8).collect::<String>(),
+            a_even.iter().take(12).collect::<String>(),
+            a_odd.iter().take(12).collect::<String>()
+        );
 
         Ok(Self {
             zcid,

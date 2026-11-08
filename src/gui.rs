@@ -342,7 +342,12 @@ pub enum GuiEvent {
     /// 1..n reminder tới giờ (worker tick claim) → toast + click nhảy tới tin (WaveA1).
     ReminderDue(Vec<crate::store::ReminderItem>),
     /// Danh sách reminder thay đổi (thêm/xoá) → refresh modal (WaveA1).
+
     ReminderListUpdated,
+    /// Script per-thread chạy xong → toast output (worker tick / on_message / chạy thử).
+    ScriptToast { thread_id: String, message: String },
+    /// Log script của thread đang mở thay đổi → drawer Scripts refresh.
+    ScriptLogsUpdated { thread_id: String },
 }
 
 fn phone_sync_completion_message(
@@ -864,6 +869,15 @@ pub struct ZaloGuiApp {
     group_summary_pending: Option<String>,
     /// Nhảy tới tin khớp chờ thực hiện sau khi vẽ xong workspace.
     group_jump_pending: Option<(String, String)>,
+    /// Scripts per-thread: tab drawer (0 = list, 1 = editor), script đang sửa, draft code.
+    script_tab: usize,
+    script_list_cache: HashMap<String, Vec<crate::thread_script::ThreadScript>>,
+    script_editing_id: Option<i64>,
+    script_name_draft: String,
+    script_trigger_draft: String,
+    script_arg_draft: String,
+    script_code_draft: String,
+    script_output: String,
     /// Xem trước tài liệu (session-only): msg_id → text đã trích.
     doc_previews: HashMap<String, String>,
     /// msg_id đang tải xem trước (tránh gửi trùng mỗi frame).
@@ -1179,6 +1193,14 @@ impl ZaloGuiApp {
             group_stats_loading: HashSet::new(),
             group_summary_pending: None,
             group_jump_pending: None,
+            script_tab: 0,
+            script_list_cache: HashMap::new(),
+            script_editing_id: None,
+            script_name_draft: String::new(),
+            script_trigger_draft: "manual".to_string(),
+            script_arg_draft: String::new(),
+            script_code_draft: String::new(),
+            script_output: String::new(),
             doc_previews: HashMap::new(),
             doc_preview_loading: HashSet::new(),
             doc_preview_errors: HashMap::new(),
@@ -1529,6 +1551,75 @@ impl ZaloGuiApp {
             let _ = wtx.send(WorkerCmd::PersistThreads(snapshot));
         }
     }
+    /// Chạy script on_message/on_keyword cho các tin mới (worker thread, không block UI).
+    /// Chỉ script đúng thread + đúng trigger mới chạy; outbox drain qua WorkerCmd::SendMessage.
+    fn run_message_scripts(
+        db: &str,
+        _uin: &str,
+        thread_id: &str,
+        snapshot: &[Thread],
+        fresh: &[ChatMessage],
+        tx: &std::sync::mpsc::Sender<GuiEvent>,
+    ) {
+        let store = match crate::store::MessageStore::open(db) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let scripts = store.list_thread_scripts(thread_id);
+        if scripts.is_empty() {
+            return;
+        }
+        for s in scripts.iter().filter(|s| s.enabled) {
+            let kind = crate::thread_script::parse_trigger(&s.trigger, &s.trigger_arg);
+            for m in fresh {
+                if !crate::thread_script::trigger_fires_on_message(&kind, &m.text) {
+                    continue;
+                }
+                let ev = crate::thread_script::ScriptEvent::message(&m.text, &m.sender);
+                match crate::thread_script::run_script(db, snapshot, thread_id, s, &ev) {
+                    Ok(out) => {
+                        for o in out.outbox {
+                            if let Some(wtx) = WORKER_TX.get() {
+                                // Tái dùng SendMessage có sẵn; is_group suy từ snapshot.
+                                let is_group = snapshot
+                                    .iter()
+                                    .find(|t| t.id == o.thread_id)
+                                    .map(|t| t.is_group)
+                                    .unwrap_or(false);
+                                let _ = wtx.send(WorkerCmd::SendMessage {
+                                    to_id: o.thread_id.clone(),
+                                    text: o.text.clone(),
+                                    is_group,
+                                });
+                            }
+                        }
+                        for t in out.toasts {
+                            let _ = tx.send(GuiEvent::ScriptToast {
+                                thread_id: thread_id.to_string(),
+                                message: t,
+                            });
+                        }
+                        if !out.output.is_empty() {
+                            let _ = tx.send(GuiEvent::ScriptToast {
+                                thread_id: thread_id.to_string(),
+                                message: format!("⚙️ {}: {}", s.name, out.output),
+                            });
+                        }
+                        let _ = tx.send(GuiEvent::ScriptLogsUpdated {
+                            thread_id: thread_id.to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        crate::thread_script::persist_error_log(db, thread_id, &s.name, &e.to_string());
+                        let _ = tx.send(GuiEvent::ScriptLogsUpdated {
+                            thread_id: thread_id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
 
     /// Lưu ngay mọi ghi chú nhóm đang treo debounce (không chờ đủ ~1s).
     /// Gọi khi đổi nhóm / nhận merge / đóng drawer, để không mất chữ đã gõ.
@@ -1581,6 +1672,9 @@ impl ZaloGuiApp {
                         self.group_watch_inputs.clear();
                         self.group_watch_cache.clear();
                         self.group_stats_cache.clear();
+                        self.script_list_cache.clear();
+                        self.script_editing_id = None;
+                        self.script_output.clear();
                         self.group_note_loading.clear();
                         self.group_note_load_error.clear();
                         self.group_stats_loading.clear();
@@ -1642,6 +1736,8 @@ impl ZaloGuiApp {
                         // Group Workspace: toast khớp keyword gom ở đây để bắn sau merge
                         // (tránh borrow `existing` + `self` cùng lúc trong vòng lặp).
                         let mut watch_toasts: Vec<String> = Vec::new();
+                        // Script on_message: (thread_id, tin mới) chờ chạy sau merge (tránh borrow).
+                        let mut script_msg_pending: Vec<(String, Vec<ChatMessage>)> = Vec::new();
                         let now_ts = crate::login::unix_now() as i64;
                         for mut nt in updates {
                             let settings_muted_until = self
@@ -1804,6 +1900,25 @@ impl ZaloGuiApp {
                                             }
                                         }
                                     }
+                                    // Script per-thread trigger on_message/on_keyword: gom vào hàng đợi
+                                    // (tránh borrow self.threads trong iter_mut), chạy sau merge.
+                                    {
+                                        let fresh_msgs: Vec<ChatMessage> = existing
+                                            .messages
+                                            .iter()
+                                            .filter(|m| {
+                                                !m.is_outgoing
+                                                    && (m.id.is_empty() || !old_ids.contains(&m.id))
+                                            })
+                                            .cloned()
+                                            .collect();
+                                        if !fresh_msgs.is_empty() {
+                                            script_msg_pending.push((
+                                                existing.id.clone(),
+                                                fresh_msgs,
+                                            ));
+                                        }
+                                    }
                                     if existing.id == self.chat_render_window.0 {
                                         self.chat_render_window.1 += added;
                                     }
@@ -1934,6 +2049,31 @@ impl ZaloGuiApp {
                         }
                         self.refresh_vanish_watch();
                         self.persist_threads_async();
+                        // Script on_message/on_keyword: gate rẻ theo DB rồi chạy trên RAM snapshot.
+                        if !script_msg_pending.is_empty() {
+                            let db = crate::store::db_path_for_account(&self.user_uin);
+                            let gated: Vec<(String, Vec<ChatMessage>)> =
+                                crate::store::MessageStore::open(&db)
+                                    .map(|s| {
+                                        script_msg_pending
+                                            .into_iter()
+                                            .filter(|(tid, _)| s.thread_has_message_scripts(tid))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                            if !gated.is_empty() {
+                                let snapshot = self.threads.clone();
+                                let tx = self.event_tx.clone();
+                                let uin = self.user_uin.clone();
+                                std::thread::spawn(move || {
+                                    for (tid, fresh) in &gated {
+                                        Self::run_message_scripts(
+                                            &db, &uin, tid, &snapshot, fresh, &tx,
+                                        );
+                                    }
+                                });
+                            }
+                        }
                     }
                     self.status_msg = format!("Trực tuyến · Cập nhật {}", crate::ui::clock());
                 }
@@ -1965,6 +2105,9 @@ impl ZaloGuiApp {
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.script_list_cache.clear();
+                    self.script_editing_id = None;
+                    self.script_output.clear();
                     self.group_note_loading.clear();
                     self.group_note_load_error.clear();
                     self.group_stats_loading.clear();
@@ -1991,6 +2134,9 @@ impl ZaloGuiApp {
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.script_list_cache.clear();
+                    self.script_editing_id = None;
+                    self.script_output.clear();
                     self.group_note_loading.clear();
                     self.group_note_load_error.clear();
                     self.group_stats_loading.clear();
@@ -2027,6 +2173,9 @@ impl ZaloGuiApp {
                     self.group_watch_inputs.clear();
                     self.group_watch_cache.clear();
                     self.group_stats_cache.clear();
+                    self.script_list_cache.clear();
+                    self.script_editing_id = None;
+                    self.script_output.clear();
                     self.group_note_loading.clear();
                     self.group_note_load_error.clear();
                     self.group_stats_loading.clear();
@@ -2823,6 +2972,13 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StatusUpdate(msg) => {
                     self.status_msg = msg;
+                }
+                GuiEvent::ScriptToast { message, .. } => {
+                    self.show_toast(message);
+                }
+                GuiEvent::ScriptLogsUpdated { .. } => {
+                    // Drawer Scripts đọc log trực tiếp từ DB khi render nên chỉ cần repaint.
+                    ctx.request_repaint();
                 }
                 GuiEvent::HistoryReachedStart(tid) => {
                     self.history_reached_start.insert(tid);

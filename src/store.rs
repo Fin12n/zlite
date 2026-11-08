@@ -257,6 +257,8 @@ impl MessageStore {
         Self::ensure_draft_reminder_schema(&conn)?;
         // Lịch sử bản cũ của tin đã sửa (WaveA3): bảng message_edits.
         Self::ensure_edit_history_schema(&conn)?;
+        // Per-thread mini script workspace: bảng thread_scripts + thread_data + logs.
+        Self::ensure_script_schema(&conn)?;
         if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 1 {
             conn.execute_batch(
                 "BEGIN;
@@ -382,6 +384,42 @@ impl MessageStore {
         )?;
         Ok(())
     }
+    /// Tạo bảng script per-thread + KV riêng + log chạy. Chạy an toàn nhiều lần.
+    fn ensure_script_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS thread_scripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                code TEXT NOT NULL DEFAULT '',
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                trigger_arg TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_scripts_thread ON thread_scripts(thread_id);
+            CREATE TABLE IF NOT EXISTS thread_data (
+                thread_id TEXT NOT NULL DEFAULT '',
+                key TEXT NOT NULL DEFAULT '',
+                value_json TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (thread_id, key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_data_thread ON thread_data(thread_id);
+            CREATE TABLE IF NOT EXISTS thread_script_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '',
+                level TEXT NOT NULL DEFAULT 'info',
+                msg TEXT NOT NULL DEFAULT '',
+                ts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_script_logs_thread ON thread_script_logs(thread_id, id);",
+        )?;
+        Ok(())
+    }
+
 
     /// Lưu 1 bản cũ trước khi thay text mới. `edited_at`: epoch ms.
     pub fn save_message_edit(
@@ -427,6 +465,284 @@ impl MessageStore {
         .map(|rows| rows.flatten().collect())
         .unwrap_or_default()
     }
+    /// Lưu 1 script per-thread. `trigger`: manual|on_message|on_interval_N|on_keyword:kw.
+    /// Trả id row mới.
+    pub fn save_thread_script(
+        &mut self,
+        thread_id: &str,
+        name: &str,
+        code: &str,
+        trigger: &str,
+        trigger_arg: &str,
+        enabled: bool,
+    ) -> Result<i64> {
+        if thread_id.is_empty() || name.trim().is_empty() { return Ok(0); }
+        let _ = Self::ensure_script_schema(&self.conn);
+        let now = crate::login::unix_now();
+        self.conn.execute(
+            "INSERT INTO thread_scripts (thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![thread_id, name.trim(), code, trigger, trigger_arg, i64::from(enabled), now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Cập nhật 1 script đã có (thuộc đúng thread). Không match → Ok(false).
+    pub fn update_thread_script(
+        &mut self,
+        id: i64,
+        thread_id: &str,
+        name: &str,
+        code: &str,
+        trigger: &str,
+        trigger_arg: &str,
+        enabled: bool,
+    ) -> Result<bool> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        let now = crate::login::unix_now();
+        let rows = self.conn.execute(
+            "UPDATE thread_scripts SET name = ?2, code = ?3, trigger = ?4, trigger_arg = ?5,
+                enabled = ?6, updated_at = ?7 WHERE id = ?1 AND thread_id = ?8",
+            params![id, name.trim(), code, trigger, trigger_arg, i64::from(enabled), now, thread_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Bật/tắt 1 script.
+    pub fn set_thread_script_enabled(&mut self, id: i64, enabled: bool) -> Result<()> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        let now = crate::login::unix_now();
+        self.conn.execute(
+            "UPDATE thread_scripts SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, i64::from(enabled), now],
+        )?;
+        Ok(())
+    }
+
+    /// Xoá 1 script (đúng thread).
+    pub fn delete_thread_script(&mut self, id: i64, thread_id: &str) -> Result<()> {
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn.execute(
+            "DELETE FROM thread_scripts WHERE id = ?1 AND thread_id = ?2",
+            params![id, thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// Liệt kê script của 1 thread (mới → cũ theo id DESC).
+    pub fn list_thread_scripts(&self, thread_id: &str) -> Vec<crate::thread_script::ThreadScript> {
+        if thread_id.is_empty() { return Vec::new(); }
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at
+             FROM thread_scripts WHERE thread_id = ?1 ORDER BY id DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![thread_id], |r| {
+            let enabled: i64 = r.get(6).unwrap_or(1);
+            Ok(crate::thread_script::ThreadScript {
+                id: r.get(0).unwrap_or(0),
+                thread_id: r.get(1).unwrap_or_default(),
+                name: r.get(2).unwrap_or_default(),
+                code: r.get(3).unwrap_or_default(),
+                trigger: r.get(4).unwrap_or_default(),
+                trigger_arg: r.get(5).unwrap_or_default(),
+                enabled: enabled != 0,
+                created_at: r.get(7).unwrap_or(0),
+                updated_at: r.get(8).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Liệt kê script đang bật của các thread cho trước (worker tick: chỉ thread có script mới chạy).
+    pub fn list_enabled_scripts_for(&self, thread_ids: &[String]) -> Vec<crate::thread_script::ThreadScript> {
+        if thread_ids.is_empty() { return Vec::new(); }
+        let placeholders = thread_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at
+             FROM thread_scripts WHERE enabled != 0 AND thread_id IN ({placeholders}) ORDER BY id ASC"
+        );
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            thread_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        stmt.query_map(params_vec.as_slice(), |r| {
+            let enabled: i64 = r.get(6).unwrap_or(1);
+            Ok(crate::thread_script::ThreadScript {
+                id: r.get(0).unwrap_or(0),
+                thread_id: r.get(1).unwrap_or_default(),
+                name: r.get(2).unwrap_or_default(),
+                code: r.get(3).unwrap_or_default(),
+                trigger: r.get(4).unwrap_or_default(),
+                trigger_arg: r.get(5).unwrap_or_default(),
+                enabled: enabled != 0,
+                created_at: r.get(7).unwrap_or(0),
+                updated_at: r.get(8).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+    /// Liệt kê mọi script đang bật trong DB (worker tick interval: DB per-acc nên không lẫn acc).
+    pub fn all_enabled_scripts(&self) -> Vec<crate::thread_script::ThreadScript> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, thread_id, name, code, trigger, trigger_arg, enabled, created_at, updated_at
+             FROM thread_scripts WHERE enabled != 0 ORDER BY thread_id ASC, id ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], |r| {
+            let enabled: i64 = r.get(6).unwrap_or(1);
+            Ok(crate::thread_script::ThreadScript {
+                id: r.get(0).unwrap_or(0),
+                thread_id: r.get(1).unwrap_or_default(),
+                name: r.get(2).unwrap_or_default(),
+                code: r.get(3).unwrap_or_default(),
+                trigger: r.get(4).unwrap_or_default(),
+                trigger_arg: r.get(5).unwrap_or_default(),
+                enabled: enabled != 0,
+                created_at: r.get(7).unwrap_or(0),
+                updated_at: r.get(8).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Thread có script enabled nào khớp event tin nhắn không (gate rẻ cho on_message).
+    pub fn thread_has_message_scripts(&self, thread_id: &str) -> bool {
+        if thread_id.is_empty() { return false; }
+        let mut stmt = match self.conn.prepare(
+            "SELECT trigger, trigger_arg FROM thread_scripts
+             WHERE thread_id = ?1 AND enabled != 0",
+        ) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let rows: Vec<(String, String)> = stmt
+            .query_map(params![thread_id], |r| {
+                Ok((r.get(0).unwrap_or_default(), r.get(1).unwrap_or_default()))
+            })
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        rows.iter().any(|(t, a)| {
+            matches!(
+                crate::thread_script::parse_trigger(t, a),
+                crate::thread_script::TriggerKind::OnMessage
+                    | crate::thread_script::TriggerKind::OnKeyword(_)
+            )
+        })
+    }
+
+
+    /// Đọc 1 KV riêng của thread. Chưa có → `None`.
+    pub fn thread_kv_get(&self, thread_id: &str, key: &str) -> Option<String> {
+        if thread_id.is_empty() || key.is_empty() { return None; }
+        self.conn
+            .query_row(
+                "SELECT value_json FROM thread_data WHERE thread_id = ?1 AND key = ?2",
+                params![thread_id, key],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    /// Ghi 1 KV riêng của thread (upsert).
+    pub fn thread_kv_set(&mut self, thread_id: &str, key: &str, value_json: &str) -> Result<()> {
+        if thread_id.is_empty() || key.is_empty() { return Ok(()); }
+        let _ = Self::ensure_script_schema(&self.conn);
+        let now = crate::login::unix_now();
+        self.conn.execute(
+            "INSERT INTO thread_data (thread_id, key, value_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(thread_id, key) DO UPDATE SET value_json = excluded.value_json,
+                 updated_at = excluded.updated_at",
+            params![thread_id, key, value_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Liệt kê key KV của 1 thread (A–Z).
+    pub fn thread_kv_list(&self, thread_id: &str) -> Vec<String> {
+        if thread_id.is_empty() { return Vec::new(); }
+        let mut stmt = match self.conn.prepare(
+            "SELECT key FROM thread_data WHERE thread_id = ?1 ORDER BY key ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![thread_id], |r| r.get::<_, String>(0))
+            .ok()
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Ghi 1 dòng log chạy script; giữ tối đa 200 dòng/thread (xoá cũ nhất).
+    pub fn push_script_log(&mut self, thread_id: &str, name: &str, level: &str, msg: &str) -> Result<()> {
+        if thread_id.is_empty() { return Ok(()); }
+        let _ = Self::ensure_script_schema(&self.conn);
+        let now = crate::login::unix_now();
+        let short: String = msg.chars().take(2000).collect();
+        self.conn.execute(
+            "INSERT INTO thread_script_logs (thread_id, name, level, msg, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![thread_id, name, level, short, now],
+        )?;
+        self.conn.execute(
+            "DELETE FROM thread_script_logs WHERE id NOT IN (
+                 SELECT id FROM thread_script_logs WHERE thread_id = ?1 ORDER BY id DESC LIMIT 200
+             ) AND thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// Đọc log chạy script của 1 thread (mới nhất trước, tối đa `limit`).
+    pub fn list_script_logs(&self, thread_id: &str, limit: usize) -> Vec<crate::thread_script::ScriptLog> {
+        if thread_id.is_empty() { return Vec::new(); }
+        let lim = limit.clamp(1, 200) as i64;
+        let mut stmt = match self.conn.prepare(
+            "SELECT thread_id, name, level, msg, ts FROM thread_script_logs
+             WHERE thread_id = ?1 ORDER BY id DESC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map(params![thread_id, lim], |r| {
+            Ok(crate::thread_script::ScriptLog {
+                thread_id: r.get(0).unwrap_or_default(),
+                name: r.get(1).unwrap_or_default(),
+                level: r.get(2).unwrap_or_default(),
+                msg: r.get(3).unwrap_or_default(),
+                ts: r.get(4).unwrap_or(0),
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Xoá log của 1 thread (nút Xoá trong UI).
+    pub fn clear_script_logs(&mut self, thread_id: &str) -> Result<()> {
+        if thread_id.is_empty() { return Ok(()); }
+        let _ = Self::ensure_script_schema(&self.conn);
+        self.conn.execute(
+            "DELETE FROM thread_script_logs WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
     /// Đọc ghi chú của 1 nhóm. Chưa có → `""`.
     pub fn get_group_note(&self, thread_id: &str) -> String {
         if thread_id.is_empty() {

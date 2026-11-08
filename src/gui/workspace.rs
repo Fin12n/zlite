@@ -3268,6 +3268,15 @@ impl ZaloGuiApp {
                             }
                             ui.add(egui::Separator::default().spacing(1.0));
 
+                        // d. Scripts per-thread (mọi hội thoại 1-1/nhóm, không riêng nhóm).
+                        if let Some((d_id2, _, _, _, _, _)) = &thread_meta {
+                            let ws_id2 = d_id2.clone();
+                            egui::Frame::none()
+                                .inner_margin(Margin::symmetric(16.0, 14.0))
+                                .show(ui, |ui| {
+                                    self.render_script_tab(ui, pal, &ws_id2);
+                                });
+                        }
                         // Shared Media Grid (`Ảnh / Video đã chia sẻ`)
                         egui::Frame::none()
                             .inner_margin(Margin::symmetric(16.0, 14.0))
@@ -6737,6 +6746,571 @@ impl ZaloGuiApp {
         self.render_folder_modal(ctx, pal);
         self.render_settings_modal(ctx, pal);
     }
+    /// Tab Scripts trong drawer hội thoại: list script + editor + panel log/output.
+    fn render_script_tab(&mut self, ui: &mut egui::Ui, pal: &ThemePalette, thread_id: &str) {
+        let tid = thread_id.to_string();
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("⚙️ Scripts")
+                    .size(12.5)
+                    .color(pal.text_primary)
+                    .strong(),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // 2 tab nhỏ: Danh sách / Soạn thảo.
+                let list_btn = egui::Button::new(
+                    RichText::new("Danh sách").size(10.5).color(if self.script_tab == 0 {
+                        pal.primary_hover
+                    } else {
+                        pal.text_muted
+                    }),
+                )
+                .fill(Color32::TRANSPARENT)
+                .frame(false);
+                if ui
+                    .add(list_btn)
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.script_tab = 0;
+                    self.script_editing_id = None;
+                }
+                ui.label(RichText::new("·").size(10.5).color(pal.text_muted));
+                let edit_btn = egui::Button::new(
+                    RichText::new("＋ Mới").size(10.5).color(if self.script_tab == 1 {
+                        pal.primary_hover
+                    } else {
+                        pal.text_muted
+                    }),
+                )
+                .fill(Color32::TRANSPARENT)
+                .frame(false);
+                if ui
+                    .add(edit_btn)
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .on_hover_text("Soạn script mới")
+                    .clicked()
+                {
+                    self.script_tab = 1;
+                    self.script_editing_id = None;
+                    self.script_name_draft.clear();
+                    self.script_trigger_draft = "manual".to_string();
+                    self.script_arg_draft.clear();
+                    self.script_code_draft.clear();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if self.script_tab == 1 {
+            self.render_script_editor(ui, pal, &tid);
+            return;
+        }
+        // ── List scripts của thread (cache theo thread, refresh sau mỗi thao tác) ──
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        if !self.script_list_cache.contains_key(&tid) {
+            let list = crate::store::MessageStore::open(&db)
+                .map(|s| s.list_thread_scripts(&tid))
+                .unwrap_or_default();
+            self.script_list_cache.insert(tid.clone(), list);
+        }
+        let scripts = self.script_list_cache.get(&tid).cloned().unwrap_or_default();
+        // ── Nút "+ Mẫu" (3 template kèm sẵn) ──
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{} script", scripts.len()))
+                    .size(11.0)
+                    .color(pal.text_muted),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                for (tpl_id, tpl_label, _, _) in crate::thread_script::builtin_templates() {
+                    let b = egui::Button::new(
+                        RichText::new(tpl_label).size(10.0).color(pal.primary_hover),
+                    )
+                    .fill(pal.primary.linear_multiply(0.10))
+                    .stroke(Stroke::new(1.0_f32, pal.primary))
+                    .rounding(Rounding::same(6.0));
+                    if ui
+                        .add(b)
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(format!("Tạo script từ mẫu {tpl_id}"))
+                        .clicked()
+                    {
+                        if let Some((code, trig)) =
+                            crate::thread_script::builtin_template_code(tpl_id)
+                        {
+                            let name = tpl_label.to_string();
+                            if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                                // Tách trigger_arg khỏi trigger mặc định ("on_interval_60" → trigger on_interval + arg 60).
+                                let (trig_main, trig_arg) =
+                                    if let Some(mins) = trig.strip_prefix("on_interval_") {
+                                        ("on_interval".to_string(), mins.to_string())
+                                    } else {
+                                        (trig.to_string(), String::new())
+                                    };
+                                let _ = store.save_thread_script(
+                                    &tid, &name, code, &trig_main, &trig_arg, true,
+                                );
+                            }
+                            self.script_list_cache.remove(&tid);
+                            self.show_toast(format!("Đã tạo script từ mẫu {tpl_label}"));
+                        }
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if scripts.is_empty() {
+            ui.label(
+                RichText::new("Chưa có script. Bấm ＋ Mới hoặc chọn 1 mẫu ở trên.")
+                    .size(11.0)
+                    .color(pal.text_muted),
+            );
+        }
+        let mut toggle_req: Option<(i64, bool)> = None;
+        let mut edit_req: Option<crate::thread_script::ThreadScript> = None;
+        let mut del_req: Option<i64> = None;
+        let mut run_req: Option<crate::thread_script::ThreadScript> = None;
+        for s in &scripts {
+            ui.horizontal(|ui| {
+                // Toggle bật/tắt.
+                let mut on = s.enabled;
+                if ui.checkbox(&mut on, "").changed() {
+                    toggle_req = Some((s.id, on));
+                }
+                let name_txt = if s.enabled {
+                    RichText::new(&s.name).size(11.0).color(pal.text_primary).strong()
+                } else {
+                    RichText::new(&s.name).size(11.0).color(pal.text_muted)
+                };
+                ui.label(name_txt);
+                ui.label(
+                    RichText::new(format!("· {}", s.trigger))
+                        .size(10.0)
+                        .color(pal.text_muted),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("✕").size(10.5).color(pal.text_muted),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .frame(false),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Xóa script")
+                        .clicked()
+                    {
+                        del_req = Some(s.id);
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("▶ Chạy thử")
+                                    .size(10.0)
+                                    .color(pal.primary_hover),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .frame(false),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Chạy ngay + hiện output")
+                        .clicked()
+                    {
+                        run_req = Some(s.clone());
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Sửa").size(10.0).color(pal.primary_hover),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .frame(false),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        edit_req = Some(s.clone());
+                    }
+                });
+            });
+        }
+        if let Some((id, on)) = toggle_req {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                let _ = store.set_thread_script_enabled(id, on);
+            }
+            self.script_list_cache.remove(&tid);
+        }
+        if let Some(s) = edit_req {
+            self.script_tab = 1;
+            self.script_editing_id = Some(s.id);
+            self.script_name_draft = s.name;
+            self.script_trigger_draft = s.trigger;
+            self.script_arg_draft = s.trigger_arg;
+            self.script_code_draft = s.code;
+            self.script_output.clear();
+        }
+        if let Some(id) = del_req {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                let _ = store.delete_thread_script(id, &tid);
+            }
+            self.script_list_cache.remove(&tid);
+            self.show_toast("Đã xóa script");
+        }
+        if let Some(s) = run_req {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            let snapshot = self.threads.clone();
+            let ev = crate::thread_script::ScriptEvent::test();
+            match crate::thread_script::run_script(&db, &snapshot, &tid, &s, &ev) {
+                Ok(out) => {
+                    // Drain outbox qua SendMessage có sẵn (không gửi trực tiếp trong runner).
+                    let is_group = snapshot
+                        .iter()
+                        .find(|t| t.id == tid)
+                        .map(|t| t.is_group)
+                        .unwrap_or(false);
+                    for o in &out.outbox {
+                        if let Some(wtx) = WORKER_TX.get() {
+                            let _ = wtx.send(WorkerCmd::SendMessage {
+                                to_id: o.thread_id.clone(),
+                                text: o.text.clone(),
+                                is_group,
+                            });
+                        }
+                    }
+                    for t in &out.toasts {
+                        self.show_toast(t.clone());
+                    }
+                    let mut shown = out.output.clone();
+                    if !out.outbox.is_empty() {
+                        shown.push_str(&format!("\n📤 {} tin đã xếp hàng gửi", out.outbox.len()));
+                    }
+                    if shown.trim().is_empty() {
+                        shown = "(chạy xong, không có output)".to_string();
+                    }
+                    self.script_output = shown;
+                }
+                Err(e) => {
+                    crate::thread_script::persist_error_log(&db, &tid, &s.name, &e.to_string());
+                    self.script_output = format!("❌ {e}");
+                }
+            }
+        }
+        // ── Panel output + log ──
+        if !self.script_output.trim().is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Output").size(11.0).color(pal.text_primary).strong(),
+            );
+            ui.label(
+                RichText::new(self.script_output.clone())
+                    .size(11.0)
+                    .color(pal.text_secondary),
+            );
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Log chạy").size(11.0).color(pal.text_primary).strong(),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("Xóa log").size(10.0).color(pal.text_muted),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .frame(false),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    let db = crate::store::db_path_for_account(&self.user_uin);
+                    if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                        let _ = store.clear_script_logs(&tid);
+                    }
+                    self.show_toast("Đã xóa log script");
+                }
+            });
+        });
+        let db = crate::store::db_path_for_account(&self.user_uin);
+        let logs = crate::store::MessageStore::open(&db)
+            .map(|s| s.list_script_logs(&tid, 30))
+            .unwrap_or_default();
+        if logs.is_empty() {
+            ui.label(
+                RichText::new("Chưa có log.").size(11.0).color(pal.text_muted),
+            );
+        } else {
+            for l in logs.iter().take(30) {
+                let icon = if l.level == "error" { "❌" } else { "·" };
+                let line = format!("{} [{}] {}", icon, l.name, l.msg);
+                let preview: String = line.chars().take(120).collect();
+                ui.label(
+                    RichText::new(preview).size(10.5).color(if l.level == "error" {
+                        Color32::from_rgb(200, 90, 90)
+                    } else {
+                        pal.text_muted
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Editor soạn script: tên + trigger + code + nút Lưu/Chạy thử/Xóa.
+    fn render_script_editor(&mut self, ui: &mut egui::Ui, pal: &ThemePalette, thread_id: &str) {
+        let tid = thread_id.to_string();
+        ui.label(
+            RichText::new(if self.script_editing_id.is_some() {
+                "Sửa script"
+            } else {
+                "Script mới"
+            })
+            .size(12.0)
+            .color(pal.text_primary)
+            .strong(),
+        );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Tên").size(11.0).color(pal.text_secondary));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.script_name_draft)
+                    .hint_text("vd. tổng-hợp-ngày")
+                    .desired_width(ui.available_width())
+                    .margin(Margin::symmetric(6.0, 3.0)),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Trigger").size(11.0).color(pal.text_secondary));
+            egui::ComboBox::from_id_salt("script_trigger_combo")
+                .selected_text(self.script_trigger_draft.clone())
+                .show_ui(ui, |ui| {
+                    for opt in ["manual", "on_message", "on_interval", "on_keyword"] {
+                        ui.selectable_value(
+                            &mut self.script_trigger_draft,
+                            opt.to_string(),
+                            opt,
+                        );
+                    }
+                });
+            if self.script_trigger_draft == "on_interval"
+                || self.script_trigger_draft == "on_keyword"
+            {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.script_arg_draft)
+                        .hint_text(if self.script_trigger_draft == "on_interval" {
+                            "phút (vd. 60)"
+                        } else {
+                            "từ khóa (vd. deadline)"
+                        })
+                        .desired_width(90.0)
+                        .margin(Margin::symmetric(6.0, 3.0)),
+                );
+            }
+        });
+        // Gợi ý trigger đầy đủ cho on_interval_N (UX viết tay dạng rút gọn vẫn parse được).
+        if self.script_trigger_draft.starts_with("on_interval_") {
+            ui.label(
+                RichText::new("Gợi ý: dùng Trigger = on_interval + ô phút bên cạnh.")
+                    .size(10.0)
+                    .color(pal.text_muted),
+            );
+        }
+        ui.add_space(4.0);
+        let code_resp = ui.add(
+            egui::TextEdit::multiline(&mut self.script_code_draft)
+                .hint_text("// rhai: get_messages(thread_id, 50), thread_stats(thread_id), kv_get/kv_set, send_queued(thread_id, text), toast(msg), log(msg)")
+                .desired_rows(12)
+                .desired_width(f32::INFINITY)
+                .code_editor()
+                .margin(Margin::symmetric(6.0, 4.0)),
+        );
+        let _ = code_resp;
+        ui.add_space(4.0);
+        let mut save_req = false;
+        let mut test_req = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("💾 Lưu").size(11.0).color(pal.primary_hover),
+                    )
+                    .fill(pal.primary.linear_multiply(0.12))
+                    .stroke(Stroke::new(1.0_f32, pal.primary))
+                    .rounding(Rounding::same(6.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                save_req = true;
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("▶ Chạy thử").size(11.0).color(pal.primary_hover),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(6.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                test_req = true;
+            }
+            if self.script_editing_id.is_some()
+                && ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("✕ Xóa").size(11.0).color(pal.text_muted),
+                        )
+                        .fill(Color32::TRANSPARENT)
+                        .frame(false),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+            {
+                let db = crate::store::db_path_for_account(&self.user_uin);
+                if let Ok(mut store) = crate::store::MessageStore::open(&db) {
+                    if let Some(id) = self.script_editing_id {
+                        let _ = store.delete_thread_script(id, &tid);
+                    }
+                }
+                self.script_list_cache.remove(&tid);
+                self.script_tab = 0;
+                self.script_editing_id = None;
+                self.show_toast("Đã xóa script");
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("← Danh sách").size(11.0).color(pal.text_muted),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .frame(false),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.script_tab = 0;
+                self.script_editing_id = None;
+            }
+        });
+        if save_req {
+            if self.script_name_draft.trim().is_empty() {
+                self.show_toast("⚠️ Nhập tên script trước khi lưu");
+            } else if self.script_code_draft.trim().is_empty() {
+                self.show_toast("⚠️ Script rỗng — chưa lưu");
+            } else {
+                let db = crate::store::db_path_for_account(&self.user_uin);
+                let ok = crate::store::MessageStore::open(&db)
+                    .map(|mut store| {
+                        if let Some(id) = self.script_editing_id {
+                            store
+                                .update_thread_script(
+                                    id,
+                                    &tid,
+                                    &self.script_name_draft,
+                                    &self.script_code_draft,
+                                    &self.script_trigger_draft,
+                                    &self.script_arg_draft,
+                                    true,
+                                )
+                                .unwrap_or(false)
+                        } else {
+                            store
+                                .save_thread_script(
+                                    &tid,
+                                    &self.script_name_draft,
+                                    &self.script_code_draft,
+                                    &self.script_trigger_draft,
+                                    &self.script_arg_draft,
+                                    true,
+                                )
+                                .map(|new_id| new_id > 0)
+                                .unwrap_or(false)
+                        }
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    self.script_list_cache.remove(&tid);
+                    self.script_tab = 0;
+                    self.script_editing_id = None;
+                    self.show_toast("Đã lưu script");
+                } else {
+                    self.show_toast("⚠️ Lưu thất bại (lỗi DB)");
+                }
+            }
+        }
+        if test_req {
+            let db = crate::store::db_path_for_account(&self.user_uin);
+            let snapshot = self.threads.clone();
+            let probe = crate::thread_script::ThreadScript {
+                id: self.script_editing_id.unwrap_or(0),
+                thread_id: tid.clone(),
+                name: if self.script_name_draft.trim().is_empty() {
+                    "chạy-thử".to_string()
+                } else {
+                    self.script_name_draft.clone()
+                },
+                code: self.script_code_draft.clone(),
+                trigger: self.script_trigger_draft.clone(),
+                trigger_arg: self.script_arg_draft.clone(),
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            };
+            let ev = crate::thread_script::ScriptEvent::test();
+            match crate::thread_script::run_script(&db, &snapshot, &tid, &probe, &ev) {
+                Ok(out) => {
+                    // Chạy thử: drain outbox luôn để thấy tin gửi được (qua SendMessage).
+                    let is_group = snapshot
+                        .iter()
+                        .find(|t| t.id == tid)
+                        .map(|t| t.is_group)
+                        .unwrap_or(false);
+                    for o in &out.outbox {
+                        if let Some(wtx) = WORKER_TX.get() {
+                            let _ = wtx.send(WorkerCmd::SendMessage {
+                                to_id: o.thread_id.clone(),
+                                text: o.text.clone(),
+                                is_group,
+                            });
+                        }
+                    }
+                    for t in &out.toasts {
+                        self.show_toast(t.clone());
+                    }
+                    let mut shown = out.output.clone();
+                    if !out.outbox.is_empty() {
+                        shown.push_str(&format!("\n📤 {} tin đã xếp hàng gửi", out.outbox.len()));
+                    }
+                    if shown.trim().is_empty() {
+                        shown = "(chạy xong, không có output)".to_string();
+                    }
+                    self.script_output = shown;
+                }
+                Err(e) => {
+                    crate::thread_script::persist_error_log(&db, &tid, &probe.name, &e.to_string());
+                    self.script_output = format!("❌ {e}");
+                }
+            }
+        }
+        if !self.script_output.trim().is_empty() {
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Output").size(11.0).color(pal.text_primary).strong(),
+            );
+            ui.label(
+                RichText::new(self.script_output.clone())
+                    .size(11.0)
+                    .color(pal.text_secondary),
+            );
+        }
+    }
+
 }
 
 /// Highlight the exact resolved row and optionally center it in the message viewport.

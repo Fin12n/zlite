@@ -758,7 +758,8 @@ pub(super) fn draw_icon_feed(painter: &egui::Painter, center: Pos2, size: f32, c
 }
 
 pub(super) fn draw_icon_drawer(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    draw_lucide_icon(painter, center, lucide::PANEL_RIGHT, size, color);
+    // Icon ⓘ to rõ thay vì PANEL_RIGHT mờ khó thấy.
+    draw_lucide_icon(painter, center, lucide::INFO, size * 1.15, color);
 }
 
 pub(super) fn draw_icon_pin(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {

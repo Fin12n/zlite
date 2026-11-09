@@ -593,6 +593,10 @@ async fn run_once(
                         .await;
                     trace(format!("-> pull next {qkey} {id}"));
                 }
+                // Log response của Sync V2 (590/592) để biết server ack hay từ chối.
+                if cmd == CMD_SYNC_REQUEST || cmd == CMD_SYNC_MOBILE_WAKE_UP {
+                    crate::logger::log_sync(&format!("WS về cmd={cmd}: {}", payload.to_string().chars().take(400).collect::<String>()));
+                }
                 let _ = tx.send(WsEvent { cmd, sub_cmd, version, payload });
             }
         }

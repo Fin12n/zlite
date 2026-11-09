@@ -618,7 +618,7 @@ impl Session {
             jar,
             domains: Domains::default(),
             imei: random_imei(),
-            computer_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "DESKTOP".into()),
+            computer_name: Self::real_computer_name(),
             secret_key: None,
             session_key: None,
             zpw_sek: None,
@@ -828,6 +828,25 @@ impl Session {
         Ok(())
     }
 
+    /// Tên máy thật cho sync (phone hiển thị/match theo tên này).
+    /// Ưu tiên `COMPUTERNAME` (Windows) → `HOSTNAME` → `scutil` (macOS).
+    fn real_computer_name() -> String {
+        std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .ok()
+            .filter(|h| !h.trim().is_empty())
+            .or_else(|| {
+                std::process::Command::new("scutil")
+                    .args(["--get", "ComputerName"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|h| h.trim().trim_end_matches(".local").to_string())
+                    .filter(|h| !h.is_empty())
+            })
+            .unwrap_or_else(|| "DESKTOP".into())
+    }
+
     /// Load a previously saved session from disk and restore cookies, keys, and endpoints.
     pub fn load_from_file(&mut self, path: &str) -> Result<()> {
         use base64::Engine;
@@ -844,7 +863,13 @@ impl Session {
         } else {
             random_imei()
         };
-        self.computer_name = saved.computer_name;
+        // Session cũ lưu "DESKTOP" cứng (macOS không có COMPUTERNAME) — thay bằng
+        // hostname thật để phone hiển thị/match đúng tên máy khi sync.
+        self.computer_name = if saved.computer_name.trim().is_empty() || saved.computer_name == "DESKTOP" {
+            Self::real_computer_name()
+        } else {
+            saved.computer_name
+        };
         self.domains = saved.domains;
         // Older sessions stored the long-polling hosts in `chat` / `conversation`
         // when `zpw_chts_new` / `zpw_ctrs_new` overwrote the REST domains. Rescind

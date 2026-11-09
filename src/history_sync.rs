@@ -198,17 +198,13 @@ where
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
 
-        // Phase 1 (đúng Zalo PC `shared-worker.js` SyncSession.start): gửi wake-up
-        // (`cmd 12000` + WS `cmd 592`) + `cmd 590` NGAY, rồi chờ user xác nhận trên
-        // điện thoại. Phone nhận 590 mới hiện màn xác nhận/nén.
+        // Phase 1: CHỈ gửi Sync V2 (wake `cmd 592` + `cmd 590` ngay sau). KHÔNG gửi
+        // thêm V1 `pull_mobile_msg` — gửi cả 2 khiến điện thoại nhận 2 phiên xung
+        // đột, hiện 2 thông báo và văng app khi bấm vào.
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
-        let r1 = chat::request_phone_sync(s, &pub_key).await;
-        if let Ok(val) = &r1 {
-            chat::merge_previews(threads, val);
-        }
         match chat::wake_phone_sync_v2(s).await {
             Ok(sync_id) => {
                 // Gửi 590 ngay sau wake (phone cần 590 mới hiện màn nén).

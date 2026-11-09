@@ -750,8 +750,12 @@ static CURRENT_V2_KEYS: std::sync::Mutex<Option<SyncV2KeysRaw>> = std::sync::Mut
 pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
     // wasmtime host (không cần Node.js). scripts/sync_v2_helper.js chỉ còn
     // là tài liệu tham khảo cho luồng JS gốc (deprecated path).
+    // QUAN TRỌNG (đúng Zalo PC `genSyncKeyPair`): ik là IDENTITY key cố định
+    // của máy (lưu `sync_identity.json`, gen 1 lần duy nhất), chỉ ek là
+    // ephemeral (gen mới mỗi lần sync). Gen ik mới mỗi lần khiến điện thoại
+    // thấy key lạ → văng app khi bấm vào thông báo đồng bộ.
     let host = crate::zproto_host::ZprotoHost::load()?;
-    let (ik_pub, ik_priv) = host.generate_keypair()?;
+    let (ik_pub, ik_priv) = load_or_create_identity_key(&host)?;
     let (ek_pub, ek_priv) = host.generate_keypair()?;
     use base64::Engine;
     let keys = SyncV2Keys {
@@ -774,6 +778,38 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push(H[(b & 15) as usize] as char);
     }
     s
+}
+
+/// Đọc identity key từ `sync_identity.json`, gen mới + lưu nếu chưa có.
+/// File nằm cùng data dir (app đã `set_current_dir` về đó lúc khởi động).
+fn load_or_create_identity_key(
+    host: &crate::zproto_host::ZprotoHost,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    use base64::Engine;
+    const PATH: &str = "sync_identity.json";
+    if let Ok(raw) = std::fs::read_to_string(PATH) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let dec = |k: &str| {
+                v.get(k)
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+            };
+            if let (Some(pubk), Some(privk)) = (dec("public_key"), dec("private_key")) {
+                if pubk.len() == 33 && privk.len() == 32 {
+                    crate::logger::log_sync("ik: dùng identity key đã lưu");
+                    return Ok((pubk, privk));
+                }
+            }
+        }
+    }
+    let (pubk, privk) = host.generate_keypair()?;
+    let doc = serde_json::json!({
+        "public_key": base64::engine::general_purpose::STANDARD.encode(&pubk),
+        "private_key": base64::engine::general_purpose::STANDARD.encode(&privk),
+    });
+    let _ = std::fs::write(PATH, serde_json::to_string_pretty(&doc).unwrap_or_default());
+    crate::logger::log_sync("ik: đã gen identity key mới + lưu");
+    Ok((pubk, privk))
 }
 /// Kết quả giải mã metadata Sync V2: session id để đối chiếu với event batch.
 #[derive(Debug, Default)]

@@ -3588,7 +3588,9 @@ impl ZaloGuiApp {
                                 ui.add_space(6.0);
                                 // Reserve room for the right-hand action cluster so the name/tag
                                 // block can never be overlapped by the call buttons.
-                                let actions_w = if is_compact_w { 126.0 } else { 182.0 };
+                                // Thực tế: drawer 34 + divider 8 + video 34 + voice 34
+                                // + vanish 34 + search 34 + spacing 5×8 = 218.
+                                let actions_w = if is_compact_w { 170.0 } else { 230.0 };
                                 let left_info_w =
                                     (ui.available_width() - actions_w).max(60.0);
                                 ui.allocate_ui_with_layout(

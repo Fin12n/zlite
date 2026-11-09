@@ -7830,6 +7830,7 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
     })?;
     let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
     // 1. Wake up mobile master device over WebSocket (`cmd 592`)
+    crate::logger::log_sync(&format!("request V2: sync={} tempKey_len={}", &sync_id.chars().take(8).collect::<String>(), temp_key.len()));
     let _ = crate::socket::send_mobile_wakeup(&sync_id);
 
     // 2. Build SyncFull v2 request payload matching `shared-worker.js:282247` & `314736`
@@ -7858,6 +7859,7 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
         "ussidx": 0
     });
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
+    crate::logger::log_sync(&format!("request V2 gửi WS: {sent_ws}"));
     Ok(json!({
         "error_code": 0,
         "data": {

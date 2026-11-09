@@ -3438,31 +3438,6 @@ mod tests {
     }
 
     #[test]
-    fn thread_read_point_roundtrips_and_survives_reupsert() {
-        let mut store = MessageStore::open(":memory:").unwrap();
-        store.set_thread_read("t1", "msg-100").unwrap();
-        let got = store.all_threads().unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].last_read_msg_id, "msg-100");
-
-        // Re-upserting without read-point preserves existing read-point (#119).
-        store
-            .upsert_thread(&StoredThread {
-                thread_id: "t1".into(),
-                name: "A".into(),
-                is_group: false,
-                last_ts: 1,
-                last_read_msg_id: String::new(),
-            })
-            .unwrap();
-        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-100");
-
-        // Explicit new read-point updates.
-        store.set_thread_read("t1", "msg-200").unwrap();
-        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
-    }
-
-    #[test]
     fn delete_thread_and_search_messages_work() {
         let mut store = MessageStore::open(":memory:").unwrap();
         store

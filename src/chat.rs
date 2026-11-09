@@ -2624,7 +2624,6 @@ pub async fn send_voice_message(
         .await
         .map_err(|e| anyhow::anyhow!("tải lên tin nhắn thoại thất bại: {e}"))?;
     let mut send_resp = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-    eprintln!("[voice] upload {} ({} bytes, {}) resp: {}", file_name, voice_bytes.len(), mime, send_resp);
     // Async upload chỉ trả fileId; fileUrl tới sau qua WS file_done (như attachment).
     // Chờ event rồi nhét URL vào response để parse ra message đầy đủ.
     let need_url = send_resp

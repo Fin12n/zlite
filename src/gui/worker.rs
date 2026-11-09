@@ -3055,7 +3055,6 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     } else {
                                         let client = { session_clone.lock().await.clone().http };
                                         let fetch_url = crate::store::jxl_to_jpg_url(&url);
-                                        eprintln!("[avatar] fetch key={} url={}", key, fetch_url);
                                         let body = match client
                                             .get(&fetch_url)
                                             .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
@@ -3063,17 +3062,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             .await
                                         {
                                             Ok(resp) => {
-                                                eprintln!("[avatar] key={} status={}", key, resp.status());
                                                 if resp.status().is_success() {
                                                     resp.bytes().await.ok()
                                                 } else {
                                                     None
                                                 }
                                             }
-                                            Err(e) => {
-                                                eprintln!("[avatar] key={} net-err: {e}", key);
-                                                None
-                                            }
+                                            Err(_) => None,
                                         };
                                         (body.map(|b| b.to_vec()), true)
                                     };

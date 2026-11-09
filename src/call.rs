@@ -3334,10 +3334,7 @@ impl CallBridge {
                                     req_402["extendData"] = json!(ext);
                                     req_402["subCommand"] = json!(3);
                                 }
-                                match dispatch_send_signal(&s_snap, 402, &req_402).await {
-                                    Ok(r) => eprintln!("[call] 402 answer resp: {}", r),
-                                    Err(e) => eprintln!("[call] 402 answer err: {e}"),
-                                }
+                                let _ = dispatch_send_signal(&s_snap, 402, &req_402).await;
                             }
                         });
                     }

@@ -655,13 +655,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     // RẺ: mở DB 1 lần/tick, chỉ chạy script tới hạn; outbox drain qua SendMessage.
                     let gui_tx_script = gui_tx.clone();
                     let ctx_script = egui_ctx.clone();
-                    let login_uin = session
-                        .blocking_lock()
-                        .login
-                        .as_ref()
-                        .map(|l| l.uin.clone())
-                        .unwrap_or_default();
+                    let session_script = session.clone();
                     tokio::spawn(async move {
+                        // Lấy uin async trong task (blocking_lock panic trong runtime).
+                        let login_uin = session_script
+                            .lock()
+                            .await
+                            .login
+                            .as_ref()
+                            .map(|l| l.uin.clone())
+                            .unwrap_or_default();
                         let mut tick = tokio::time::interval(Duration::from_secs(60));
                         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         loop {

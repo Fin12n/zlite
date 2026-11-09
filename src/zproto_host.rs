@@ -358,11 +358,27 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "wbg",
         "__wbg_set_65595bdd868b3009",
         |mut caller: Caller<'_, HostState>, arr: u32, src: u32, off: u32| {
-            // `a(e).set(a(t), off)` — views write through to WASM memory.
+            // `a(e).set(a(t), off)`: views write through to WASM memory;
+            // owned arrays splice into their bytes (JS `set` semantics).
             let m = mem_of(&mut caller);
             let src_bytes = u8_bytes(&caller, m, src);
-            if let JsVal::U8 { view: Some((ptr, _)), .. } = caller.data().get(arr).clone() {
-                write_bytes(&mut caller, m, ptr + off, &src_bytes);
+            match caller.data().get(arr).clone() {
+                JsVal::U8 { view: Some((ptr, _)), .. } => {
+                    write_bytes(&mut caller, m, ptr + off, &src_bytes);
+                }
+                JsVal::U8 { view: None, .. } => {
+                    if let Some(slot) = caller.data_mut().heap.get_mut(arr as usize) {
+                        if let Some(JsVal::U8 { bytes, .. }) = slot.as_mut() {
+                            let need = off as usize + src_bytes.len();
+                            if bytes.len() < need {
+                                bytes.resize(need, 0);
+                            }
+                            bytes[off as usize..off as usize + src_bytes.len()]
+                                .copy_from_slice(&src_bytes);
+                        }
+                    }
+                }
+                _ => {}
             }
         },
     )?;
@@ -398,9 +414,26 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "wbg",
         "__wbg_new_a12002a7f91c75be",
         |mut caller: Caller<'_, HostState>, src: u32| -> u32 {
-            let m = mem_of(&mut caller);
-            let b = u8_bytes(&caller, m, src);
-            caller.data_mut().alloc(JsVal::U8 { bytes: b, view: None })
+            // `new Uint8Array(src)`: views stay views (JS shares the buffer —
+            // copying breaks `getUint8Memory().set(...)` write-through).
+            // Only owned sources are copied.
+            match caller.data().get(src).clone() {
+                JsVal::U8 { view: Some(v), .. } => {
+                    caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: Some(v) })
+                }
+                // `new Uint8Array(arraybuffer)`: whole-memory view (JS shares
+                // the buffer — `getUint8Memory().set()` must write through).
+                JsVal::Dummy("arraybuffer") => {
+                    let m = mem_of(&mut caller);
+                    let view = (0u32, m.data_size(&caller) as u32);
+                    caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: Some(view) })
+                }
+                _ => {
+                    let m = mem_of(&mut caller);
+                    let b = u8_bytes(&caller, m, src);
+                    caller.data_mut().alloc(JsVal::U8 { bytes: b, view: None })
+                }
+            }
         },
     )?;
     linker.func_wrap(
@@ -524,13 +557,7 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "wbg",
         "__wbg_getRandomValues_bcb4912f16000dc4",
         |mut caller: Caller<'_, HostState>, _crypto: u32, arr: u32| -> Result<(), wasmtime::Error> {
-            let m = mem_of(&mut caller);
-            if let JsVal::U8 { view: Some((ptr, len)), .. } = caller.data().get(arr).clone() {
-                let mut buf = vec![0u8; len as usize];
-                fill_random(&mut buf).map_err(|e| wasmtime::Error::msg(e.to_string()))?;
-                write_bytes(&mut caller, m, ptr, &buf);
-            }
-            Ok(())
+            fill_u8(&mut caller, arr).map_err(|e| wasmtime::Error::msg(e.to_string()))
         },
     )?;
     linker.func_wrap(
@@ -1024,6 +1051,16 @@ mod tests {
         assert_eq!(pubk.len(), 33, "pub must be 33 bytes");
         assert_eq!(pubk[0], 0x05, "pub must have 0x05 prefix");
         assert_eq!(privk.len(), 32, "priv must be 32 bytes");
+    }
+
+    #[test]
+    fn gen_keys_are_unique_per_call() {
+        // RNG shim phải cấp entropy thật mỗi lần gọi: key trùng nhau khiến
+        // điện thoại văng app khi bấm vào thông báo đồng bộ (ek == ik).
+        let Some(h) = try_load() else { return };
+        let (p1, _) = h.generate_keypair().expect("keypair 1");
+        let (p2, _) = h.generate_keypair().expect("keypair 2");
+        assert_ne!(p1, p2, "hai lần gen key liên tiếp phải khác nhau");
     }
 
     #[test]

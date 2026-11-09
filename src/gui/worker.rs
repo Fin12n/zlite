@@ -969,12 +969,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                 ctx_sync.request_repaint();
+                                                                crate::logger::log_sync(&format!("batch meta về: sync={}", sync_id));
                                                                 match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
                                                                     Ok(meta) => {
                                                                         crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                                                                        crate::logger::log_sync(&format!("meta OK: sync={} session={}", sync_id, meta.session_id));
                                                                     }
                                                                     Err(e) => {
                                                                         let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                                                                        crate::logger::log_sync(&format!("meta FAIL: sync={} err={}", sync_id, e));
                                                                         crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
                                                                         let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
                                                                     }
@@ -994,8 +997,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                 ctx_sync.request_repaint();
 
+                                                                crate::logger::log_sync(&format!("batch msg về: sync={} last={}", sync_id, is_last));
                                                                 match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
                                                                     Ok(count) => {
+                                                                        crate::logger::log_sync(&format!("msg OK: sync={} count={}", sync_id, count));
                                                                         let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                         crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                                                                         let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
@@ -1003,6 +1008,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                         let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
                                                                     }
                                                                     Err(e) => {
+                                                                        crate::logger::log_sync(&format!("msg FAIL: sync={} err={}", sync_id, e));
                                                                         let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
                                                                         crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
                                                                         let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
@@ -1986,12 +1992,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                     ctx_sync.request_repaint();
+                                                                    crate::logger::log_sync(&format!("batch meta về: sync={}", sync_id));
                                                                     match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
                                                                         Ok(meta) => {
                                                                             crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                                                                            crate::logger::log_sync(&format!("meta OK: sync={} session={}", sync_id, meta.session_id));
                                                                         }
                                                                         Err(e) => {
                                                                             let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                                                                            crate::logger::log_sync(&format!("meta FAIL: sync={} err={}", sync_id, e));
                                                                             crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
                                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
                                                                         }
@@ -2009,8 +2018,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                                     ctx_sync.request_repaint();
 
+                                                                    crate::logger::log_sync(&format!("batch msg về: sync={} last={}", sync_id, is_last));
                                                                     match crate::history_sync::import_sync_v2_messages_inner(&s_sync, &url, Some(&sync_id), is_last).await {
                                                                         Ok(count) => {
+                                                                            crate::logger::log_sync(&format!("msg OK: sync={} count={}", sync_id, count));
                                                                             let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                             crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
@@ -2018,6 +2029,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                             let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
                                                                         }
                                                                         Err(e) => {
+                                                                            crate::logger::log_sync(&format!("msg FAIL: sync={} err={}", sync_id, e));
                                                                             let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
                                                                             crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
                                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));

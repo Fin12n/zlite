@@ -7830,6 +7830,17 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
 /// Gửi `cmd 590` (SYNC_MESSAGE.REQUEST) SAU KHI user đã xác nhận trên điện
 /// thoại. Keys phải đã sinh bởi [`wake_phone_sync_v2`] (giữ trong RAM).
 pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
+    send_sync_v2_request_with_queries(s, sync_id, &[])
+}
+
+/// Gửi `cmd 590` với queries partition thật (`oneone/<globalNoisedId>`).
+/// `noised_ids` rỗng → 1 query conversations (`partition:""`, phone chấp nhận
+/// nhưng không trả batch — dùng cho probe).
+pub fn send_sync_v2_request_with_queries(
+    s: &Session,
+    sync_id: &str,
+    noised_ids: &[String],
+) -> Result<bool> {
     // Manual sync: tempKey rỗng (đúng Zalo PC — tempKey chỉ dùng cho auto sync
     // sau transfer event; tempKey cũ/hết hạn làm phone crash khi xác nhận).
     let temp_key = String::new();
@@ -7837,6 +7848,29 @@ pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
     let keys = crate::history_sync::current_v2_keys()
         .map_err(|_| anyhow::anyhow!("chưa có khóa Sync V2 — gọi wake_phone_sync_v2 trước"))?;
     let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
+
+    // Queries với partition thật `oneone/<globalNoisedId>` (lấy từ /api/znoise).
+    // Rỗng → 1 query conversations (phone chấp nhận nhưng không trả batch).
+    let queries: Vec<serde_json::Value> = if noised_ids.is_empty() {
+        vec![json!({
+            "partition": "",
+            "from": 0,
+            "to": 9_007_199_254_740_991_i64,
+            "limit": 9_007_199_254_740_991_i64
+        })]
+    } else {
+        noised_ids
+            .iter()
+            .map(|n| {
+                json!({
+                    "partition": format!("oneone/{n}"),
+                    "from": 0,
+                    "to": 9_007_199_254_740_991_i64,
+                    "limit": 9_007_199_254_740_991_i64
+                })
+            })
+            .collect()
+    };
 
     // 2. Build SyncFull v2 request payload matching `shared-worker.js:282247` & `314736`
     let sync_data = json!({
@@ -7848,19 +7882,9 @@ pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
         "tempKey": temp_key,
         "deviceName": s.computer_name,
         "req": {
-            // Đúng Zalo `requestSync` (shared-worker.js:284206): type = database
-            // (default "unspecified"), phase đầu = conversations (1 query,
-            // partition rỗng, range ms, limit MAX).
-            "type": "unspecified",
+            "type": "message",
             "priority": 1,
-            "queries": [
-                {
-                    "partition": "",
-                    "from": 0,
-                    "to": 9_007_199_254_740_991_i64,
-                    "limit": 9_007_199_254_740_991_i64
-                }
-            ],
+            "queries": queries,
             "batchSize": 2000
         },
         "ver": 1,

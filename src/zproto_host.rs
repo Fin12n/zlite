@@ -859,8 +859,6 @@ impl ZprotoHost {
                     Val::I32(b as i32), Val::I32(bl as i32),
                     Val::I32(d as i32), Val::I32(dl as i32),
                     Val::I32(e), Val::I32(el),
-                    // Optional 6th string arg: null → (0, 0).
-                    Val::I32(0), Val::I32(0),
                 ])
             })?;
             h.call_raw("zprotoSync2DecryptMetadata", &args)?;

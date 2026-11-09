@@ -7811,6 +7811,15 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
     }
     let sync_id = crate::param_cipher::random_hex(32);
     let temp_key = crate::history_sync::latest_mobile_temp_key();
+    // tempKey rỗng (chưa nhận TransferAfterLogin sau login) mà vẫn gửi sẽ làm
+    // app Zalo trên điện thoại crash khi bấm Đồng bộ. Chặn ở đây, bảo user
+    // đăng xuất/đăng nhập lại để lấy tempKey mới.
+    if temp_key.trim().is_empty() {
+        anyhow::bail!(
+            "Thiếu tempKey từ điện thoại (chưa nhận phiên sau đăng nhập). \
+             Hãy đăng xuất rồi đăng nhập lại, sau đó bấm Đồng bộ."
+        );
+    }
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     let keys = crate::history_sync::generate_sync_v2_keys().map_err(|e| {

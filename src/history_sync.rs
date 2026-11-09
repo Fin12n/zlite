@@ -198,26 +198,20 @@ where
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
 
-        // Phase 1: CHỈ gửi Sync V2 (wake `cmd 592` + `cmd 590` ngay sau). KHÔNG gửi
-        // thêm V1 `pull_mobile_msg` — gửi cả 2 khiến điện thoại nhận 2 phiên xung
-        // đột, hiện 2 thông báo và văng app khi bấm vào.
+        // Phase 1 (đúng thứ tự Zalo PC): V1 `pull_mobile_msg` TRƯỚC để phone
+        // hiện màn xác nhận (phone match `pc_name`+`public_key` khi gửi
+        // `user_confirm` về) → chờ user bấm "Đồng bộ ngay" → RỒI mới gửi V2
+        // (wake `cmd 592` + `cmd 590`) để phone nén & gửi batch. Gửi cả 2 cùng
+        // lúc tạo 2 phiên xung đột (2 thông báo, văng app); chỉ gửi V2 thì
+        // phone không có gì để confirm nên treo ở "đang đồng bộ".
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
-        match chat::wake_phone_sync_v2(s).await {
-            Ok(sync_id) => {
-                // Gửi 590 ngay sau wake (phone cần 590 mới hiện màn nén).
-                match chat::send_sync_v2_request(s, &sync_id) {
-                    Ok(true) => crate::logger::log_sync(&format!("590 gửi ngay sau wake: sync={}", &sync_id.chars().take(8).collect::<String>())),
-                    Ok(false) => on_progress(0.15, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
-                    Err(e) => on_progress(0.15, format!("⚠️ Sync V2: {e}")),
-                }
-            }
-            Err(e) => {
-                crate::logger::log_sync(&format!("wake V2 FAIL: {e}"));
-                on_progress(0.15, format!("⚠️ Sync V2: {e}"));
-            }
+        let temp_key = latest_mobile_temp_key();
+        crate::logger::log_sync(&format!("V1 pull_mobile_msg (tempKey_len={})", temp_key.len()));
+        if let Ok(val) = chat::request_phone_sync_with_temp_key(s, &pub_key, &temp_key).await {
+            chat::merge_previews(threads, &val);
         }
 
         // Wait for user to confirm on phone (up to 90 seconds)
@@ -249,7 +243,22 @@ where
         }
 
         if confirmed {
-            on_progress(0.50, "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string());
+            // User đã bấm "Đồng bộ ngay" → giờ mới gửi V2 để phone nén & gửi batch.
+            on_progress(0.45, "📲 Đã xác nhận — đang gửi yêu cầu lấy tin nhắn (Sync V2)…".to_string());
+            match chat::wake_phone_sync_v2(s).await {
+                Ok(sync_id) => match chat::send_sync_v2_request(s, &sync_id) {
+                    Ok(true) => {
+                        crate::logger::log_sync(&format!("590 gửi sau confirm V1: sync={}", &sync_id.chars().take(8).collect::<String>()));
+                        on_progress(0.50, "📲 Đã gửi yêu cầu — chờ điện thoại nén & gửi gói tin…".to_string());
+                    }
+                    Ok(false) => on_progress(0.50, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
+                    Err(e) => on_progress(0.50, format!("⚠️ Sync V2: {e}")),
+                },
+                Err(e) => {
+                    crate::logger::log_sync(&format!("wake V2 FAIL: {e}"));
+                    on_progress(0.50, format!("⚠️ Sync V2: {e}"));
+                }
+            }
             let finish_deadline = std::time::Instant::now() + Duration::from_secs(120);
             while std::time::Instant::now() < finish_deadline {
                 if let Some(st) = last_mobile_sync_status().as_deref() {

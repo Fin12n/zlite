@@ -198,25 +198,31 @@ where
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
 
-        // Phase 1 (đúng thứ tự Zalo PC): wake-up trước (`cmd 12000` + WS `cmd 592`),
-        // CHỜ user xác nhận trên điện thoại, RỒI mới gửi `cmd 590`. Gửi 590 quá
-        // sớm khiến phone bỏ qua (chỉ hiện "đang đồng bộ" mà không nén).
+        // Phase 1 (đúng Zalo PC `shared-worker.js` SyncSession.start): gửi wake-up
+        // (`cmd 12000` + WS `cmd 592`) + `cmd 590` NGAY, rồi chờ user xác nhận trên
+        // điện thoại. Phone nhận 590 mới hiện màn xác nhận/nén.
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
         let r1 = chat::request_phone_sync(s, &pub_key).await;
-        if let Ok(ref val) = r1 {
+        if let Ok(val) = &r1 {
             chat::merge_previews(threads, val);
         }
-        let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
-            Ok(id) => Some(id),
+        match chat::wake_phone_sync_v2(s).await {
+            Ok(sync_id) => {
+                // Gửi 590 ngay sau wake (phone cần 590 mới hiện màn nén).
+                match chat::send_sync_v2_request(s, &sync_id) {
+                    Ok(true) => crate::logger::log_sync(&format!("590 gửi ngay sau wake: sync={}", &sync_id.chars().take(8).collect::<String>())),
+                    Ok(false) => on_progress(0.15, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
+                    Err(e) => on_progress(0.15, format!("⚠️ Sync V2: {e}")),
+                }
+            }
             Err(e) => {
                 crate::logger::log_sync(&format!("wake V2 FAIL: {e}"));
                 on_progress(0.15, format!("⚠️ Sync V2: {e}"));
-                None
             }
-        };
+        }
 
         // Wait for user to confirm on phone (up to 90 seconds)
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
@@ -247,15 +253,7 @@ where
         }
 
         if confirmed {
-            // User đã xác nhận → GIỜ mới gửi cmd 590 (đúng thứ tự Zalo PC).
-            if let Some(sync_id) = v2_sync_id.as_deref() {
-                on_progress(0.45, "📲 Đã xác nhận — đang gửi yêu cầu lấy tin nhắn (cmd 590)…".to_string());
-                match chat::send_sync_v2_request(s, sync_id) {
-                    Ok(true) => on_progress(0.50, "📲 Đã gửi yêu cầu — chờ điện thoại nén & gửi gói tin…".to_string()),
-                    Ok(false) => on_progress(0.50, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
-                    Err(e) => on_progress(0.50, format!("⚠️ Sync V2: {e}")),
-                }
-            }
+            on_progress(0.50, "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string());
             let finish_deadline = std::time::Instant::now() + Duration::from_secs(120);
             while std::time::Instant::now() < finish_deadline {
                 if let Some(st) = last_mobile_sync_status().as_deref() {

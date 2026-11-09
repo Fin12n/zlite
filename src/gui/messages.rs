@@ -3049,7 +3049,6 @@ pub(super) fn render_chat_bubble(
             || is_latest_outgoing
             || has_interactive_card
             || !msg.reactions.is_empty()
-            || msg.is_pinned
             || msg.is_starred);
 
     let photo_caption = if is_photo_card {
@@ -3210,7 +3209,7 @@ pub(super) fn render_chat_bubble(
         } else {
             0.0_f32
         };
-        let marks_w = if !msg.reactions.is_empty() || msg.is_pinned || msg.is_starred {
+        let marks_w = if !msg.reactions.is_empty() || msg.is_starred {
             78.0_f32
         } else {
             0.0_f32
@@ -3373,17 +3372,6 @@ pub(super) fn render_chat_bubble(
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
                 }
-                if let Some(act) = render_hover_reaction_bar(
-                    ui,
-                    fr.response.rect,
-                    msg,
-                    idx,
-                    true,
-                    pal,
-                    emoji_textures,
-                ) {
-                    return Some(act);
-                }
                 reaction_action
                     .or(quote_action)
                     .or(card_action)
@@ -3539,17 +3527,6 @@ pub(super) fn render_chat_bubble(
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
                 }
-                if let Some(act) = render_hover_reaction_bar(
-                    ui,
-                    fr.response.rect,
-                    msg,
-                    idx,
-                    false,
-                    pal,
-                    emoji_textures,
-                ) {
-                    return Some(act);
-                }
                 reaction_action
                     .or(quote_action)
                     .or(card_action)
@@ -3634,7 +3611,7 @@ fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, text_color: Color32) ->
         .color(text_color);
     let btn = egui::Button::new(text)
         .fill(Color32::TRANSPARENT)
-        .min_size(Vec2::new(175.0, 26.0));
+        .min_size(Vec2::new(ui.available_width(), 26.0));
     ui.add(btn)
 }
 
@@ -3645,7 +3622,7 @@ pub(super) fn bubble_context_menu(
     msg: &ChatMessage,
     idx: usize,
     pal: &ThemePalette,
-    _emoji_textures: &HashMap<String, TextureHandle>,
+    emoji_textures: &HashMap<String, TextureHandle>,
     _has_interactive_card: bool,
     _display_sender: &str,
     pending_translate: bool,
@@ -3691,7 +3668,7 @@ pub(super) fn bubble_context_menu(
     let mut close_menu = false;
 
     let screen = ui.ctx().screen_rect();
-    let menu_w = 190.0_f32;
+    let menu_w = 180.0_f32;
     let menu_h = 280.0_f32;
     let pos = Pos2::new(
         menu_pos.x.clamp(
@@ -3722,14 +3699,38 @@ pub(super) fn bubble_context_menu(
                     spread: 0.0,
                     color: Color32::from_black_alpha(if pal.is_dark { 130 } else { 45 }),
                 })
-                .inner_margin(Margin::symmetric(6.0, 6.0))
+                .inner_margin(Margin::symmetric(10.0, 10.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(menu_w);
+                    ui.set_width(menu_w);
                     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
 
                     // Tin đã biến mất: vô hiệu mọi thao tác media/link (chỉ cho xoá).
                     let vanished =
                         msg.text.trim() == crate::chat::VANISH_EXPIRED_TEXT;
+                    // 0. Hàng emoji thả cảm xúc (giống Zalo gốc khi chuột phải)
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+                        for &(code, key, tooltip) in &REACTION_LIST {
+                            let btn_resp = if let Some(tex) = emoji_textures.get(key) {
+                                let img =
+                                    egui::Image::new(tex).fit_to_exact_size(Vec2::splat(18.0));
+                                ui.add(egui::ImageButton::new(img).rounding(Rounding::same(4.0)))
+                            } else {
+                                ui.add(
+                                    egui::Button::new(RichText::new(code).size(15.0))
+                                        .fill(Color32::TRANSPARENT)
+                                        .rounding(Rounding::same(4.0)),
+                                )
+                            };
+                            let clicked = btn_resp.clicked();
+                            btn_resp.on_hover_text(tooltip);
+                            if clicked {
+                                action = Some(BubbleAction::React(code));
+                                close_menu = true;
+                            }
+                        }
+                    });
+                    ui.separator();
                     // 1. Trả lời (Quote)
                     if !vanished
                         && menu_item(ui, lucide::QUOTE, "Trả lời", pal.text_primary).clicked()
@@ -4075,6 +4076,7 @@ pub(super) fn render_quote_block(
     clicked.then(|| BubbleAction::JumpToQuoted(reference.unwrap_or_default()))
 }
 
+#[allow(dead_code)]
 pub(super) fn render_hover_reaction_bar(
     ui: &mut egui::Ui,
     bubble_rect: Rect,
@@ -4291,7 +4293,8 @@ pub(super) fn render_reactions(
     pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
 ) -> Option<BubbleAction> {
-    let has_pin = msg.is_pinned;
+    // Pin badge display parked until server-side pinning is fully integrated (avoid showing mock data).
+    let has_pin = false;
     let has_star = msg.is_starred;
     let has_react = !msg.reactions.is_empty() || !msg.reaction_summaries.is_empty();
 
@@ -4305,22 +4308,6 @@ pub(super) fn render_reactions(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 2.0);
 
-        if has_pin {
-            egui::Frame::none()
-                .fill(pal.primary.linear_multiply(0.18))
-                .stroke(Stroke::new(1.0_f32, pal.primary))
-                .rounding(Rounding::same(8.0))
-                .inner_margin(Margin::symmetric(5.0, 2.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} Đã ghim", lucide::PIN))
-                            .size(11.0)
-                            .color(pal.primary)
-                            .strong(),
-                    );
-                });
-        }
-
         if has_star {
             egui::Frame::none()
                 .fill(Color32::from_rgb(234, 179, 8).linear_multiply(0.2))
@@ -4328,12 +4315,17 @@ pub(super) fn render_reactions(
                 .rounding(Rounding::same(8.0))
                 .inner_margin(Margin::symmetric(5.0, 2.0))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!("{} Đã lưu", lucide::STAR))
-                            .size(11.0)
-                            .color(Color32::from_rgb(234, 179, 8))
-                            .strong(),
-                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(lucide::STAR)
+                                .size(11.0)
+                                .color(Color32::from_rgb(234, 179, 8))
+                                .strong(),
+                        )
+                        .selectable(false)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                    )
+                    .on_hover_text("Tin nhắn đã đánh dấu");
                 });
         }
 
@@ -4795,136 +4787,6 @@ mod quote_navigation_tests {
         assert!(matches!(action, Some(BubbleAction::Reply)));
     }
 
-    #[test]
-    fn bubble_hover_reaction_bar_emits_react_action() {
-        let ctx = egui::Context::default();
-        let msg = ChatMessage {
-            id: "msg-hover-test".into(),
-            text: "Hello hover react".into(),
-            sender: "Tester".into(),
-            is_outgoing: false,
-            ts: 987654321,
-            ..Default::default()
-        };
-
-        let bubble_rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(150.0, 40.0));
-        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)));
-
-        // Frame 0: Hover over bubble -> triggers hover bar
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![egui::Event::PointerMoved(Pos2::new(120.0, 110.0))],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Frame 1: Second frame so Area is painted
-        let output = ctx.run(
-            egui::RawInput {
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Find first reaction emoji text from output shapes
-        let mut emoji_pos = None;
-        for shape in &output.shapes {
-            if let egui::Shape::Text(text) = &shape.shape {
-                if text.galley.job.text == "👍" {
-                    emoji_pos = Some(text.pos + Vec2::new(4.0, 4.0));
-                    break;
-                }
-            }
-        }
-        let emoji_pos = emoji_pos.expect("Reaction bar should be rendered with 👍 emoji");
-
-        // Frame 1: Move mouse to emoji and press Primary
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![
-                    egui::Event::PointerMoved(emoji_pos),
-                    egui::Event::PointerButton {
-                        pos: emoji_pos,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        // Frame 2: Release Primary -> React action emitted!
-        let mut action = None;
-        let _ = ctx.run(
-            egui::RawInput {
-                events: vec![egui::Event::PointerButton {
-                    pos: emoji_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-                screen_rect: screen,
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    action = render_hover_reaction_bar(
-                        ui,
-                        bubble_rect,
-                        &msg,
-                        0,
-                        false,
-                        &ThemePalette::light(),
-                        &HashMap::new(),
-                    );
-                });
-            },
-        );
-
-        assert!(matches!(action, Some(BubbleAction::React("👍"))));
-    }
 
     #[test]
     fn extract_photo_user_caption_filters_raw_image_filenames() {

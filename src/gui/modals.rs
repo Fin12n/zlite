@@ -577,8 +577,8 @@ impl ZaloGuiApp {
                 close_popup = true;
             } else {
                 ctx.request_repaint_after(Duration::from_millis(40));
-                let popup_w = 376.0_f32;
-                let popup_h = 148.0_f32;
+                let popup_w = 380.0_f32;
+                let popup_h = 156.0_f32;
                 let corner_pos = get_desktop_bottom_right_pos(ctx, popup_w, popup_h);
                 let vp_id = egui::ViewportId::from_hash_of("zalo_corner_notification_popup");
                 let builder = egui::ViewportBuilder::default()
@@ -675,32 +675,32 @@ impl ZaloGuiApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        let close_btn = egui::Button::new(
+                                            RichText::new(lucide::X)
+                                                .size(12.5)
+                                                .color(pal.text_muted),
+                                        )
+                                        .frame(false);
                                         if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("✕")
-                                                        .size(13.0)
-                                                        .color(pal.text_muted),
-                                                )
-                                                .frame(false),
-                                            )
+                                            .add(close_btn)
+                                            .on_hover_cursor(CursorIcon::PointingHand)
                                             .on_hover_text("Đóng thông báo (Esc)")
                                             .clicked()
                                         {
                                             close_popup = true;
                                         }
                                         ui.add_space(4.0);
+                                        let open_btn = egui::Button::new(
+                                            RichText::new("Mở chat")
+                                                .size(11.5)
+                                                .color(pal.primary)
+                                                .strong(),
+                                        )
+                                        .fill(pal.primary.linear_multiply(0.14))
+                                        .rounding(Rounding::same(6.0));
                                         if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("Mở chat ↗")
-                                                        .size(11.0)
-                                                        .color(pal.primary)
-                                                        .strong(),
-                                                )
-                                                .fill(pal.primary.linear_multiply(0.14))
-                                                .rounding(Rounding::same(6.0)),
-                                            )
+                                            .add(open_btn)
+                                            .on_hover_cursor(CursorIcon::PointingHand)
                                             .clicked()
                                         {
                                             jump_to_tid = Some(tid_cl.clone());
@@ -815,9 +815,10 @@ impl ZaloGuiApp {
                             ui.horizontal(|ui| {
                                 let input_w = (ui.available_width() - 58.0).max(160.0);
                                 let te_resp = ui.add_sized(
-                                    [input_w, 26.0],
+                                    [input_w, 29.0],
                                     egui::TextEdit::singleline(&mut draft_local)
                                         .hint_text("Trả lời nhanh… (Enter để gửi)")
+                                        .margin(Margin::symmetric(8.0, 5.0))
                                         .font(FontId::proportional(12.0)),
                                 );
                                 if te_resp.has_focus() {
@@ -827,16 +828,17 @@ impl ZaloGuiApp {
                                     && vp_ctx.input(|i| i.key_pressed(Key::Enter));
                                 let btn_send = ui
                                     .add_sized(
-                                        [50.0, 26.0],
+                                        [50.0, 29.0],
                                         egui::Button::new(
                                             RichText::new("Gửi")
-                                                .size(11.5)
+                                                .size(12.0)
                                                 .color(Color32::WHITE)
                                                 .strong(),
                                         )
                                         .fill(pal.primary)
                                         .rounding(Rounding::same(6.0)),
                                     )
+                                    .on_hover_cursor(CursorIcon::PointingHand)
                                     .clicked();
                                 if (enter_send || btn_send) && !draft_local.trim().is_empty() {
                                     quick_reply_send = Some((
@@ -902,7 +904,7 @@ impl ZaloGuiApp {
                     is_group,
                 });
             }
-            self.show_toast("✓ Đã gửi trả lời nhanh");
+            self.show_toast(format!("{} Đã gửi trả lời nhanh", lucide::CHECK));
         }
         if let Some(tid) = jump_to_tid {
             if let Some(idx) = self.threads.iter().position(|t| t.id == tid) {
@@ -1078,19 +1080,19 @@ impl ZaloGuiApp {
                                         );
                                         let (f_lbl, f_col) = match prof.friendship {
                                             crate::chat::FriendshipStatus::Friend => {
-                                                ("✓ Bạn bè", pal.accent_online)
+                                                (format!("{} Bạn bè", lucide::CHECK), pal.accent_online)
                                             }
                                             crate::chat::FriendshipStatus::IncomingPending => {
-                                                ("Chờ bạn đồng ý", pal.primary_hover)
+                                                ("Chờ bạn đồng ý".to_string(), pal.primary_hover)
                                             }
                                             crate::chat::FriendshipStatus::OutgoingPending => {
-                                                ("Đã gửi lời mời", pal.warning)
+                                                ("Đã gửi lời mời".to_string(), pal.warning)
                                             }
                                             crate::chat::FriendshipStatus::Stranger => {
-                                                ("Chưa kết bạn", Color32::from_rgb(249, 115, 22))
+                                                ("Chưa kết bạn".to_string(), Color32::from_rgb(249, 115, 22))
                                             }
                                             crate::chat::FriendshipStatus::Unknown => {
-                                                ("Đang kiểm tra…", pal.text_muted)
+                                                ("Đang kiểm tra…".to_string(), pal.text_muted)
                                             }
                                         };
                                         egui::Frame::none()
@@ -2019,7 +2021,7 @@ impl ZaloGuiApp {
                                                             });
                                                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                                                 if acc.is_current {
-                                                                    ui.label(RichText::new("✓ Đang sử dụng").size(11.5).color(pal.accent_online).strong());
+                                                                    ui.label(RichText::new(format!("{} Đang sử dụng", lucide::CHECK)).size(11.5).color(pal.accent_online).strong());
                                                                 } else {
                                                                     let del_btn = egui::Button::new(
                                                                         RichText::new(lucide::X).size(12.0).color(pal.text_muted)
@@ -4988,7 +4990,7 @@ impl ZaloGuiApp {
             520.0
         };
         let win_title = if call.is_group {
-            format!("Họp nhóm Zavi SFU — {}", call.partner_name)
+            format!("Họp nhóm Zavi — {}", call.partner_name)
         } else if call.is_video {
             format!("Zalo Video Call — {}", call.partner_name)
         } else {
@@ -5180,7 +5182,7 @@ impl ZaloGuiApp {
                             Color32::from_rgb(110, 231, 183)
                         };
                         let badge_txt = if call.is_group {
-                            format!("{} Họp Zavi · SFU", lucide::VIDEO)
+                            format!("{} Họp Zavi", lucide::VIDEO)
                         } else if call.is_video {
                             format!("{} Zalo Video · ZRTP", lucide::VIDEO)
                         } else {

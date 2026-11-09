@@ -197,6 +197,20 @@ pub enum WorkerCmd {
         is_group: bool,
         pin: bool,
     },
+    /// Reload pinned board items for one conversation (server is the source of truth).
+    RefreshBoardPins {
+        thread_id: String,
+        is_group: bool,
+    },
+    /// Pin/unpin a single chat message through the group-board API (#119 follow-up).
+    PinMessage {
+        thread_id: String,
+        is_group: bool,
+        msg: crate::chat::ChatMessage,
+        pin: bool,
+        /// Board topic id, required to unpin a previously pinned message.
+        topic_id: String,
+    },
     MarkThreadUnread {
         thread_id: String,
         is_group: bool,
@@ -1277,6 +1291,87 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             let _ = std::fs::remove_file("threads_cache.json");
                             let _ = gui_tx.send(GuiEvent::LocalDataWiped);
                             egui_ctx.request_repaint();
+                        }
+                        WorkerCmd::RefreshBoardPins {
+                            thread_id,
+                            is_group,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                let result =
+                                    crate::chat::list_board_topics(&s, &thread_id, is_group).await;
+                                let (topics, error) = match result {
+                                    Ok(list) => (list, None),
+                                    Err(e) => (Vec::new(), Some(e.to_string())),
+                                };
+                                let _ = gui_tx_clone.send(GuiEvent::BoardPinsUpdated {
+                                    thread_id,
+                                    topics,
+                                    error,
+                                });
+                            });
+                        }
+                        WorkerCmd::PinMessage {
+                            thread_id,
+                            is_group,
+                            msg,
+                            pin,
+                            topic_id,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            tokio::spawn(async move {
+                                let s = session_clone.lock().await.clone();
+                                let result = if pin {
+                                    crate::chat::pin_message(&s, &thread_id, is_group, &msg).await
+                                } else {
+                                    crate::chat::unpin_message(&s, &thread_id, is_group, &topic_id)
+                                        .await
+                                };
+                                match result {
+                                    Ok(v) => {
+                                        // The server answers with the board topic; keep its id so a
+                                        // later unpin targets the right item. `data` may be a JSON
+                                        // object or a JSON string, depending on the endpoint.
+                                        let data = match v.get("data") {
+                                            Some(serde_json::Value::String(txt)) => {
+                                                serde_json::from_str::<serde_json::Value>(txt)
+                                                    .unwrap_or(serde_json::Value::Null)
+                                            }
+                                            Some(other) => other.clone(),
+                                            None => serde_json::Value::Null,
+                                        };
+                                        let pick = |val: &serde_json::Value| {
+                                            val.as_str()
+                                                .map(str::to_string)
+                                                .or_else(|| val.as_i64().map(|n| n.to_string()))
+                                        };
+                                        let topic = pick(&data)
+                                            .or_else(|| data.pointer("/topic/id").and_then(pick))
+                                            .or_else(|| data.pointer("/id").and_then(pick))
+                                            .or_else(|| data.pointer("/topicId").and_then(pick))
+                                            .unwrap_or_default();
+                                        let _ = gui_tx_clone.send(GuiEvent::MessagePinResult {
+                                            thread_id,
+                                            msg_id: msg.id.clone(),
+                                            pin,
+                                            topic_id: topic,
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = gui_tx_clone.send(GuiEvent::MessagePinResult {
+                                            thread_id,
+                                            msg_id: msg.id.clone(),
+                                            pin,
+                                            topic_id: String::new(),
+                                            error: Some(e.to_string()),
+                                        });
+                                    }
+                                }
+                            });
                         }
                         WorkerCmd::PinThread {
                             thread_id,

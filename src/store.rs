@@ -1284,8 +1284,8 @@ impl MessageStore {
             (-1, -1)
         };
         self.conn.execute(
-            "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec)
-             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 < 0 THEN 0 ELSE ?5 END, CASE WHEN ?6 < 0 THEN 0 ELSE ?6 END)
+            "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, last_read_msg_id)
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 < 0 THEN 0 ELSE ?5 END, CASE WHEN ?6 < 0 THEN 0 ELSE ?6 END, ?7)
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = CASE
                      WHEN excluded.name IS NOT NULL AND excluded.name != ''
@@ -1317,6 +1317,7 @@ impl MessageStore {
                 t.last_ts,
                 vanish_dur,
                 vanish_start,
+                t.last_read_msg_id,
             ],
         )?;
         if vanish_from_user {
@@ -1375,7 +1376,6 @@ impl MessageStore {
             .ok()
             .filter(|(d, _)| *d > 0)
     }
-
     /// Id of the oldest stored server message in a thread, where a history sync resumes from.
     /// Local ids (`out_*`, `{thread}_{ts}`) are skipped: the server rejects them as cursors.
     pub fn oldest_msg_id(&self, thread_id: &str) -> Option<String> {
@@ -1512,11 +1512,15 @@ impl MessageStore {
              FROM threads
              ORDER BY last_ts DESC"
         } else if has_vcols {
-            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec
+            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, ''
+             FROM threads
+             ORDER BY last_ts DESC"
+        } else if has_read_col {
+            "SELECT thread_id, name, is_group, last_ts, 0, 0, last_read_msg_id
              FROM threads
              ORDER BY last_ts DESC"
         } else {
-            "SELECT thread_id, name, is_group, last_ts
+            "SELECT thread_id, name, is_group, last_ts, 0, 0, ''
              FROM threads
              ORDER BY last_ts DESC"
         };
@@ -3431,6 +3435,31 @@ mod tests {
         assert_eq!(hydrated[0].name, "Test Thread");
         assert_eq!(hydrated[0].messages.len(), 2);
         assert_eq!(hydrated[0].preview, "Hi Alice");
+    }
+
+    #[test]
+    fn thread_read_point_roundtrips_and_survives_reupsert() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store.set_thread_read("t1", "msg-100").unwrap();
+        let got = store.all_threads().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].last_read_msg_id, "msg-100");
+
+        // Re-upserting without read-point preserves existing read-point (#119).
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t1".into(),
+                name: "A".into(),
+                is_group: false,
+                last_ts: 1,
+                last_read_msg_id: String::new(),
+            })
+            .unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-100");
+
+        // Explicit new read-point updates.
+        store.set_thread_read("t1", "msg-200").unwrap();
+        assert_eq!(store.all_threads().unwrap()[0].last_read_msg_id, "msg-200");
     }
 
     #[test]

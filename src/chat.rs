@@ -7810,7 +7810,9 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let sync_id = crate::param_cipher::random_hex(32);
+    // Đúng Zalo `generateRandomString(32)`: 32 ký tự base62 (A-Za-z0-9),
+    // KHÔNG phải hex. Phone/server validate format, hex bị bỏ qua.
+    let sync_id = crate::param_cipher::random_base62(32);
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     crate::history_sync::generate_sync_v2_keys().map_err(|e| {

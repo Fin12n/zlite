@@ -7801,11 +7801,12 @@ pub async fn request_phone_sync_with_temp_key(
     Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
 }
 
-/// Request transfer-sync v2 từ điện thoại. Lệnh thật đi qua WebSocket
-/// `cmd 592` (wake-up) + `cmd 590` (SYNC_MESSAGE.REQUEST) — KHÔNG có HTTP REST
-/// `/api/transfer-sync-v2/request-sync` (404 mọi host, #87); cmd 12888 trong
-/// bundle Zalo chỉ là command-id, dispatch qua WS runner.
-pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Value> {
+/// Wake-up điện thoại cho Sync V2 (`cmd 592`). Zalo PC gửi wake-up TRƯỚC, chờ
+/// user xác nhận trên điện thoại, RỒI mới gửi `cmd 590` (xem sync state machine
+/// `waiting_for_mobile_open` → `USER_CONFIRM` → sync trong sync-v2-sub-worker.js).
+/// Gửi 590 quá sớm khiến phone bỏ qua, chỉ hiện "đang đồng bộ" mà không nén.
+/// Trả về `sync_id` để dùng cho [`send_sync_v2_request`].
+pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
@@ -7822,16 +7823,24 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
     }
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
-    let keys = crate::history_sync::generate_sync_v2_keys().map_err(|e| {
+    crate::history_sync::generate_sync_v2_keys().map_err(|e| {
         anyhow::anyhow!(
             "Không sinh được khóa Sync V2: {e}. \
              Cài Zalo PC hoặc đặt CTDOZLITE_ZPROTO_WASM trỏ tới file WASM"
         )
     })?;
-    let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
-    // 1. Wake up mobile master device over WebSocket (`cmd 592`)
-    crate::logger::log_sync(&format!("request V2: sync={} tempKey_len={}", &sync_id.chars().take(8).collect::<String>(), temp_key.len()));
+    crate::logger::log_sync(&format!("wake V2: sync={} tempKey_len={}", &sync_id.chars().take(8).collect::<String>(), temp_key.len()));
     let _ = crate::socket::send_mobile_wakeup(&sync_id);
+    Ok(sync_id)
+}
+
+/// Gửi `cmd 590` (SYNC_MESSAGE.REQUEST) SAU KHI user đã xác nhận trên điện
+/// thoại. Keys phải đã sinh bởi [`wake_phone_sync_v2`] (giữ trong RAM).
+pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
+    let temp_key = crate::history_sync::latest_mobile_temp_key();
+    let keys = crate::history_sync::current_v2_keys()
+        .map_err(|_| anyhow::anyhow!("chưa có khóa Sync V2 — gọi wake_phone_sync_v2 trước"))?;
+    let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);
 
     // 2. Build SyncFull v2 request payload matching `shared-worker.js:282247` & `314736`
     let sync_data = json!({
@@ -7859,15 +7868,10 @@ pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Val
         "ussidx": 0
     });
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
-    crate::logger::log_sync(&format!("request V2 gửi WS: {sent_ws}"));
-    Ok(json!({
-        "error_code": 0,
-        "data": {
-            "syncId": sync_id,
-            "ws_sent": sent_ws,
-        }
-    }))
+    crate::logger::log_sync(&format!("590 gửi sau confirm: sync={} ws={}", &sync_id.chars().take(8).collect::<String>(), sent_ws));
+    Ok(sent_ws)
 }
+
 
 /// Cancel an active mobile message sync request (`cancelTransferMessage` @ `app.asar:14372356`, cmd `12700`, #68).
 pub async fn cancel_phone_sync(s: &Session, public_key: &str) -> Result<Value> {

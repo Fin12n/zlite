@@ -198,7 +198,9 @@ where
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
 
-        // Phase 1: Send mobile wake-up / pull request to phone (`cmd 12000` + WebSocket `cmd 592` & `cmd 590`)
+        // Phase 1 (đúng thứ tự Zalo PC): wake-up trước (`cmd 12000` + WS `cmd 592`),
+        // CHỜ user xác nhận trên điện thoại, RỒI mới gửi `cmd 590`. Gửi 590 quá
+        // sớm khiến phone bỏ qua (chỉ hiện "đang đồng bộ" mà không nén).
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
@@ -207,7 +209,14 @@ where
         if let Ok(ref val) = r1 {
             chat::merge_previews(threads, val);
         }
-        let _ = chat::request_phone_sync_v2(s, &pub_key).await;
+        let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                crate::logger::log_sync(&format!("wake V2 FAIL: {e}"));
+                on_progress(0.15, format!("⚠️ Sync V2: {e}"));
+                None
+            }
+        };
 
         // Wait for user to confirm on phone (up to 90 seconds)
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
@@ -217,7 +226,7 @@ where
                 let _ = chat::cancel_phone_sync(s, &pub_key).await;
                 return Ok((0, 0));
             }
-            if let Some(ref st) = last_mobile_sync_status() {
+            if let Some(st) = last_mobile_sync_status().as_deref() {
                 if st.contains("đã xác nhận")
                     || st.contains("đang nén")
                     || st.contains("giải mã")
@@ -225,30 +234,39 @@ where
                     || st.contains("thành công")
                 {
                     confirmed = true;
-                    on_progress(0.40, st.clone());
+                    on_progress(0.40, st.to_string());
                     break;
                 } else if st.contains("từ chối") {
-                    on_progress(1.0, st.clone());
+                    on_progress(1.0, st.to_string());
                     return Ok((0, 0));
                 } else {
-                    on_progress(0.20, st.clone());
+                    on_progress(0.20, st.to_string());
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         if confirmed {
-            let finish_deadline = std::time::Instant::now() + Duration::from_secs(45);
+            // User đã xác nhận → GIỜ mới gửi cmd 590 (đúng thứ tự Zalo PC).
+            if let Some(sync_id) = v2_sync_id.as_deref() {
+                on_progress(0.45, "📲 Đã xác nhận — đang gửi yêu cầu lấy tin nhắn (cmd 590)…".to_string());
+                match chat::send_sync_v2_request(s, sync_id) {
+                    Ok(true) => on_progress(0.50, "📲 Đã gửi yêu cầu — chờ điện thoại nén & gửi gói tin…".to_string()),
+                    Ok(false) => on_progress(0.50, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
+                    Err(e) => on_progress(0.50, format!("⚠️ Sync V2: {e}")),
+                }
+            }
+            let finish_deadline = std::time::Instant::now() + Duration::from_secs(120);
             while std::time::Instant::now() < finish_deadline {
-                if let Some(ref st) = last_mobile_sync_status() {
+                if let Some(st) = last_mobile_sync_status().as_deref() {
                     if st.contains("thành công") {
-                        on_progress(1.0, st.clone());
+                        on_progress(1.0, st.to_string());
                         break;
                     } else if st.contains("Không thể") || st.contains("thất bại") {
-                        on_progress(1.0, st.clone());
+                        on_progress(1.0, st.to_string());
                         break;
                     } else {
-                        on_progress(0.70, st.clone());
+                        on_progress(0.70, st.to_string());
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -728,6 +746,7 @@ pub struct SyncV2Keys {
 struct SyncV2KeysRaw {
     ik_pub: Vec<u8>,
     ik_priv: Vec<u8>,
+    ek_pub: Vec<u8>,
     ek_priv: Vec<u8>,
 }
 
@@ -748,7 +767,7 @@ pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
         ek_priv: hex_encode(&ek_priv),
     };
     if let Ok(mut g) = CURRENT_V2_KEYS.lock() {
-        *g = Some(SyncV2KeysRaw { ik_pub, ik_priv, ek_priv });
+        *g = Some(SyncV2KeysRaw { ik_pub, ik_priv, ek_pub: ek_pub.clone(), ek_priv });
     }
     Ok(keys)
 }
@@ -789,7 +808,7 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
     let bytes = resp.bytes().await?;
     // wasmtime host (không cần Node.js). Keys phải tồn tại trong bộ nhớ tiến
     // trình (generate_sync_v2_keys đã chạy trước khi request sync).
-    let keys = current_v2_keys()?;
+    let keys = current_v2_keys_raw()?;
     let host = crate::zproto_host::ZprotoHost::load()?;
     let mut session_record: Option<Vec<u8>> = None;
     let mut last: Option<crate::zproto_host::DecryptedMeta> = None;
@@ -807,7 +826,18 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
 }
 
 
-fn current_v2_keys() -> Result<SyncV2KeysRaw> {
+pub fn current_v2_keys() -> Result<SyncV2Keys> {
+    use base64::Engine;
+    let raw = current_v2_keys_raw()?;
+    Ok(SyncV2Keys {
+        ik_pub: base64::engine::general_purpose::STANDARD.encode(&raw.ik_pub),
+        ik_priv: hex_encode(&raw.ik_priv),
+        ek_pub: base64::engine::general_purpose::STANDARD.encode(&raw.ek_pub),
+        ek_priv: hex_encode(&raw.ek_priv),
+    })
+}
+
+fn current_v2_keys_raw() -> Result<SyncV2KeysRaw> {
     CURRENT_V2_KEYS
         .lock()
         .ok()

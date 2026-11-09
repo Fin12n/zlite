@@ -132,22 +132,48 @@ pub fn clear_sync_keys() {
     }
 }
 
-/// Generate a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key
-/// (`294 bytes` -> `392 chars` Base64 starting with `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...`),
-/// matching `sync-message-key-generator` (`main-startup.js:598226`) for `pullMobileMsg` (`cmd 12000`).
+/// Load (hoặc gen 1 lần + lưu `sync_rsa_identity.json`) RSA-2048 key cố định của
+/// máy cho V1 `pullMobileMsg` (`cmd 12000`). Đúng Zalo PC: phone match
+/// `pc_name`+`public_key` khi gửi `user_confirm` về — key mới mỗi lần khiến
+/// phone thấy thiết bị lạ, bấm vào thông báo không mở được.
 pub fn generate_sync_public_key() -> String {
-    use rsa::pkcs8::EncodePublicKey;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
     use base64::Engine;
 
+    const PATH: &str = "sync_rsa_identity.json";
+    // 1. Thử đọc key đã lưu.
+    if let Ok(raw) = std::fs::read_to_string(PATH) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(pem) = v.get("private_pem").and_then(|x| x.as_str()) {
+                if let Ok(priv_key) = RsaPrivateKey::from_pkcs8_pem(pem) {
+                    let pub_key = RsaPublicKey::from(&priv_key);
+                    if let Ok(der) = pub_key.to_public_key_der() {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+                        if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
+                            *g = Some((priv_key, b64.clone()));
+                        }
+                        crate::logger::log_sync("rsa: dùng key đã lưu");
+                        return b64;
+                    }
+                }
+            }
+        }
+    }
+    // 2. Gen mới + lưu.
     let mut rng = rsa::rand_core::OsRng;
     if let Ok(priv_key) = RsaPrivateKey::new(&mut rng, 2048) {
         let pub_key = RsaPublicKey::from(&priv_key);
         if let Ok(der) = pub_key.to_public_key_der() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+            if let Ok(pem) = priv_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF) {
+                let doc = serde_json::json!({ "private_pem": pem.as_str() });
+                let _ = std::fs::write(PATH, serde_json::to_string_pretty(&doc).unwrap_or_default());
+            }
             if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
                 *g = Some((priv_key, b64.clone()));
             }
+            crate::logger::log_sync("rsa: đã gen key mới + lưu");
             return b64;
         }
     }
@@ -1256,9 +1282,12 @@ mod tests {
     #[test]
     fn generate_sync_public_key_produces_valid_rsa2048_spki_der_base64() {
         use base64::Engine;
+        // Key cố định của máy (lưu file): 2 lần gọi phải TRÙNG nhau.
+        let _ = std::fs::remove_file("sync_rsa_identity.json");
         let k1 = generate_sync_public_key();
         let k2 = generate_sync_public_key();
-        assert_ne!(k1, k2);
+        assert_eq!(k1, k2);
+        let _ = std::fs::remove_file("sync_rsa_identity.json");
         assert!(
             k1.starts_with("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"),
             "must have valid ASN.1 RSA-2048 SPKI DER prefix: {k1}"

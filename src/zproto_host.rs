@@ -37,9 +37,9 @@ use wasmtime::{Caller, Engine, Extern, Func, Instance, Linker, Memory, Module, S
 
 /// Locate `libzproto_wasm_bg.*.wasm` without bundling it in the repo.
 /// Search order: `CTDOZLITE_ZPROTO_WASM` absolute path, installed Zalo PC,
-/// dev copy under `scripts/assets`. Returns `None` when not found (callers
-/// turn this into a clear error telling the user to install Zalo PC or set
-/// the env var).
+/// own app bundle `Contents/Resources`, dev copy under `scripts/assets`.
+/// Returns `None` when not found (callers turn this into a clear error
+/// telling the user to install Zalo PC or set the env var).
 pub fn find_wasm_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CTDOZLITE_ZPROTO_WASM") {
         let p = PathBuf::from(p);
@@ -48,6 +48,16 @@ pub fn find_wasm_path() -> Option<PathBuf> {
         }
     }
     let mut roots: Vec<PathBuf> = Vec::new();
+    // Chính app bundle của mình: Contents/Resources/*.wasm (copy lúc cài đặt,
+    // không commit vào repo theo chính sách HistoryCodec).
+    if let Ok(exe) = std::env::current_exe() {
+        // .../ctdozlite.app/Contents/MacOS/ctdozlite → .../Contents/Resources
+        if let Some(macos) = exe.parent() {
+            if let Some(contents) = macos.parent() {
+                roots.push(contents.join("Resources"));
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         roots.push(PathBuf::from("/Applications/Zalo.app/Contents/Resources/app.asar.unpacked"));

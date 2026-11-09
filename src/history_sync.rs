@@ -224,28 +224,49 @@ where
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
 
-        // Phase 1 (đúng thứ tự Zalo PC): V1 `pull_mobile_msg` TRƯỚC để phone
-        // hiện màn xác nhận (phone match `pc_name`+`public_key` khi gửi
-        // `user_confirm` về) → chờ user bấm "Đồng bộ ngay" → RỒI mới gửi V2
-        // (wake `cmd 592` + `cmd 590`) để phone nén & gửi batch. Gửi cả 2 cùng
-        // lúc tạo 2 phiên xung đột (2 thông báo, văng app); chỉ gửi V2 thì
-        // phone không có gì để confirm nên treo ở "đang đồng bộ".
+        // Phase 1 — Sync V2 đúng Zalo PC (`shared-worker.js` SyncSession.start):
+        // 590 là message mạng ĐẦU TIÊN (mở session, phone hiện màn xác nhận).
+        // KHÔNG gửi V1 `pull_mobile_msg` (legacy backup machine, tách biệt V2 —
+        // trộn 2 cơ chế tạo 2 phiên xung đột, văng app phone). KHÔNG gửi 592
+        // mở màn (chỉ wake session đã tồn tại). Sau confirm KHÔNG gửi lại 590
+        // (confirm chỉ mở khóa decrypt; dữ liệu tới qua batch → GET msgUrl).
+        // Kết thúc/huỷ/lỗi → gửi 591 để server/phone dọn session.
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
-        let temp_key = latest_mobile_temp_key();
-        crate::logger::log_sync(&format!("V1 pull_mobile_msg (tempKey_len={})", temp_key.len()));
-        if let Ok(val) = chat::request_phone_sync_with_temp_key(s, &pub_key, &temp_key).await {
-            chat::merge_previews(threads, &val);
-        }
+        let v2_sync_id = match chat::wake_phone_sync_v2(s).await {
+            Ok(sync_id) => match chat::send_sync_v2_request(s, &sync_id) {
+                Ok(true) => {
+                    crate::logger::log_sync(&format!("590 mở session: sync={}", &sync_id.chars().take(8).collect::<String>()));
+                    Some(sync_id)
+                }
+                Ok(false) => {
+                    on_progress(0.15, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string());
+                    None
+                }
+                Err(e) => {
+                    on_progress(0.15, format!("⚠️ Sync V2: {e}"));
+                    None
+                }
+            },
+            Err(e) => {
+                crate::logger::log_sync(&format!("V2 mở session FAIL: {e}"));
+                on_progress(0.15, format!("⚠️ Sync V2: {e}"));
+                None
+            }
+        };
 
-        // Wait for user to confirm on phone (up to 90 seconds)
+        // Chờ user xác nhận trên phone (tối đa 90s). Không gửi lại gì cả.
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
         let mut confirmed = false;
+        let mut rejected = false;
         while std::time::Instant::now() < deadline {
             if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
-                let _ = chat::cancel_phone_sync(s, &pub_key).await;
+                if let Some(sid) = v2_sync_id.as_deref() {
+                    crate::socket::send_sync_ack_delete(sid, "PC_USER_CANCELS_SYNC");
+                    crate::logger::log_sync("591 huỷ sync (user cancel)");
+                }
                 return Ok((0, 0));
             }
             if let Some(st) = last_mobile_sync_status().as_deref() {
@@ -259,36 +280,34 @@ where
                     on_progress(0.40, st.to_string());
                     break;
                 } else if st.contains("từ chối") {
+                    rejected = true;
                     on_progress(1.0, st.to_string());
-                    return Ok((0, 0));
+                    break;
                 } else {
                     on_progress(0.20, st.to_string());
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        if rejected {
+            if let Some(sid) = v2_sync_id.as_deref() {
+                crate::socket::send_sync_ack_delete(sid, "USER_REJECT");
+            }
+            return Ok((0, 0));
+        }
 
         if confirmed {
-            // User đã bấm "Đồng bộ ngay" → giờ mới gửi V2 để phone nén & gửi batch.
-            on_progress(0.45, "📲 Đã xác nhận — đang gửi yêu cầu lấy tin nhắn (Sync V2)…".to_string());
-            match chat::wake_phone_sync_v2(s).await {
-                Ok(sync_id) => match chat::send_sync_v2_request(s, &sync_id) {
-                    Ok(true) => {
-                        crate::logger::log_sync(&format!("590 gửi sau confirm V1: sync={}", &sync_id.chars().take(8).collect::<String>()));
-                        on_progress(0.50, "📲 Đã gửi yêu cầu — chờ điện thoại nén & gửi gói tin…".to_string());
-                    }
-                    Ok(false) => on_progress(0.50, "⚠️ Không gửi được cmd 590 (mất kết nối WebSocket)".to_string()),
-                    Err(e) => on_progress(0.50, format!("⚠️ Sync V2: {e}")),
-                },
-                Err(e) => {
-                    crate::logger::log_sync(&format!("wake V2 FAIL: {e}"));
-                    on_progress(0.50, format!("⚠️ Sync V2: {e}"));
-                }
-            }
-            let finish_deadline = std::time::Instant::now() + Duration::from_secs(120);
+            // Đã xác nhận → chỉ chờ batch (meta + message), không gửi lại 590.
+            on_progress(0.50, "📲 Đã xác nhận — chờ điện thoại nén & gửi gói tin…".to_string());
+            let finish_deadline = std::time::Instant::now() + Duration::from_secs(180);
+            let mut ok = false;
             while std::time::Instant::now() < finish_deadline {
+                if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
+                    break;
+                }
                 if let Some(st) = last_mobile_sync_status().as_deref() {
                     if st.contains("thành công") {
+                        ok = true;
                         on_progress(1.0, st.to_string());
                         break;
                     } else if st.contains("Không thể") || st.contains("thất bại") {
@@ -300,9 +319,18 @@ where
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+            // Xong (hoặc hết chờ) → 591 dọn session, đúng Zalo `release()`.
+            if let Some(sid) = v2_sync_id.as_deref() {
+                let reason = if ok { "SYNC_FULL_COMPLETED" } else { "BATCH_TIMEOUT" };
+                crate::socket::send_sync_ack_delete(sid, reason);
+                crate::logger::log_sync(&format!("591 dọn session ({reason})"));
+            }
+        } else if let Some(sid) = v2_sync_id.as_deref() {
+            // Hết 90s không confirm → dọn session.
+            crate::socket::send_sync_ack_delete(sid, "CONFIRM_TIMEOUT");
+            crate::logger::log_sync("591 dọn session (CONFIRM_TIMEOUT)");
         }
     }
-
     // Phase 1b: Synchronize pinned conversations from server (/api/pinconvers/list, #87)
     on_progress(
         0.18,

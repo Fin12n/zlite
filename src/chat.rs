@@ -7819,8 +7819,9 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
              Cài Zalo PC hoặc đặt CTDOZLITE_ZPROTO_WASM trỏ tới file WASM"
         )
     })?;
-    crate::logger::log_sync(&format!("wake V2: sync={}", &sync_id.chars().take(8).collect::<String>()));
-    let _ = crate::socket::send_mobile_wakeup(&sync_id);
+    crate::logger::log_sync(&format!("V2 session mở: sync={}", &sync_id.chars().take(8).collect::<String>()));
+    // KHÔNG gửi 592 ở đây: Zalo chỉ dùng 592 wake-up cho session ĐÃ tồn tại
+    // (shared-worker.js `session.wakeup()`). Lệnh mở màn là 590.
     Ok(sync_id)
 }
 
@@ -7845,14 +7846,17 @@ pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
         "tempKey": temp_key,
         "deviceName": s.computer_name,
         "req": {
-            "type": "message",
+            // Đúng Zalo `requestSync` (shared-worker.js:284206): type = database
+            // (default "unspecified"), phase đầu = conversations (1 query,
+            // partition rỗng, range ms, limit MAX).
+            "type": "unspecified",
             "priority": 1,
             "queries": [
                 {
                     "partition": "",
                     "from": 0,
                     "to": 9_007_199_254_740_991_i64,
-                    "limit": 2000
+                    "limit": 9_007_199_254_740_991_i64
                 }
             ],
             "batchSize": 2000

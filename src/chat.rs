@@ -7867,6 +7867,7 @@ pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
         "ver": 1,
         "ussidx": 0
     });
+    crate::logger::log_sync(&format!("590 payload: {}", sync_data.to_string().chars().take(600).collect::<String>()));
     let sent_ws = crate::socket::send_sync_message_ws_request(&sync_data);
     crate::logger::log_sync(&format!("590 gửi sau confirm: sync={} ws={}", &sync_id.chars().take(8).collect::<String>(), sent_ws));
     Ok(sent_ws)

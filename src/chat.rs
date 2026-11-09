@@ -7811,16 +7811,6 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
         anyhow::bail!("chưa đăng nhập");
     }
     let sync_id = crate::param_cipher::random_hex(32);
-    let temp_key = crate::history_sync::latest_mobile_temp_key();
-    // tempKey rỗng (chưa nhận TransferAfterLogin sau login) mà vẫn gửi sẽ làm
-    // app Zalo trên điện thoại crash khi bấm Đồng bộ. Chặn ở đây, bảo user
-    // đăng xuất/đăng nhập lại để lấy tempKey mới.
-    if temp_key.trim().is_empty() {
-        anyhow::bail!(
-            "Thiếu tempKey từ điện thoại (chưa nhận phiên sau đăng nhập). \
-             Hãy đăng xuất rồi đăng nhập lại, sau đó bấm Đồng bộ."
-        );
-    }
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     crate::history_sync::generate_sync_v2_keys().map_err(|e| {
@@ -7829,7 +7819,7 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
              Cài Zalo PC hoặc đặt CTDOZLITE_ZPROTO_WASM trỏ tới file WASM"
         )
     })?;
-    crate::logger::log_sync(&format!("wake V2: sync={} tempKey_len={}", &sync_id.chars().take(8).collect::<String>(), temp_key.len()));
+    crate::logger::log_sync(&format!("wake V2: sync={}", &sync_id.chars().take(8).collect::<String>()));
     let _ = crate::socket::send_mobile_wakeup(&sync_id);
     Ok(sync_id)
 }
@@ -7837,7 +7827,10 @@ pub async fn wake_phone_sync_v2(s: &Session) -> Result<String> {
 /// Gửi `cmd 590` (SYNC_MESSAGE.REQUEST) SAU KHI user đã xác nhận trên điện
 /// thoại. Keys phải đã sinh bởi [`wake_phone_sync_v2`] (giữ trong RAM).
 pub fn send_sync_v2_request(s: &Session, sync_id: &str) -> Result<bool> {
-    let temp_key = crate::history_sync::latest_mobile_temp_key();
+    // Manual sync: tempKey rỗng (đúng Zalo PC — tempKey chỉ dùng cho auto sync
+    // sau transfer event; tempKey cũ/hết hạn làm phone crash khi xác nhận).
+    let temp_key = String::new();
+    crate::logger::log_sync("590: tempKey rỗng (manual sync)");
     let keys = crate::history_sync::current_v2_keys()
         .map_err(|_| anyhow::anyhow!("chưa có khóa Sync V2 — gọi wake_phone_sync_v2 trước"))?;
     let (ik_pub, ek_pub) = (keys.ik_pub, keys.ek_pub);

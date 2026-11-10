@@ -23,6 +23,7 @@ use crate::session::Session;
 
 mod messages;
 mod modals;
+mod pages;
 mod reactions_dialog;
 mod stickers;
 mod theme;
@@ -180,7 +181,14 @@ pub enum GuiEvent {
         errors: Vec<String>,
         manual: bool,
     },
-    ScheduledListUpdated,
+    ScheduledListUpdated(Vec<crate::scheduler::ScheduledMessage>),
+    ScheduledItemsLoaded(Vec<crate::scheduler::ScheduledMessage>),
+    ScheduleActionResult {
+        ok: bool,
+        message: Option<String>,
+        clear_composer: bool,
+    },
+    HistoryImported(Result<(usize, usize, Vec<Thread>), String>),
     SyncFinished {
         added: usize,
         errors: Vec<String>,
@@ -257,7 +265,7 @@ fn phone_sync_completion_message(
     error: Option<&str>,
 ) -> String {
     if let Some(err) = error {
-        return format!("⚠️ Đồng bộ thất bại: {err}");
+        return format!("{} Đồng bộ thất bại: {err}", lucide::ALERT_TRIANGLE);
     }
     let prefix = if cancelled {
         "Đã dừng"
@@ -561,6 +569,10 @@ pub struct ZaloGuiApp {
     // Theme state
     dark_mode: bool,
     theme_dirty: bool,
+    // Apply theme on the second frame so the viewport is fully ready (SetTheme cmd is ignored
+    // when sent from new() before winit creates the window).
+    theme_apply_pending: bool,
+    cached_palette: ThemePalette,
 
     // Session state
     is_logged_in: bool,
@@ -659,12 +671,12 @@ pub struct ZaloGuiApp {
     group_member_search: String,
     user_online_map: HashMap<String, (bool, String)>,
     allow_quit: bool,
+    shutting_down: bool,
+    shutdown_requested_at: Option<std::time::Instant>,
     settings_modal_open: bool,
     settings_tab: SettingsTab,
     notification_authorization: crate::native_notifications::AuthorizationState,
     settings: AppSettings,
-    settings_blur_tex: Option<TextureHandle>,
-    settings_blur_req_at: Option<std::time::Instant>,
     update_checking: bool,
     update_downloading: bool,
     update_progress: Option<(u64, u64)>,
@@ -766,7 +778,8 @@ impl ZaloGuiApp {
             loaded_settings.block_seen,
         );
         let dark_mode = loaded_settings.theme_mode != "light";
-        ThemePalette::load_with_custom_override(dark_mode).apply_to_ctx(&cc.egui_ctx);
+        let initial_palette = ThemePalette::load_with_custom_override(dark_mode);
+        initial_palette.apply_to_ctx(&cc.egui_ctx);
 
         let (tx, rx) = channel();
 
@@ -825,6 +838,8 @@ impl ZaloGuiApp {
         let app = Self {
             dark_mode,
             theme_dirty: false,
+            theme_apply_pending: true,
+            cached_palette: initial_palette,
             is_logged_in,
             user_name,
             user_uin,
@@ -912,12 +927,12 @@ impl ZaloGuiApp {
             group_member_search: String::new(),
             user_online_map: HashMap::new(),
             allow_quit: false,
+            shutting_down: false,
+            shutdown_requested_at: None,
             settings_modal_open: false,
             settings_tab: SettingsTab::General,
             notification_authorization: Default::default(),
             settings: loaded_settings,
-            settings_blur_tex: None,
-            settings_blur_req_at: None,
             update_checking: false,
             update_downloading: false,
             update_progress: None,
@@ -955,8 +970,7 @@ impl ZaloGuiApp {
             schedule_modal_open: false,
             schedule_custom_input: String::new(),
             schedule_editing_id: None,
-            scheduled_items: crate::scheduler::list_pending_scheduled("zalo_history.db", None)
-                .unwrap_or_default(),
+            scheduled_items: Vec::new(),
             phone_sync_progress: 0.0,
             phone_sync_status: String::new(),
             last_typing_sent_at: None,
@@ -998,13 +1012,43 @@ impl ZaloGuiApp {
             } else {
                 let _ = wtx.send(WorkerCmd::RequestQr);
             }
+            let _ = wtx.send(WorkerCmd::RefreshScheduledItems);
             let _ = wtx.send(WorkerCmd::CheckForUpdates { silent: true });
         }
         app
     }
 
     fn palette(&self) -> ThemePalette {
-        ThemePalette::load_with_custom_override(self.dark_mode)
+        self.cached_palette
+    }
+
+    pub(super) fn any_overlay_modal_open(&self) -> bool {
+        self.settings_modal_open
+            || self.schedule_modal_open
+            || self.phone_modal_open
+            || self.update_modal_open
+            || self.wipe_confirm_open
+            || self.forward_msg.is_some()
+            || self.image_viewer.is_some()
+    }
+
+    pub(super) fn request_graceful_exit(&mut self, ctx: &egui::Context) {
+        if self.shutting_down {
+            return;
+        }
+        self.shutting_down = true;
+        self.allow_quit = true;
+        self.shutdown_requested_at = Some(std::time::Instant::now());
+        self.settings.save();
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::PrepareShutdown {
+                active_uin: self.user_uin.clone(),
+                threads_snapshot: self.threads.clone(),
+            });
+        } else {
+            crate::gui::worker::mark_shutdown_complete();
+        }
+        ctx.request_repaint();
     }
 
     pub(super) fn reload_custom_sticker_packs(&mut self) -> usize {
@@ -1026,8 +1070,9 @@ impl ZaloGuiApp {
     }
 
     pub(super) fn refresh_scheduled_items(&mut self) {
-        self.scheduled_items =
-            crate::scheduler::list_pending_scheduled("zalo_history.db", None).unwrap_or_default();
+        if let Some(tx) = WORKER_TX.get() {
+            let _ = tx.send(WorkerCmd::RefreshScheduledItems);
+        }
     }
 
     /// Hand the worker's poll timer the thread ids/names it maps incoming messages onto.
@@ -1356,7 +1401,7 @@ impl ZaloGuiApp {
                 GuiEvent::SessionUnreachable(reason) => {
                     // Only the network failed: stay logged in, keep the thread list, and
                     // let the next poll retry (#21).
-                    self.status_msg = format!("⚠️ {reason} — đang thử lại…");
+                    self.status_msg = format!("{} {reason} — đang thử lại…", lucide::ALERT_TRIANGLE);
                 }
                 GuiEvent::LocalDataWiped => {
                     self.threads.clear();
@@ -1886,7 +1931,8 @@ impl ZaloGuiApp {
                         .map(|t| t.name.clone())
                         .unwrap_or(caller_name);
                     self.status_msg = format!(
-                        "📲 Cuộc gọi {} đến từ {resolved_name}…",
+                        "{} Cuộc gọi {} đến từ {resolved_name}…",
+                        lucide::PHONE_INCOMING,
                         if is_video { "video" } else { "thoại" }
                     );
                     self.active_call = Some(ActiveCallOverlay {
@@ -1913,7 +1959,10 @@ impl ZaloGuiApp {
                     ));
                 }
                 GuiEvent::CallRejected { code, reason } => {
-                    self.status_msg = format!("⚠️ Từ chối cuộc gọi (mã {code}): {reason}");
+                    self.status_msg = format!(
+                        "{} Từ chối cuộc gọi (mã {code}): {reason}",
+                        lucide::ALERT_TRIANGLE
+                    );
                     if let Some(ref mut call) = self.active_call {
                         call.state_label = "Không thể thực hiện cuộc gọi".into();
                         call.error_code = Some(code);
@@ -1934,10 +1983,14 @@ impl ZaloGuiApp {
                     manual,
                 } => {
                     let msg = if errors.is_empty() {
-                        format!("✅ Đã làm mới {threads} hội thoại ({messages} tin nhắn)")
+                        format!(
+                            "{} Đã làm mới {threads} hội thoại ({messages} tin nhắn)",
+                            lucide::CHECK_CIRCLE
+                        )
                     } else {
                         format!(
-                            "⚠️ Làm mới {threads} hội thoại · {} lỗi (vd. {})",
+                            "{} Làm mới {threads} hội thoại · {} lỗi (vd. {})",
+                            lucide::ALERT_TRIANGLE,
                             errors.len(),
                             errors[0]
                         )
@@ -1947,18 +2000,64 @@ impl ZaloGuiApp {
                         self.show_toast(msg);
                     }
                 }
-                GuiEvent::ScheduledListUpdated => {
+                GuiEvent::ScheduledListUpdated(items) => {
                     let prev_cnt = self.scheduled_items.len();
-                    self.refresh_scheduled_items();
+                    self.scheduled_items = items;
                     if self.scheduled_items.len() < prev_cnt {
                         if self.settings.enable_notifications
                             && self.settings.play_notification_sound
                         {
                             crate::media::play_notification_chime();
                         }
-                        self.show_toast("⏰ Đã gửi tự động tin nhắn hẹn giờ / nhắc hẹn");
+                        self.show_toast(format!(
+                            "{} Đã gửi tự động tin nhắn hẹn giờ / nhắc hẹn",
+                            lucide::ALARM_CLOCK
+                        ));
                     }
                 }
+                GuiEvent::ScheduledItemsLoaded(items) => {
+                    self.scheduled_items = items;
+                }
+                GuiEvent::ScheduleActionResult {
+                    ok,
+                    message,
+                    clear_composer,
+                } => {
+                    if clear_composer {
+                        self.input_message.clear();
+                    }
+                    if let Some(msg) = message {
+                        let icon = if ok {
+                            lucide::CHECK_CIRCLE
+                        } else {
+                            lucide::ALERT_TRIANGLE
+                        };
+                        self.show_toast(format!("{icon} {msg}"));
+                    }
+                }
+                GuiEvent::HistoryImported(res) => match res {
+                    Ok((t_cnt, m_cnt, refreshed_threads)) => {
+                        for nt in refreshed_threads {
+                            if let Some(existing) = self.threads.iter_mut().find(|t| t.id == nt.id)
+                            {
+                                crate::chat::merge_thread_into(existing, nt, false);
+                            } else if !nt.id.is_empty() {
+                                self.threads.push(nt);
+                            }
+                        }
+                        self.persist_threads_async();
+                        self.show_toast(format!(
+                            "{} Đã nhập {m_cnt} tin nhắn từ {t_cnt} hội thoại vào kho dữ liệu cục bộ",
+                            lucide::CHECK_CIRCLE
+                        ));
+                    }
+                    Err(e) => {
+                        self.show_toast(format!(
+                            "{} Lỗi nhập lịch sử: {e}",
+                            lucide::ALERT_TRIANGLE
+                        ));
+                    }
+                },
                 GuiEvent::SyncFinished {
                     added,
                     errors,
@@ -1982,8 +2081,10 @@ impl ZaloGuiApp {
                         Ok(info) => {
                             if info.has_update {
                                 let msg = format!(
-                                    "🚀 Có bản cập nhật mới v{} trên GitHub (hiện tại: v{})",
-                                    info.latest_version, info.current_version
+                                    "{} Có bản cập nhật mới v{} trên GitHub (hiện tại: v{})",
+                                    lucide::ROCKET,
+                                    info.latest_version,
+                                    info.current_version
                                 );
                                 self.update_status = msg.clone();
                                 let is_skipped = silent
@@ -2009,7 +2110,8 @@ impl ZaloGuiApp {
                                 }
                             } else {
                                 self.update_status = format!(
-                                    "✅ Bạn đang sử dụng phiên bản mới nhất (v{})",
+                                    "{} Bạn đang sử dụng phiên bản mới nhất (v{})",
+                                    lucide::CHECK_CIRCLE,
                                     info.current_version
                                 );
                                 if !silent {
@@ -2019,7 +2121,10 @@ impl ZaloGuiApp {
                             self.update_info = Some(info);
                         }
                         Err(e) => {
-                            self.update_status = format!("⚠️ Không kiểm tra được cập nhật: {e}");
+                            self.update_status = format!(
+                                "{} Không kiểm tra được cập nhật: {e}",
+                                lucide::ALERT_TRIANGLE
+                            );
                             if !silent {
                                 self.show_toast(&self.update_status.clone());
                             }
@@ -2043,10 +2148,11 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::UpdateAppliedAndRestarting(ver) => {
                     self.update_downloading = false;
-                    self.show_toast(format!("✅ Đã cập nhật lên v{ver} — Đang khởi động lại…"));
-                    self.allow_quit = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    std::process::exit(0);
+                    self.show_toast(format!(
+                        "{} Đã cập nhật lên v{ver} — Đang khởi động lại…",
+                        lucide::CHECK_CIRCLE
+                    ));
+                    self.request_graceful_exit(ctx);
                 }
                 GuiEvent::SocialProfileLoaded(res) => {
                     self.feed_loading_profile = false;
@@ -2227,7 +2333,7 @@ impl ZaloGuiApp {
                                 }
                             }
                         }
-                        let msg = format!("⚠️ Không ghim được tin nhắn: {err}");
+                        let msg = format!("{} Không ghim được tin nhắn: {err}", lucide::ALERT_TRIANGLE);
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     } else if !topic_id.is_empty() {
@@ -2294,31 +2400,34 @@ impl ZaloGuiApp {
                         let redacted = crate::session::redact_proxy_url(&url);
                         self.settings.proxy_url = url;
                         self.settings.save();
-                        let msg = format!("🌐 Đã áp dụng Proxy: {redacted}");
+                        let msg = format!("{} Đã áp dụng Proxy: {redacted}", lucide::GLOBE);
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     }
                     Ok(None) => {
                         self.settings.proxy_url.clear();
                         self.settings.save();
-                        let msg = "🌐 Đã tắt Proxy (kết nối trực tiếp)".to_string();
+                        let msg = format!("{} Đã tắt Proxy (kết nối trực tiếp)", lucide::GLOBE);
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     }
                     Err(e) => {
-                        let msg = format!("⚠️ Lỗi cấu hình Proxy: {e}");
+                        let msg = format!("{} Lỗi cấu hình Proxy: {e}", lucide::ALERT_TRIANGLE);
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     }
                 },
                 GuiEvent::FileDownloaded(res) => match res {
                     Ok((fname, path)) => {
-                        let msg = format!("✅ Đã lưu tập tin \"{fname}\" tại {path}");
+                        let msg = format!(
+                            "{} Đã lưu tập tin \"{fname}\" tại {path}",
+                            lucide::CHECK_CIRCLE
+                        );
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     }
                     Err(e) => {
-                        let msg = format!("⚠️ Lỗi lưu tập tin: {e}");
+                        let msg = format!("{} Lỗi lưu tập tin: {e}", lucide::ALERT_TRIANGLE);
                         self.status_msg = msg.clone();
                         self.show_toast(msg);
                     }
@@ -2338,14 +2447,32 @@ impl ZaloGuiApp {
 
 impl eframe::App for ZaloGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q))
-            || ctx.input(|i| i.viewport().close_requested())
-        {
-            self.allow_quit = true;
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::EndCall);
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q)) {
+            self.request_graceful_exit(ctx);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.shutting_down {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.request_graceful_exit(ctx);
+            } else if !crate::gui::worker::is_shutdown_complete()
+                && self
+                    .shutdown_requested_at
+                    .is_some_and(|t| t.elapsed() < Duration::from_millis(1500))
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.request_repaint_after(Duration::from_millis(16));
             }
-            std::process::exit(0);
+        }
+        if self.shutting_down {
+            if crate::gui::worker::is_shutdown_complete()
+                || self
+                    .shutdown_requested_at
+                    .is_some_and(|t| t.elapsed() >= Duration::from_millis(1500))
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
         }
         if ctx.input(|i| {
             (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::P)
@@ -2354,8 +2481,16 @@ impl eframe::App for ZaloGuiApp {
             self.settings_tab = SettingsTab::Privacy;
         }
         if self.theme_dirty {
-            self.palette().apply_to_ctx(ctx);
+            self.cached_palette = ThemePalette::load_with_custom_override(self.dark_mode);
+            self.cached_palette.apply_to_ctx(ctx);
             self.theme_dirty = false;
+        }
+        // Re-apply theme on first real frame so ViewportCommand::SetTheme reaches the
+        // already-created window (sending it from new() is too early and gets dropped).
+        if self.theme_apply_pending {
+            self.cached_palette.apply_to_ctx(ctx);
+            self.theme_apply_pending = false;
+            ctx.request_repaint();
         }
 
         self.check_events(ctx);
@@ -2560,7 +2695,19 @@ impl eframe::App for ZaloGuiApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        std::process::exit(0);
+        if !self.shutting_down {
+            self.shutting_down = true;
+            self.settings.save();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::PrepareShutdown {
+                    active_uin: self.user_uin.clone(),
+                    threads_snapshot: self.threads.clone(),
+                });
+            } else {
+                crate::gui::worker::mark_shutdown_complete();
+            }
+        }
+        crate::gui::worker::wait_for_worker_shutdown(Duration::from_millis(800));
     }
 }
 
@@ -2629,6 +2776,7 @@ impl ZaloGuiApp {
 
         egui::TopBottomPanel::top("custom_title_bar")
             .exact_height(32.0)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::none()
                     .fill(pal.bg_app)
@@ -2637,8 +2785,7 @@ impl ZaloGuiApp {
                         right: 0.0,
                         top: 0.0,
                         bottom: 0.0,
-                    })
-                    .stroke(Stroke::new(1.0_f32, pal.border)),
+                    }),
             )
             .show(ctx, |ui| {
                 let bar_rect = ui.max_rect();
@@ -2668,34 +2815,34 @@ impl ZaloGuiApp {
                             .strong(),
                     );
 
-                    // Subtle "Native v<version>" pill badge
-                    egui::Frame::none()
-                        .fill(pal.primary.linear_multiply(0.14))
-                        .rounding(Rounding::same(4.0))
-                        .inner_margin(Margin::symmetric(5.0, 1.5))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("Native v{}", env!("CARGO_PKG_VERSION")))
-                                    .color(pal.primary)
-                                    .size(10.5)
-                                    .strong(),
-                            );
-                        });
+                    // Subtle version chip (fixed height avoids vertical stretch inside centered TopBottomPanel)
+                    draw_inline_pill(
+                        ui,
+                        &format!("v{}", env!("CARGO_PKG_VERSION")),
+                        10.5,
+                        pal.text_secondary,
+                        pal.bg_elevated,
+                        Stroke::new(1.0_f32, pal.border),
+                        4.5,
+                        6.0,
+                        19.0,
+                        false,
+                    );
 
                     if total_unread > 0 {
                         ui.add_space(4.0);
-                        egui::Frame::none()
-                            .fill(pal.danger)
-                            .rounding(Rounding::same(8.0))
-                            .inner_margin(Margin::symmetric(6.0, 1.5))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new(format!("{total_unread} tin mới"))
-                                        .color(Color32::WHITE)
-                                        .size(10.5)
-                                        .strong(),
-                                );
-                            });
+                        draw_inline_pill(
+                            ui,
+                            &format!("{total_unread} tin mới"),
+                            10.5,
+                            Color32::WHITE,
+                            pal.danger,
+                            Stroke::NONE,
+                            8.5,
+                            7.0,
+                            19.0,
+                            true,
+                        );
                     } else if self.is_logged_in && !self.user_name.is_empty() {
                         ui.add_space(6.0);
                         ui.label(
@@ -2734,14 +2881,10 @@ impl ZaloGuiApp {
                             [Pos2::new(cc.x + d, cc.y - d), Pos2::new(cc.x - d, cc.y + d)],
                             Stroke::new(1.4_f32, close_fg),
                         );
-                        let close_resp = close_resp.on_hover_text("Đóng ứng dụng (Ctrl+Q)");
+                        let close_resp = close_resp.on_hover_cursor(CursorIcon::PointingHand);
+                        show_titlebar_tooltip(ctx, &close_resp, "Đóng (Ctrl+Q)", pal);
                         if close_resp.clicked() || close_resp.secondary_clicked() {
-                            self.allow_quit = true;
-                            if let Some(tx) = WORKER_TX.get() {
-                                let _ = tx.send(WorkerCmd::EndCall);
-                            }
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            std::process::exit(0);
+                            self.request_graceful_exit(ctx);
                         }
 
                         // Maximize / Restore Button (46x32)
@@ -2784,14 +2927,14 @@ impl ZaloGuiApp {
                             ui.painter()
                                 .rect_stroke(sq, Rounding::same(1.2), Stroke::new(1.3_f32, max_fg));
                         }
-                        if max_resp
-                            .on_hover_text(if is_maximized {
-                                "Khôi phục kích thước"
-                            } else {
-                                "Phóng to toàn màn hình"
-                            })
-                            .clicked()
-                        {
+                        let max_resp = max_resp.on_hover_cursor(CursorIcon::PointingHand);
+                        show_titlebar_tooltip(
+                            ctx,
+                            &max_resp,
+                            if is_maximized { "Khôi phục" } else { "Phóng to" },
+                            pal,
+                        );
+                        if max_resp.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
                         }
 
@@ -2812,7 +2955,9 @@ impl ZaloGuiApp {
                             [Pos2::new(mnc.x - 5.0, mnc.y), Pos2::new(mnc.x + 5.0, mnc.y)],
                             Stroke::new(1.4_f32, min_fg),
                         );
-                        if min_resp.on_hover_text("Thu nhỏ").clicked() {
+                        let min_resp = min_resp.on_hover_cursor(CursorIcon::PointingHand);
+                        show_titlebar_tooltip(ctx, &min_resp, "Thu nhỏ", pal);
+                        if min_resp.clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
 
@@ -2832,18 +2977,25 @@ impl ZaloGuiApp {
                             th_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             th_icon,
-                            FontId::proportional(13.5),
+                            FontId::proportional(14.5),
                             if th_resp.hovered() {
                                 pal.text_primary
                             } else {
-                                pal.text_muted
+                                pal.text_secondary
                             },
                         );
-                        if th_resp
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text("Chuyển đổi giao diện Sáng / Tối")
-                            .clicked()
-                        {
+                        let th_resp = th_resp.on_hover_cursor(CursorIcon::PointingHand);
+                        show_titlebar_tooltip(
+                            ctx,
+                            &th_resp,
+                            if self.dark_mode {
+                                "Giao diện Sáng"
+                            } else {
+                                "Giao diện Tối"
+                            },
+                            pal,
+                        );
+                        if th_resp.clicked() {
                             self.dark_mode = !self.dark_mode;
                             self.theme_dirty = true;
                         }
@@ -2857,23 +3009,28 @@ impl ZaloGuiApp {
                                     let (dl, tot) = self.update_progress.unwrap_or((0, 0));
                                     if tot > 0 {
                                         let pct = ((dl as f64 / tot as f64) * 100.0).clamp(0.0, 100.0);
-                                        format!("⏳ Đang cập nhật {pct:.0}%")
+                                        format!("{} Đang cập nhật {pct:.0}%", lucide::HOURGLASS)
                                     } else {
-                                        "⏳ Đang tải cập nhật…".to_string()
+                                        format!("{} Đang tải cập nhật…", lucide::HOURGLASS)
                                     }
                                 } else {
-                                    format!("🚀 Cập nhật mới v{}", upd.latest_version)
+                                    format!("{} Cập nhật mới v{}", lucide::ROCKET, upd.latest_version)
                                 };
                                 let upd_pill = egui::Button::new(
                                     RichText::new(badge_txt)
-                                        .size(11.2)
+                                        .size(11.0)
                                         .color(Color32::WHITE)
                                         .strong(),
                                 )
                                 .fill(pal.accent_online)
-                                .rounding(Rounding::same(5.0));
+                                .rounding(Rounding::same(5.0))
+                                .min_size(Vec2::new(0.0, 22.0));
                                 let r = ui
-                                    .add(upd_pill)
+                                    .scope(|ui| {
+                                        ui.spacing_mut().button_padding = Vec2::new(8.0, 3.0);
+                                        ui.add(upd_pill)
+                                    })
+                                    .inner
                                     .on_hover_cursor(CursorIcon::PointingHand)
                                     .on_hover_text(format!(
                                         "Đã có phiên bản v{} trên GitHub Releases — Bấm để xem chi tiết & cập nhật tự động",
@@ -2891,15 +3048,20 @@ impl ZaloGuiApp {
                             ui.add_space(8.0);
                             let hist_btn = egui::Button::new(
                                 RichText::new("Xem lịch sử đã lưu")
-                                    .size(11.5)
+                                    .size(11.2)
                                     .color(pal.primary)
                                     .strong(),
                             )
                             .fill(pal.primary.linear_multiply(0.12))
                             .stroke(Stroke::new(1.0_f32, pal.primary))
-                            .rounding(Rounding::same(5.0));
+                            .rounding(Rounding::same(5.0))
+                            .min_size(Vec2::new(0.0, 22.0));
                             let r = ui
-                                .add(hist_btn)
+                                .scope(|ui| {
+                                    ui.spacing_mut().button_padding = Vec2::new(8.0, 3.0);
+                                    ui.add(hist_btn)
+                                })
+                                .inner
                                 .on_hover_cursor(CursorIcon::PointingHand);
                             buttons_left_x = r.rect.left() - 8.0;
                             if r.clicked() {
@@ -2908,6 +3070,18 @@ impl ZaloGuiApp {
                         }
                     });
                 });
+
+                // Subtle 1px bottom hairline spanning the full window width
+                let screen = ctx.screen_rect();
+                let line_y = bar_rect.bottom() - 0.5;
+                let full_bar_clip = Rect::from_min_max(
+                    Pos2::new(screen.left(), bar_rect.top()),
+                    Pos2::new(screen.right(), bar_rect.bottom()),
+                );
+                ui.painter().with_clip_rect(full_bar_clip).line_segment(
+                    [Pos2::new(screen.left(), line_y), Pos2::new(screen.right(), line_y)],
+                    Stroke::new(1.0_f32, pal.border),
+                );
 
                 // 3. Interactive drag / double-click region covering everything left of the control buttons
                 let drag_rect = Rect::from_min_max(
@@ -2928,215 +3102,301 @@ impl ZaloGuiApp {
     }
 
     fn render_login_screen(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
-        ui.vertical_centered(|ui| {
-            let avail_h = ui.available_height();
-            ui.add_space((avail_h * 0.08).max(20.0));
-            if let Some(tex) = &self.app_logo_texture {
-                ui.image((tex.id(), Vec2::new(64.0, 64.0)));
-                ui.add_space(10.0);
-            }
-            ui.label(
-                RichText::new("Đăng nhập Zalo")
-                    .color(pal.primary)
-                    .size(26.0)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Khởi chạy nhẹ, bảo mật và đồng bộ tin nhắn thời gian thực")
-                    .color(pal.text_secondary)
-                    .size(13.5),
-            );
-            ui.add_space(18.0);
+        let avail_w = ui.available_width();
+        let avail_h = ui.available_height();
+        let compact_h = avail_h < 630.0;
+        let ultra_compact = avail_h < 460.0;
+        let card_w = (avail_w - 28.0).clamp(270.0, 380.0);
+        let h_pad = if card_w < 330.0 { 18.0 } else { 26.0 };
+        let v_pad = if ultra_compact {
+            14.0
+        } else if compact_h {
+            18.0
+        } else {
+            24.0
+        };
+        let inner_w = (card_w - h_pad * 2.0).max(216.0);
+        let logo_size = if ultra_compact {
+            40.0
+        } else if compact_h {
+            48.0
+        } else {
+            58.0
+        };
+        let qr_outer = (avail_h - 335.0).clamp(148.0, 224.0).min(inner_w - 8.0);
+        let qr_margin = if compact_h { 10.0 } else { 12.0 };
+        let qr_size = (qr_outer - qr_margin * 2.0).max(116.0);
 
-            egui::Frame::none()
-                .fill(pal.bg_elevated)
-                .rounding(Rounding::same(16.0))
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .inner_margin(Margin::symmetric(28.0, 24.0))
-                .show(ui, |ui| {
-                    ui.set_width(360.0);
-                    ui.vertical_centered(|ui| {
-                        // Segmented Tab Switcher
-                        egui::Frame::none()
-                            .fill(pal.bg_input)
-                            .rounding(Rounding::same(10.0))
-                            .inner_margin(Margin::same(4.0))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let tab_w = (ui.available_width() - 8.0) / 2.0;
-                                    for (tab, title) in [
-                                        (LoginTab::QrCode, "Quét mã QR"),
-                                        (LoginTab::Password, "Số điện thoại"),
-                                    ] {
-                                        let active = self.login_tab == tab;
-                                        let btn = egui::Button::new(
-                                            RichText::new(title)
-                                                .size(13.0)
-                                                .color(if active {
-                                                    Color32::WHITE
+        let est_card_h = match self.login_tab {
+            LoginTab::QrCode => v_pad * 2.0 + 40.0 + 14.0 + qr_outer + 76.0,
+            LoginTab::Password => v_pad * 2.0 + 40.0 + 18.0 + 190.0,
+        };
+        let est_total_h = logo_size + 58.0 + est_card_h;
+        let top_pad = ((avail_h - est_total_h) * 0.36).clamp(10.0, 56.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("login_screen_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Zero implicit vertical item spacing so top_pad/card spacing stays exact
+                // and does not trigger an unnecessary scrollbar at default window heights.
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.vertical_centered(|ui| {
+                    ui.add_space(top_pad);
+                    if let Some(tex) = &self.app_logo_texture {
+                        ui.image((tex.id(), Vec2::new(logo_size, logo_size)));
+                        ui.add_space(if compact_h { 8.0 } else { 10.0 });
+                    }
+                    ui.label(
+                        RichText::new("Đăng nhập Zalo")
+                            .color(pal.primary)
+                            .size(if ultra_compact { 21.0 } else { 24.0 })
+                            .strong(),
+                    );
+                    ui.add_space(3.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Khởi chạy nhẹ, bảo mật và đồng bộ tin nhắn thời gian thực",
+                            )
+                            .color(pal.text_secondary)
+                            .size(if compact_h { 12.5 } else { 13.0 }),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(if compact_h { 12.0 } else { 16.0 });
+
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .rounding(Rounding::same(16.0))
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .shadow(egui::epaint::Shadow {
+                            offset: Vec2::new(0.0, 8.0),
+                            blur: 24.0,
+                            spread: 0.0,
+                            color: Color32::from_black_alpha(if pal.is_dark { 85 } else { 24 }),
+                        })
+                        .inner_margin(Margin::symmetric(h_pad, v_pad))
+                        .show(ui, |ui| {
+                            ui.set_width(inner_w);
+                            ui.vertical_centered(|ui| {
+                                // Segmented Tab Switcher
+                                egui::Frame::none()
+                                    .fill(pal.bg_input)
+                                    .rounding(Rounding::same(10.0))
+                                    .inner_margin(Margin::same(4.0))
+                                    .show(ui, |ui| {
+                                        let seg_inner_w = (inner_w - 8.0).max(180.0);
+                                        ui.set_width(seg_inner_w);
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            let tab_w = ((seg_inner_w - 4.0) / 2.0).max(86.0);
+                                            for (tab, title) in [
+                                                (LoginTab::QrCode, "Quét mã QR"),
+                                                (LoginTab::Password, "Số điện thoại"),
+                                            ] {
+                                                let active = self.login_tab == tab;
+                                                let btn = egui::Button::new(
+                                                    RichText::new(title)
+                                                        .size(13.0)
+                                                        .color(if active {
+                                                            Color32::WHITE
+                                                        } else {
+                                                            pal.text_secondary
+                                                        })
+                                                        .strong(),
+                                                )
+                                                .fill(if active {
+                                                    pal.primary
                                                 } else {
-                                                    pal.text_secondary
+                                                    Color32::TRANSPARENT
                                                 })
-                                                .strong(),
-                                        )
-                                        .fill(if active {
-                                            pal.primary
+                                                .stroke(Stroke::NONE)
+                                                .rounding(Rounding::same(7.0))
+                                                .min_size(Vec2::new(tab_w, 32.0));
+
+                                                if ui
+                                                    .add(btn)
+                                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                                    .clicked()
+                                                {
+                                                    self.login_tab = tab;
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(if compact_h { 14.0 } else { 18.0 });
+
+                                match self.login_tab {
+                                    LoginTab::QrCode => {
+                                        if let Some(tex) = &self.qr_texture {
+                                            egui::Frame::none()
+                                                .fill(Color32::WHITE)
+                                                .rounding(Rounding::same(12.0))
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .inner_margin(Margin::same(qr_margin))
+                                                .show(ui, |ui| {
+                                                    ui.image((
+                                                        tex.id(),
+                                                        Vec2::new(qr_size, qr_size),
+                                                    ));
+                                                });
                                         } else {
-                                            Color32::TRANSPARENT
-                                        })
-                                        .stroke(Stroke::NONE)
-                                        .rounding(Rounding::same(7.0))
-                                        .min_size(Vec2::new(tab_w, 32.0));
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                Vec2::new(qr_outer, qr_outer),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                Rounding::same(12.0),
+                                                pal.bg_input,
+                                            );
+                                            ui.painter().rect_stroke(
+                                                rect,
+                                                Rounding::same(12.0),
+                                                Stroke::new(1.0_f32, pal.border),
+                                            );
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "Đang tải mã QR…",
+                                                FontId::proportional(14.0),
+                                                pal.text_secondary,
+                                            );
+                                        }
+
+                                        ui.add_space(if compact_h { 10.0 } else { 14.0 });
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&self.qr_status)
+                                                    .color(pal.text_primary)
+                                                    .size(13.0),
+                                            )
+                                            .wrap(),
+                                        );
+                                        ui.add_space(if compact_h { 10.0 } else { 12.0 });
+
+                                        let refresh_btn = egui::Button::new(
+                                            RichText::new(format!(
+                                                "{}  Tạo / Làm mới mã QR",
+                                                lucide::REFRESH
+                                            ))
+                                            .size(13.2)
+                                            .color(Color32::WHITE)
+                                            .strong(),
+                                        )
+                                        .fill(pal.primary)
+                                        .rounding(Rounding::same(8.0))
+                                        .min_size(Vec2::new(inner_w.min(230.0), 36.0));
 
                                         if ui
-                                            .add(btn)
+                                            .add(refresh_btn)
                                             .on_hover_cursor(CursorIcon::PointingHand)
                                             .clicked()
                                         {
-                                            self.login_tab = tab;
+                                            self.login_in_progress = true;
+                                            self.qr_status = "Đang xin mã QR…".into();
+                                            if let Some(tx) = WORKER_TX.get() {
+                                                let _ = tx.send(WorkerCmd::RequestQr);
+                                            }
                                         }
                                     }
-                                });
-                            });
+                                    LoginTab::Password => {
+                                        let mut submit_now = false;
+                                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                            ui.label(
+                                                RichText::new("Số điện thoại")
+                                                    .size(13.0)
+                                                    .color(pal.text_secondary)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(5.0);
+                                            let phone_resp = render_login_text_field(
+                                                ui,
+                                                &mut self.phone_input,
+                                                "Ví dụ: 0912345678",
+                                                inner_w,
+                                                false,
+                                                pal,
+                                            );
+                                            ui.add_space(12.0);
 
-                        ui.add_space(18.0);
+                                            ui.label(
+                                                RichText::new("Mật khẩu")
+                                                    .size(13.0)
+                                                    .color(pal.text_secondary)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(5.0);
+                                            let pass_resp = render_login_text_field(
+                                                ui,
+                                                &mut self.password_input,
+                                                "Nhập mật khẩu Zalo",
+                                                inner_w,
+                                                true,
+                                                pal,
+                                            );
+                                            let enter_pressed =
+                                                ui.input(|i| i.key_pressed(Key::Enter));
+                                            if enter_pressed
+                                                && ((pass_resp.has_focus()
+                                                    || pass_resp.lost_focus())
+                                                    || ((phone_resp.has_focus()
+                                                        || phone_resp.lost_focus())
+                                                        && !self.password_input.is_empty()))
+                                            {
+                                                submit_now = true;
+                                            }
+                                            ui.add_space(14.0);
 
-                        match self.login_tab {
-                            LoginTab::QrCode => {
-                                if let Some(tex) = &self.qr_texture {
-                                    egui::Frame::none()
-                                        .fill(Color32::WHITE)
-                                        .rounding(Rounding::same(12.0))
-                                        .stroke(Stroke::new(1.0_f32, pal.border))
-                                        .inner_margin(Margin::same(14.0))
-                                        .show(ui, |ui| {
-                                            ui.image((tex.id(), Vec2::new(240.0, 240.0)));
+                                            if !self.login_status_msg.is_empty() {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&self.login_status_msg)
+                                                            .color(pal.danger)
+                                                            .size(12.5),
+                                                    )
+                                                    .wrap(),
+                                                );
+                                                ui.add_space(8.0);
+                                            }
                                         });
-                                } else {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(268.0, 268.0),
-                                        Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        Rounding::same(12.0),
-                                        pal.bg_input,
-                                    );
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        Rounding::same(12.0),
-                                        Stroke::new(1.0_f32, pal.border),
-                                    );
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "Đang tải mã QR…",
-                                        FontId::proportional(14.5),
-                                        pal.text_secondary,
-                                    );
-                                }
 
-                                ui.add_space(14.0);
-                                ui.label(
-                                    RichText::new(&self.qr_status)
-                                        .color(pal.text_primary)
-                                        .size(13.5),
-                                );
-                                ui.add_space(12.0);
+                                        // Keep the primary submit button outside `Align::Min` so its label is centered.
+                                        ui.vertical_centered(|ui| {
+                                            let btn = egui::Button::new(
+                                                RichText::new("Đăng nhập")
+                                                    .color(Color32::WHITE)
+                                                    .size(14.0)
+                                                    .strong(),
+                                            )
+                                            .fill(pal.primary)
+                                            .rounding(Rounding::same(8.0))
+                                            .min_size(Vec2::new(inner_w, 38.0));
 
-                                let refresh_btn = egui::Button::new(
-                                    RichText::new("Tạo / Làm mới mã QR")
-                                        .size(13.5)
-                                        .color(Color32::WHITE)
-                                        .strong(),
-                                )
-                                .fill(pal.primary)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(200.0, 36.0));
-
-                                if ui
-                                    .add(refresh_btn)
-                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    self.login_in_progress = true;
-                                    self.qr_status = "Đang xin mã QR…".into();
-                                    if let Some(tx) = WORKER_TX.get() {
-                                        let _ = tx.send(WorkerCmd::RequestQr);
+                                            let clicked = ui
+                                                .add_enabled(!self.login_in_progress, btn)
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .clicked();
+                                            if (clicked || submit_now) && !self.login_in_progress {
+                                                self.login_in_progress = true;
+                                                self.login_status_msg = "Đang kết nối…".into();
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ = tx.send(WorkerCmd::LoginPassword {
+                                                        phone: self.phone_input.clone(),
+                                                        pass: self.password_input.clone(),
+                                                    });
+                                                }
+                                            }
+                                        });
                                     }
                                 }
-                            }
-                            LoginTab::Password => {
-                                ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                    ui.label(
-                                        RichText::new("Số điện thoại")
-                                            .size(13.0)
-                                            .color(pal.text_secondary)
-                                            .strong(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.add_sized(
-                                        [ui.available_width(), 34.0],
-                                        egui::TextEdit::singleline(&mut self.phone_input)
-                                            .hint_text("Ví dụ: 0912345678"),
-                                    );
-                                    ui.add_space(12.0);
-
-                                    ui.label(
-                                        RichText::new("Mật khẩu")
-                                            .size(13.0)
-                                            .color(pal.text_secondary)
-                                            .strong(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.add_sized(
-                                        [ui.available_width(), 34.0],
-                                        egui::TextEdit::singleline(&mut self.password_input)
-                                            .password(true)
-                                            .hint_text("Nhập mật khẩu Zalo"),
-                                    );
-                                    ui.add_space(16.0);
-
-                                    if !self.login_status_msg.is_empty() {
-                                        ui.label(
-                                            RichText::new(&self.login_status_msg)
-                                                .color(pal.danger)
-                                                .size(12.5),
-                                        );
-                                        ui.add_space(8.0);
-                                    }
-
-                                    let btn = egui::Button::new(
-                                        RichText::new("Đăng nhập")
-                                            .color(Color32::WHITE)
-                                            .size(14.0)
-                                            .strong(),
-                                    )
-                                    .fill(pal.primary)
-                                    .rounding(Rounding::same(8.0))
-                                    .min_size(Vec2::new(ui.available_width(), 38.0));
-
-                                    if ui
-                                        .add_enabled(!self.login_in_progress, btn)
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .clicked()
-                                    {
-                                        self.login_in_progress = true;
-                                        self.login_status_msg = "Đang kết nối…".into();
-                                        if let Some(tx) = WORKER_TX.get() {
-                                            let _ = tx.send(WorkerCmd::LoginPassword {
-                                                phone: self.phone_input.clone(),
-                                                pass: self.password_input.clone(),
-                                            });
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
+                            });
+                        });
+                    ui.add_space(16.0);
                 });
-        });
+            });
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {
@@ -3144,6 +3404,37 @@ impl ZaloGuiApp {
         self.status_msg = text.clone();
         self.toast_notice = Some((text, std::time::Instant::now()));
     }
+}
+
+/// Render a palette-locked single-line login field so OS light/dark theme overrides never
+/// wash out input background contrast.
+fn render_login_text_field(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    hint: &str,
+    width: f32,
+    is_password: bool,
+    pal: &ThemePalette,
+) -> egui::Response {
+    ui.scope(|ui| {
+        let vis = ui.visuals_mut();
+        vis.extreme_bg_color = pal.bg_input;
+        vis.override_text_color = None;
+        vis.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, pal.border);
+        vis.widgets.hovered.bg_stroke = Stroke::new(1.2_f32, pal.primary);
+        vis.widgets.active.bg_stroke = Stroke::new(1.5_f32, pal.primary);
+        vis.selection.stroke = Stroke::new(1.5_f32, pal.primary);
+        ui.add_sized(
+            [width, 38.0],
+            egui::TextEdit::singleline(value)
+                .password(is_password)
+                .text_color(pal.text_primary)
+                .margin(Margin::symmetric(12.0, 9.0))
+                .vertical_align(Align::Center)
+                .hint_text(RichText::new(hint).color(pal.text_muted)),
+        )
+    })
+    .inner
 }
 
 #[cfg(test)]

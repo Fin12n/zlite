@@ -93,7 +93,12 @@ impl ThemePalette {
     }
 
     pub(super) fn apply_to_ctx(&self, ctx: &egui::Context) {
-        let mut style = (*ctx.style()).clone();
+        let egui_theme = if self.is_dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        let mut style = (*ctx.style_of(egui_theme)).clone();
         let mut visuals = if self.is_dark {
             egui::Visuals::dark()
         } else {
@@ -104,7 +109,8 @@ impl ThemePalette {
         visuals.window_fill = self.bg_elevated;
         visuals.extreme_bg_color = self.bg_input;
         visuals.faint_bg_color = self.bg_hover;
-        visuals.override_text_color = Some(self.text_primary);
+        // Leave `override_text_color` as `None` so TextEdit placeholders keep using `weak_text_color()`.
+        visuals.override_text_color = None;
         visuals.selection.bg_fill =
             self.primary
                 .linear_multiply(if self.is_dark { 0.45 } else { 0.22 });
@@ -112,6 +118,7 @@ impl ThemePalette {
 
         let r = Rounding::same(8.0);
         visuals.widgets.noninteractive.bg_fill = self.bg_app;
+        visuals.widgets.noninteractive.weak_bg_fill = self.bg_input;
         visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
         visuals.widgets.noninteractive.rounding = r;
@@ -139,7 +146,13 @@ impl ThemePalette {
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = 6.0;
         style.visuals = visuals;
-        ctx.set_style(style);
+        ctx.set_theme(egui_theme);
+        ctx.set_style_of(egui_theme, style);
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if self.is_dark {
+            egui::SystemTheme::Dark
+        } else {
+            egui::SystemTheme::Light
+        }));
     }
 
     /// Load either the built-in dark/light palette or apply custom overrides from `theme.json` (#7).
@@ -675,6 +688,30 @@ pub mod lucide {
     pub const SHARE_2: &str = "\u{e156}";
     pub const TRASH_2: &str = "\u{e18e}";
     pub const INFO: &str = "\u{e0f9}";
+    pub const ALARM_CLOCK: &str = "\u{e03a}";
+    pub const ALERT_CIRCLE: &str = "\u{e077}";
+    pub const ALERT_TRIANGLE: &str = "\u{e193}";
+    pub const BELL_OFF: &str = "\u{e05a}";
+    pub const CALENDAR_CLOCK: &str = "\u{e304}";
+    pub const CAT: &str = "\u{e38c}";
+    pub const CHECK_CIRCLE: &str = "\u{e07c}";
+    pub const CLOUD_DOWNLOAD: &str = "\u{e089}";
+    pub const DATABASE: &str = "\u{e0ad}";
+    pub const DOWNLOAD: &str = "\u{e0b2}";
+    pub const FLAG: &str = "\u{e0d1}";
+    pub const HEART: &str = "\u{e0f2}";
+    pub const HOURGLASS: &str = "\u{e296}";
+    pub const ID_CARD: &str = "\u{e617}";
+    pub const MESSAGE_CIRCLE: &str = "\u{e116}";
+    pub const PENCIL: &str = "\u{e1f9}";
+    pub const PHONE_INCOMING: &str = "\u{e136}";
+    pub const ROCKET: &str = "\u{e286}";
+    pub const SMARTPHONE: &str = "\u{e163}";
+    pub const STICKER: &str = "\u{e302}";
+    pub const SUNRISE: &str = "\u{e179}";
+    pub const SUNSET: &str = "\u{e17a}";
+    pub const TIMER: &str = "\u{e1e0}";
+    pub const ZAP: &str = "\u{e1b4}";
 }
 
 pub(super) fn draw_lucide_icon(
@@ -797,14 +834,38 @@ pub fn emoji_to_tex_key(emoji: &str) -> &'static str {
 
 pub(super) const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app_icon.png");
 
+fn cached_base_icon_256() -> Option<&'static (u32, u32, Vec<u8>)> {
+    static ICON_256: std::sync::OnceLock<Option<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
+    ICON_256
+        .get_or_init(|| {
+            let img = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
+            let (width, height) = img.dimensions();
+            Some((width, height, img.into_raw()))
+        })
+        .as_ref()
+}
+
+fn cached_base_icon_64() -> Option<&'static Vec<u8>> {
+    static ICON_64: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    ICON_64
+        .get_or_init(|| {
+            let (w, h, raw) = cached_base_icon_256()?;
+            let buf = image::RgbaImage::from_raw(*w, *h, raw.clone())?;
+            Some(
+                image::imageops::resize(&buf, 64, 64, image::imageops::FilterType::Lanczos3)
+                    .into_raw(),
+            )
+        })
+        .as_ref()
+}
+
 /// Decode the embedded 256x256 RGBA application icon for the OS window/taskbar (`ViewportBuilder::with_icon`).
 pub fn load_app_icon() -> Option<egui::IconData> {
-    let img = image::load_from_memory(APP_ICON_PNG).ok()?.into_rgba8();
-    let (width, height) = img.dimensions();
+    let (width, height, raw) = cached_base_icon_256()?;
     Some(egui::IconData {
-        rgba: img.into_raw(),
-        width,
-        height,
+        rgba: raw.clone(),
+        width: *width,
+        height: *height,
     })
 }
 
@@ -814,15 +875,8 @@ pub fn load_app_icon_with_badge(unread_count: usize) -> Option<egui::IconData> {
     if unread_count == 0 {
         return load_app_icon();
     }
-    let base = image::load_from_memory(APP_ICON_PNG).ok()?;
     let size: u32 = 64;
-    let mut rgba = image::imageops::resize(
-        &base.to_rgba8(),
-        size,
-        size,
-        image::imageops::FilterType::Lanczos3,
-    )
-    .into_raw();
+    let mut rgba = cached_base_icon_64()?.clone();
 
     let label = if unread_count > 99 {
         "99+".to_string()
@@ -1029,6 +1083,109 @@ pub(super) fn render_toggle_switch(
         Color32::WHITE,
     );
     resp
+}
+
+/// Show a single-line tooltip anchored below-right of `resp` and clamped within the window
+/// so right-edge titlebar controls never clip off the right border on hover.
+pub(super) fn show_titlebar_tooltip(
+    ctx: &egui::Context,
+    resp: &egui::Response,
+    text: &str,
+    pal: &ThemePalette,
+) {
+    if !resp.hovered() || text.is_empty() {
+        return;
+    }
+    let screen = ctx.screen_rect();
+    let right_x = resp.rect.right().min(screen.right() - 8.0);
+    let top_y = (resp.rect.bottom() + 6.0).min(screen.bottom() - 28.0);
+    egui::Area::new(resp.id.with("titlebar_tip"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .pivot(egui::Align2::RIGHT_TOP)
+        .fixed_pos(Pos2::new(right_x, top_y))
+        .constrain_to(screen.shrink(6.0))
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(pal.bg_elevated)
+                .stroke(Stroke::new(1.0_f32, pal.border))
+                .rounding(Rounding::same(6.0))
+                .shadow(egui::epaint::Shadow {
+                    offset: Vec2::new(0.0, 4.0),
+                    blur: 12.0,
+                    spread: 0.0,
+                    color: Color32::from_black_alpha(if pal.is_dark { 110 } else { 36 }),
+                })
+                .inner_margin(Margin::symmetric(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text).size(11.5).color(pal.text_primary),
+                        )
+                        .extend(),
+                    );
+                });
+        });
+}
+
+/// Paint a fixed-height pill chip centered inside horizontal layouts without stretching vertically.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_inline_pill(
+    ui: &mut egui::Ui,
+    text: &str,
+    font_size: f32,
+    text_color: Color32,
+    bg_fill: Color32,
+    border: Stroke,
+    rounding: f32,
+    h_pad: f32,
+    height: f32,
+    bold: bool,
+) -> egui::Response {
+    let mut rt = RichText::new(text).size(font_size).color(text_color);
+    if bold {
+        rt = rt.strong();
+    }
+    let galley = egui::WidgetText::from(rt).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Body,
+    );
+    let size = Vec2::new((galley.size().x + h_pad * 2.0).ceil(), height);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let r = Rounding::same(rounding);
+        ui.painter().rect_filled(rect, r, bg_fill);
+        if border != Stroke::NONE {
+            ui.painter().rect_stroke(rect, r, border);
+        }
+        let text_pos = Pos2::new(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter().galley(text_pos, galley, text_color);
+    }
+    resp
+}
+
+/// Paint a crisp 1px hairline border on the inner edge of a `SidePanel` using the palette color.
+pub(super) fn paint_panel_vertical_edge(
+    ctx: &egui::Context,
+    panel_resp: &egui::Response,
+    right_edge: bool,
+    color: Color32,
+) {
+    let r = panel_resp.rect;
+    let x = if right_edge {
+        r.right() - 0.5
+    } else {
+        r.left() + 0.5
+    };
+    ctx.layer_painter(panel_resp.layer_id).line_segment(
+        [Pos2::new(x, r.top()), Pos2::new(x, r.bottom())],
+        Stroke::new(1.0_f32, color),
+    );
 }
 
 static CJK_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

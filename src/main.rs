@@ -18,9 +18,77 @@ pub use zalo_rust::{
 
 pub const POLL_SECS: u64 = 4;
 
+fn wants_gui_startup_dialog_with_flag(args: &[String], dialog_disabled: bool) -> bool {
+    if dialog_disabled {
+        return false;
+    }
+    let has_cli_flag = args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--version"
+                | "-V"
+                | "--check-update"
+                | "--print-data-dir"
+                | "--tui"
+                | "--qr"
+                | "--mcp"
+                | "--api-only"
+        ) || a.starts_with("--phone")
+    });
+    let logout_only = args.iter().any(|a| a == "--logout")
+        && !args.iter().any(|a| a == "--gui");
+    !has_cli_flag && !logout_only
+}
+
+fn wants_gui_startup_dialog(args: &[String]) -> bool {
+    wants_gui_startup_dialog_with_flag(
+        args,
+        std::env::var_os("CTDOZLITE_NO_ERROR_DIALOG").is_some(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn show_windows_error_dialog(title: &str, message: &str) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            hwnd: *mut std::ffi::c_void,
+            lp_text: *const u16,
+            lp_caption: *const u16,
+            u_type: u32,
+        ) -> i32;
+    }
+    let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let msg_w: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    // MB_OK (0x00000000) | MB_ICONERROR (0x00000010) | MB_SETFOREGROUND (0x00010000)
+    // SAFETY: Null-terminated UTF-16 buffers outlive the synchronous MessageBoxW call.
+    unsafe {
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            msg_w.as_ptr(),
+            title_w.as_ptr(),
+            0x0001_0010,
+        );
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(err) = run_app(&args).await {
+        eprintln!("Lỗi khởi chạy ctdozlite: {err:#}");
+        #[cfg(target_os = "windows")]
+        if wants_gui_startup_dialog(&args) {
+            let detail = format!(
+                "Không thể khởi động ctdozlite.\n\nChi tiết: {err:#}\n\nGợi ý: Kiểm tra quyền ghi vào thư mục %LOCALAPPDATA%\\ctdozlite hoặc chạy lại với tham số --data-dir."
+            );
+            show_windows_error_dialog("ctdozlite — Lỗi khởi chạy", &detail);
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run_app(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("ctdozlite v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -69,12 +137,13 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let data_path = data_dir::initialize(&args)?;
+    let data_path = data_dir::initialize(args)?;
     if args.iter().any(|a| a == "--print-data-dir") {
         println!("{}", data_path.display());
         return Ok(());
     }
-    std::panic::set_hook(Box::new(|info| {
+    let crash_log_path = data_path.join("crash.log");
+    std::panic::set_hook(Box::new(move |info| {
         use std::io::Write;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -85,7 +154,7 @@ async fn main() -> Result<()> {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("crash.log")
+            .open(&crash_log_path)
         {
             let _ = f.write_all(msg.as_bytes());
         }
@@ -210,7 +279,7 @@ async fn main() -> Result<()> {
         let mut viewport = eframe::egui::ViewportBuilder::default()
             .with_app_id("ctdozlite")
             .with_decorations(false)
-            .with_inner_size([1020.0, 700.0])
+            .with_inner_size([1000.0, 640.0])
             .with_min_inner_size([480.0, 360.0])
             .with_title("ctdozlite");
         if let Some(icon) = gui::load_app_icon() {
@@ -247,9 +316,6 @@ async fn main() -> Result<()> {
             }),
         )
         .map_err(|e| anyhow::anyhow!("Không thể khởi chạy GUI: {e}"));
-        if res.is_ok() {
-            std::process::exit(0);
-        }
         return res;
     }
 
@@ -390,4 +456,55 @@ async fn main() -> Result<()> {
     tui::run_tui(tui_app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wants_gui_startup_dialog_with_flag;
+
+    fn vec_s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn gui_launch_allows_startup_error_dialog() {
+        assert!(wants_gui_startup_dialog_with_flag(&[], false));
+        assert!(wants_gui_startup_dialog_with_flag(&vec_s(&["--gui"]), false));
+        assert!(wants_gui_startup_dialog_with_flag(
+            &vec_s(&["--profile", "acc2"]),
+            false
+        ));
+        assert!(wants_gui_startup_dialog_with_flag(
+            &vec_s(&["--logout", "--gui"]),
+            false
+        ));
+    }
+
+    #[test]
+    fn cli_flags_suppress_startup_error_dialog() {
+        for flag in [
+            "--version",
+            "-V",
+            "--check-update",
+            "--print-data-dir",
+            "--tui",
+            "--qr",
+            "--mcp",
+            "--api-only",
+            "--logout",
+            "--phone",
+            "--phone=0900000000",
+        ] {
+            assert!(
+                !wants_gui_startup_dialog_with_flag(&vec_s(&[flag]), false),
+                "expected no GUI dialog for CLI flag {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_override_suppresses_startup_error_dialog() {
+        assert!(!wants_gui_startup_dialog_with_flag(&[], true));
+        assert!(!wants_gui_startup_dialog_with_flag(&vec_s(&["--gui"]), true));
+    }
 }

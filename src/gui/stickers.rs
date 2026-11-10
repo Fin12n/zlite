@@ -57,7 +57,7 @@ pub(super) fn get_ami_fat_cat_gif(sticker_id: u64) -> Option<(&'static str, &'st
 }
 
 pub(super) const FEATURED_PACK_TABS: &[(u64, &str)] = &[
-    (AMI_FAT_CAT_CATE_ID, "🐱 Mèo Ami Bụng Bự (GIF)"),
+    (AMI_FAT_CAT_CATE_ID, "\u{e38c} Mèo Ami Bụng Bự (GIF)"),
     (61900, "Zapy Dô Tri"),
     (12815, "Bé Hai"),
     (12748, "Cò Lõ Đi Làm"),

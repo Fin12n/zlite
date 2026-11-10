@@ -56,6 +56,13 @@ fn open_scheduler_db(db_path: &str) -> Result<Connection> {
     } else {
         Connection::open(db_path)?
     };
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    if db_path != ":memory:" {
+        let _ = conn.execute_batch(
+            "PRAGMA journal_mode = WAL;\n\
+             PRAGMA synchronous = NORMAL;",
+        );
+    }
     init_scheduler_schema(&conn)?;
     Ok(conn)
 }

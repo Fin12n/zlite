@@ -89,8 +89,16 @@ pub fn save_current_account_snapshot(uin: &str) -> Result<()> {
     if Path::new("threads_cache.json").exists() {
         let _ = std::fs::copy("threads_cache.json", dir.join(format!("{uin}_threads.json")));
     }
-    if Path::new("zalo_history.db").exists() {
-        let _ = std::fs::copy("zalo_history.db", dir.join(format!("{uin}_history.db")));
+    // Preserve per-account DB (`accounts/{uin}_history.db`) when it is already populated;
+    // only seed it from legacy `zalo_history.db` if absent so an empty root file never overwrites it.
+    let account_db = dir.join(format!("{uin}_history.db"));
+    if account_db.exists() {
+        if let Some(p) = account_db.to_str() {
+            crate::store::checkpoint_wal_file(p);
+        }
+    } else if Path::new("zalo_history.db").exists() {
+        crate::store::checkpoint_wal_file("zalo_history.db");
+        let _ = std::fs::copy("zalo_history.db", account_db);
     }
     Ok(())
 }

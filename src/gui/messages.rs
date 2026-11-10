@@ -472,6 +472,124 @@ pub(super) fn pick_native_file_dialog(images_only: bool) -> Option<std::path::Pa
     }
 }
 
+/// Open a native OS directory-picker dialog for choosing the download folder.
+pub(super) fn pick_native_folder_dialog() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct BrowseInfoW {
+            hwnd_owner: *mut std::ffi::c_void,
+            pidl_root: *const std::ffi::c_void,
+            psz_display_name: *mut u16,
+            lpsz_title: *const u16,
+            ul_flags: u32,
+            lpfn: *const std::ffi::c_void,
+            l_param: isize,
+            i_image: i32,
+        }
+        #[link(name = "ole32")]
+        extern "system" {
+            fn CoInitializeEx(pv_reserved: *mut std::ffi::c_void, dw_co_init: u32) -> i32;
+            fn CoUninitialize();
+            fn CoTaskMemFree(pv: *mut std::ffi::c_void);
+        }
+        #[link(name = "shell32")]
+        extern "system" {
+            fn SHBrowseForFolderW(lpbi: *mut BrowseInfoW) -> *mut std::ffi::c_void;
+            fn SHGetPathFromIDListW(pidl: *const std::ffi::c_void, psz_path: *mut u16) -> i32;
+        }
+        // COINIT_APARTMENTTHREADED (0x2) | COINIT_DISABLE_OLE1DDE (0x4)
+        // BIF_RETURNONLYFSDIRS (0x0001) | BIF_EDITBOX (0x0010) | BIF_NEWDIALOGSTYLE (0x0040)
+        // Only balance CoUninitialize when CoInitializeEx returned S_OK (0) or S_FALSE (1).
+        let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), 0x2 | 0x4) };
+        let should_uninit = hr == 0 || hr == 1;
+        let title_u16: Vec<u16> = "Chọn thư mục lưu tập tin tải về từ Zalo\0"
+            .encode_utf16()
+            .collect();
+        let mut display_buf = vec![0u16; 260];
+        let mut bi = BrowseInfoW {
+            hwnd_owner: std::ptr::null_mut(),
+            pidl_root: std::ptr::null(),
+            psz_display_name: display_buf.as_mut_ptr(),
+            lpsz_title: title_u16.as_ptr(),
+            ul_flags: 0x0001 | 0x0010 | 0x0040,
+            lpfn: std::ptr::null(),
+            l_param: 0,
+            i_image: 0,
+        };
+        let pidl = unsafe { SHBrowseForFolderW(&mut bi) };
+        let result = if pidl.is_null() {
+            None
+        } else {
+            let mut path_buf = vec![0u16; 1024];
+            let ok = unsafe { SHGetPathFromIDListW(pidl, path_buf.as_mut_ptr()) };
+            unsafe { CoTaskMemFree(pidl) };
+            if ok != 0 {
+                let end = path_buf
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(path_buf.len());
+                let s = String::from_utf16_lossy(&path_buf[..end]);
+                if !s.is_empty() {
+                    Some(std::path::PathBuf::from(s))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if should_uninit {
+            unsafe { CoUninitialize() };
+        }
+        result
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Chọn thư mục lưu tập tin tải về từ Zalo\")",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(out) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory"])
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("kdialog")
+            .arg("--getexistingdirectory")
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(std::path::PathBuf::from(s));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Detect `Ctrl+V` or `Shift+Insert` reliably on Windows even when `egui-winit` swallows `Key::V`
 /// because the system clipboard contains an image instead of UTF-8 text.
 pub(super) fn is_clipboard_paste_triggered(ctx: &egui::Context) -> bool {

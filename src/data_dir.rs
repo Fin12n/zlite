@@ -6,17 +6,114 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
-/// Resolve paths without changing process state, including in parallel tests.
-///
-/// # Errors
-/// Returns an error for invalid storage options or a missing/relative bundle HOME.
-pub fn resolve(
-    args: &[String],
+#[derive(Debug, Clone, Default)]
+struct WindowsPathEnv<'a> {
+    local_app_data: Option<&'a Path>,
+    user_profile: Option<&'a Path>,
+    program_files: Option<&'a Path>,
+    program_files_x86: Option<&'a Path>,
+    program_w6432: Option<&'a Path>,
+    system_root: Option<&'a Path>,
+}
+
+fn normalize_windows_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let stripped = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(&raw);
+    let mut normalized = stripped.replace('/', r"\").to_ascii_lowercase();
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn path_is_within_windows_root(candidate: &Path, root: &Path) -> bool {
+    let cand = normalize_windows_path(candidate);
+    let base = normalize_windows_path(root);
+    if cand.is_empty() || base.is_empty() {
+        return false;
+    }
+    cand == base
+        || cand
+            .strip_prefix(&base)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
+fn is_windows_protected_or_installed_dir(
     cwd: &Path,
     executable: &Path,
-    home: Option<&Path>,
-    macos: bool,
-) -> Result<(PathBuf, bool)> {
+    env: &WindowsPathEnv<'_>,
+) -> bool {
+    let exe_dir = executable.parent();
+    // Inno Setup always places `unins000.exe` / `unins000.dat` next to the binary,
+    // including per-user installs under `%LOCALAPPDATA%\Programs\ctdozlite`.
+    let has_uninstaller = exe_dir.is_some_and(|dir| {
+        dir.join("unins000.exe").is_file() || dir.join("unins000.dat").is_file()
+    });
+    if has_uninstaller {
+        return true;
+    }
+
+    let protected_roots = [
+        env.program_files,
+        env.program_files_x86,
+        env.program_w6432,
+        env.system_root,
+    ];
+    for root in protected_roots.into_iter().flatten() {
+        if path_is_within_windows_root(cwd, root)
+            || exe_dir.is_some_and(|dir| path_is_within_windows_root(dir, root))
+        {
+            return true;
+        }
+    }
+
+    // Fallback when running in unit tests or minimal environments without ProgramFiles env vars.
+    let targets = [Some(cwd), exe_dir];
+    for dir in targets.into_iter().flatten() {
+        let norm = normalize_windows_path(dir);
+        if norm.contains(r"\program files\")
+            || norm.ends_with(r"\program files")
+            || norm.contains(r"\program files (x86)\")
+            || norm.ends_with(r"\program files (x86)")
+            || norm.contains(r"\windows\system32")
+            || norm.contains(r"\windows\syswow64")
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn resolve_windows_local_app_data_dir(env: &WindowsPathEnv<'_>) -> Result<PathBuf> {
+    let base = env
+        .local_app_data
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.user_profile
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.join("AppData").join("Local"))
+        })
+        .context("Cần LOCALAPPDATA hoặc USERPROFILE để xác định thư mục dữ liệu người dùng")?;
+
+    let is_abs = base.is_absolute()
+        || base.to_str().is_some_and(|s| {
+            let b = s.as_bytes();
+            b.first().is_some_and(u8::is_ascii_alphabetic)
+                && b.get(1) == Some(&b':')
+                && matches!(b.get(2), Some(b'\\') | Some(b'/'))
+        });
+    if !is_abs {
+        bail!("LOCALAPPDATA phải là đường dẫn tuyệt đối");
+    }
+    Ok(base.join("ctdozlite"))
+}
+
+fn parse_cli_storage_args(args: &[String]) -> Result<(Option<PathBuf>, Option<String>)> {
     let mut explicit = None;
     let mut profile_name = None;
     let mut i = 0;
@@ -67,6 +164,33 @@ pub fn resolve(
         }
         i += 1;
     }
+    Ok((explicit, profile_name))
+}
+
+/// Resolve paths without changing process state, including in parallel tests.
+///
+/// # Errors
+/// Returns an error for invalid storage options or a missing/relative bundle HOME.
+pub fn resolve(
+    args: &[String],
+    cwd: &Path,
+    executable: &Path,
+    home: Option<&Path>,
+    macos: bool,
+) -> Result<(PathBuf, bool)> {
+    resolve_with_platform(args, cwd, executable, home, macos, false, &WindowsPathEnv::default())
+}
+
+fn resolve_with_platform(
+    args: &[String],
+    cwd: &Path,
+    executable: &Path,
+    home: Option<&Path>,
+    macos: bool,
+    windows: bool,
+    win_env: &WindowsPathEnv<'_>,
+) -> Result<(PathBuf, bool)> {
+    let (explicit, profile_name) = parse_cli_storage_args(args)?;
     if let Some(path) = explicit {
         return Ok((
             if path.is_absolute() || path.to_str().is_some_and(|s| s.starts_with('/')) {
@@ -90,6 +214,8 @@ pub fn resolve(
             bail!("HOME phải là đường dẫn tuyệt đối");
         }
         (home.join("Library/Application Support/ctdozlite"), true)
+    } else if windows && is_windows_protected_or_installed_dir(cwd, executable, win_env) {
+        (resolve_windows_local_app_data_dir(win_env)?, true)
     } else {
         (cwd.to_path_buf(), false)
     };
@@ -138,18 +264,221 @@ pub fn initialize(args: &[String]) -> Result<PathBuf> {
     let executable =
         std::env::current_exe().context("Không xác định được đường dẫn chương trình")?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let (path, private) = resolve(
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let user_profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let program_w6432 = std::env::var_os("ProgramW6432").map(PathBuf::from);
+    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from);
+
+    let win_env = WindowsPathEnv {
+        local_app_data: local_app_data.as_deref(),
+        user_profile: user_profile.as_deref(),
+        program_files: program_files.as_deref(),
+        program_files_x86: program_files_x86.as_deref(),
+        program_w6432: program_w6432.as_deref(),
+        system_root: system_root.as_deref(),
+    };
+
+    let (explicit, profile_name) = parse_cli_storage_args(args)?;
+    let (mut path, mut private) = resolve_with_platform(
         args,
         &cwd,
         &executable,
         home.as_deref(),
         cfg!(target_os = "macos"),
+        cfg!(target_os = "windows"),
+        &win_env,
     )?;
-    prepare(&path, private)?;
+
+    if let Err(err) = prepare(&path, private) {
+        // Portable fallback on Windows: when launched from a read-only directory without explicit
+        // `--data-dir`, route storage to `%LOCALAPPDATA%\ctdozlite` instead of failing to boot.
+        let is_perm_err = err
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .any(|io_err| io_err.kind() == std::io::ErrorKind::PermissionDenied);
+        if cfg!(target_os = "windows") && explicit.is_none() && !private && is_perm_err {
+            let mut fallback = resolve_windows_local_app_data_dir(&win_env)?;
+            if let Some(ref prof) = profile_name {
+                fallback = fallback.join("profiles").join(prof);
+            }
+            prepare(&fallback, true)?;
+            path = fallback;
+            private = true;
+        } else {
+            return Err(err);
+        }
+    }
+
+    // One-way migration from read-only / legacy install directory (e.g. C:\Program Files\ctdozlite
+    // populated when the user previously launched as Administrator) to per-user `%LOCALAPPDATA%`.
+    if cfg!(target_os = "windows") && explicit.is_none() && profile_name.is_none() && private {
+        if let Some(exe_dir) = executable.parent() {
+            if let Err(mig_err) = migrate_legacy_install_data_if_needed(exe_dir, &path) {
+                eprintln!(
+                    "Cảnh báo: Không thể di chuyển dữ liệu cũ từ {} sang {}: {mig_err}",
+                    exe_dir.display(),
+                    path.display()
+                );
+            }
+        }
+    }
+
     // Legacy storage callers use relative paths; switch once before creating workers.
     std::env::set_current_dir(&path)
         .with_context(|| format!("Không chọn được thư mục dữ liệu {}", path.display()))?;
     Ok(path)
+}
+
+fn copy_file_atomic(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let parent = dst
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let (temporary, mut dst_file) = create_private_file(parent, ".migrate-tmp")
+        .with_context(|| format!("Không tạo được tệp tạm di chuyển {}", dst.display()))?;
+    let result = (|| -> Result<()> {
+        let mut src_file = std::fs::File::open(src)
+            .with_context(|| format!("Không đọc được {}", src.display()))?;
+        std::io::copy(&mut src_file, &mut dst_file)?;
+        dst_file.sync_all()?;
+        drop(dst_file);
+        std::fs::rename(&temporary, dst)
+            .with_context(|| format!("Không lưu được {}", dst.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn copy_dir_recursive_missing(src_dir: &Path, dst_dir: &Path, depth: usize) -> Result<()> {
+    if depth > 6 || !src_dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst_dir)?;
+    for entry in std::fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let src_path = entry.path();
+        let dst_path = dst_dir.join(&name);
+        if file_type.is_dir() {
+            copy_dir_recursive_missing(&src_path, &dst_path, depth + 1)?;
+        } else if file_type.is_file() && !dst_path.exists() {
+            let _ = copy_file_atomic(&src_path, &dst_path);
+        }
+    }
+    Ok(())
+}
+
+fn has_legacy_user_data(dir: &Path) -> bool {
+    const MARKERS: &[&str] = &[
+        "session.json",
+        "zalo_history.db",
+        "threads_cache.json",
+        "app_settings.json",
+    ];
+    if MARKERS.iter().any(|name| dir.join(name).is_file()) {
+        return true;
+    }
+    if dir
+        .join("accounts")
+        .read_dir()
+        .is_ok_and(|mut it| it.next().is_some())
+    {
+        return true;
+    }
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "db"))
+    })
+}
+
+/// Copy legacy user state once from a read-only install dir into per-user `%LOCALAPPDATA%`.
+/// Never modifies or removes files in `source_dir` so standard users do not require UAC.
+fn migrate_legacy_install_data_if_needed(source_dir: &Path, dest_dir: &Path) -> Result<()> {
+    if !source_dir.is_dir() || normalize_windows_path(source_dir) == normalize_windows_path(dest_dir)
+    {
+        return Ok(());
+    }
+    let marker_path = dest_dir.join(".migrated_from_install");
+    if marker_path.exists()
+        || dest_dir.join("session.json").exists()
+        || dest_dir.join("zalo_history.db").exists()
+    {
+        return Ok(());
+    }
+    if !has_legacy_user_data(source_dir) {
+        return Ok(());
+    }
+
+    const SINGLE_FILES: &[&str] = &[
+        "session.json",
+        "app_settings.json",
+        "threads_cache.json",
+        "theme.json",
+        "custom_stickers.json",
+        "autoreply_rules.json",
+        "zalo_debug.log",
+    ];
+    for file_name in SINGLE_FILES {
+        let src = source_dir.join(file_name);
+        let dst = dest_dir.join(file_name);
+        if src.is_file() && !dst.exists() {
+            let _ = copy_file_atomic(&src, &dst);
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir(source_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name_os) = path.file_name() else {
+                continue;
+            };
+            let name = name_os.to_string_lossy();
+            if !name.ends_with(".db") {
+                continue;
+            }
+            let dst_db = dest_dir.join(name.as_ref());
+            if dst_db.exists() {
+                continue;
+            }
+            if copy_file_atomic(&path, &dst_db).is_ok() {
+                for sidecar in ["-wal", "-shm"] {
+                    let src_side = source_dir.join(format!("{name}{sidecar}"));
+                    let dst_side = dest_dir.join(format!("{name}{sidecar}"));
+                    if src_side.is_file() && !dst_side.exists() {
+                        let _ = copy_file_atomic(&src_side, &dst_side);
+                    }
+                }
+            }
+        }
+    }
+
+    for sub_dir in ["accounts", "stickers_cache"] {
+        let src_sub = source_dir.join(sub_dir);
+        let dst_sub = dest_dir.join(sub_dir);
+        if src_sub.is_dir() {
+            let _ = copy_dir_recursive_missing(&src_sub, &dst_sub, 0);
+        }
+    }
+
+    let marker_body = format!("migrated_from={}\n", source_dir.display());
+    write_private_atomic(&marker_path, marker_body.as_bytes())?;
+    Ok(())
 }
 
 fn create_private_file(parent: &Path, prefix: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
@@ -386,6 +715,125 @@ mod tests {
         assert_eq!(std::fs::read(occupied.join("keep")).unwrap(), b"retained");
         assert!(write_private_atomic(&root.join("missing/session.json"), b"fixture").is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_installed_or_protected_paths_resolve_to_local_app_data() {
+        let win_env = WindowsPathEnv {
+            local_app_data: Some(Path::new(r"C:\Users\Alice\AppData\Local")),
+            user_profile: Some(Path::new(r"C:\Users\Alice")),
+            program_files: Some(Path::new(r"C:\Program Files")),
+            program_files_x86: Some(Path::new(r"C:\Program Files (x86)")),
+            program_w6432: Some(Path::new(r"C:\Program Files")),
+            system_root: Some(Path::new(r"C:\Windows")),
+        };
+
+        let (resolved, private) = resolve_with_platform(
+            &[],
+            Path::new(r"C:\Program Files\ctdozlite"),
+            Path::new(r"C:\Program Files\ctdozlite\ctdozlite.exe"),
+            None,
+            false,
+            true,
+            &win_env,
+        )
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from(r"C:\Users\Alice\AppData\Local\ctdozlite"));
+        assert!(private);
+
+        let (prof_resolved, prof_private) = resolve_with_platform(
+            &["--profile".into(), "work_1".into()],
+            Path::new(r"C:\Windows\System32"),
+            Path::new(r"C:\Program Files\ctdozlite\ctdozlite.exe"),
+            None,
+            false,
+            true,
+            &win_env,
+        )
+        .unwrap();
+        assert_eq!(
+            prof_resolved,
+            PathBuf::from(r"C:\Users\Alice\AppData\Local\ctdozlite\profiles\work_1")
+        );
+        assert!(prof_private);
+
+        // Portable folder outside protected roots stays in cwd.
+        let (portable, portable_private) = resolve_with_platform(
+            &[],
+            Path::new(r"D:\Portable\ctdozlite"),
+            Path::new(r"D:\Portable\ctdozlite\ctdozlite.exe"),
+            None,
+            false,
+            true,
+            &win_env,
+        )
+        .unwrap();
+        assert_eq!(portable, PathBuf::from(r"D:\Portable\ctdozlite"));
+        assert!(!portable_private);
+    }
+
+    #[test]
+    fn windows_uninstaller_sentinel_redirects_per_user_install_to_local_app_data() {
+        let root = fixture();
+        let install_dir = root.join("Programs").join("ctdozlite");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("unins000.exe"), b"stub").unwrap();
+        let app_data = root.join("LocalAppData");
+        let win_env = WindowsPathEnv {
+            local_app_data: Some(&app_data),
+            ..Default::default()
+        };
+
+        let (resolved, private) = resolve_with_platform(
+            &[],
+            &install_dir,
+            &install_dir.join("ctdozlite.exe"),
+            None,
+            false,
+            true,
+            &win_env,
+        )
+        .unwrap();
+        assert_eq!(resolved, app_data.join("ctdozlite"));
+        assert!(private);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_way_migration_copies_legacy_install_data_and_keeps_source_intact() {
+        let root = fixture();
+        let src = root.join("install");
+        let dst = root.join("appdata");
+        std::fs::create_dir_all(src.join("accounts")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        std::fs::write(src.join("session.json"), b"{\"uin\":\"123\"}").unwrap();
+        std::fs::write(src.join("zalo_history.db"), b"sqlite-fixture").unwrap();
+        std::fs::write(src.join("zalo_history.db-wal"), b"wal-fixture").unwrap();
+        std::fs::write(src.join("accounts").join("123_session.json"), b"acc").unwrap();
+        // Install artifacts must not be copied as user data.
+        std::fs::write(src.join("unins000.exe"), b"installer").unwrap();
+
+        migrate_legacy_install_data_if_needed(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read(dst.join("session.json")).unwrap(), b"{\"uin\":\"123\"}");
+        assert_eq!(std::fs::read(dst.join("zalo_history.db")).unwrap(), b"sqlite-fixture");
+        assert_eq!(std::fs::read(dst.join("zalo_history.db-wal")).unwrap(), b"wal-fixture");
+        assert_eq!(
+            std::fs::read(dst.join("accounts").join("123_session.json")).unwrap(),
+            b"acc"
+        );
+        assert!(!dst.join("unins000.exe").exists());
+        assert!(dst.join(".migrated_from_install").exists());
+        // Source files remain untouched.
+        assert!(src.join("session.json").exists());
+
+        // Subsequent runs must not overwrite newer destination state.
+        std::fs::write(dst.join("session.json"), b"updated-session").unwrap();
+        migrate_legacy_install_data_if_needed(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("session.json")).unwrap(), b"updated-session");
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

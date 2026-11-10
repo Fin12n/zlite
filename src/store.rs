@@ -46,6 +46,17 @@ pub fn db_path_for_account(uin: &str) -> String {
     }
 }
 
+/// Flush SQLite write-ahead log into the main database file before copying or shutting down.
+pub fn checkpoint_wal_file(path: &str) {
+    if path.is_empty() || path == ":memory:" || !std::path::Path::new(path).exists() {
+        return;
+    }
+    if let Ok(conn) = Connection::open(path) {
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(1500));
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
+}
+
 impl MessageStore {
     /// Messages per thread loaded at startup / on refresh. The list only needs the newest one
     /// for ordering and preview; opening a thread reads deeper (`LoadGroupHistory`).
@@ -58,6 +69,17 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+
+        // Follow `docs/standards/database-and-migrations.md` connection pragmas.
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        let mut pragmas = String::from("PRAGMA foreign_keys = ON;\n");
+        if path != ":memory:" {
+            pragmas.push_str(
+                "PRAGMA journal_mode = WAL;\n\
+                 PRAGMA synchronous = NORMAL;\n",
+            );
+        }
+        let _ = conn.execute_batch(&pragmas);
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (

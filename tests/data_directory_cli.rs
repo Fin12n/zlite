@@ -263,3 +263,45 @@ fn relative_storage_is_private_and_unrelated_cwd_state_is_untouched() {
         );
     }
 }
+
+#[test]
+#[cfg(target_os = "windows")]
+fn windows_installed_sentinel_migrates_legacy_state_into_local_app_data() {
+    let fixture = Fixture::new();
+    let install_dir = fixture.0.join("install");
+    let local_app_data = fixture.0.join("local-app-data");
+    std::fs::create_dir_all(&install_dir).unwrap();
+    std::fs::create_dir_all(&local_app_data).unwrap();
+
+    let executable = install_dir.join("ctdozlite.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_ctdozlite"), &executable).unwrap();
+    std::fs::write(install_dir.join("unins000.exe"), b"inno-stub").unwrap();
+    std::fs::write(install_dir.join("session.json"), b"{\"uin\":\"42\"}").unwrap();
+    std::fs::write(install_dir.join("zalo_history.db"), b"history-stub").unwrap();
+
+    let expected = local_app_data.join("ctdozlite");
+    let result = Command::new(&executable)
+        .args(["--print-data-dir"])
+        .env("LOCALAPPDATA", &local_app_data)
+        .current_dir(&install_dir)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        expected.to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read(expected.join("session.json")).unwrap(),
+        b"{\"uin\":\"42\"}"
+    );
+    assert_eq!(
+        std::fs::read(expected.join("zalo_history.db")).unwrap(),
+        b"history-stub"
+    );
+    assert!(install_dir.join("session.json").exists());
+}

@@ -74,7 +74,7 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
 
 ---
 
-## Cấu trúc & Quy mô mã nguồn (Codebase LoC — Kết quả đo mới nhất `v0.1.0`)
+## Cấu trúc & Quy mô mã nguồn (Codebase LoC — Kết quả đo mới nhất `v0.1.1`)
 
 | Hạng mục | Số tệp | Tổng số dòng |
 | :--- | :---: | :---: |
@@ -83,7 +83,7 @@ Bản Zalo PC chính thức đóng gói trên Electron thường chiếm 350–6
 | **Tài liệu & Kiến trúc (`docs/*.md`, `README*`)** | 29 | **2,125** |
 | **Đóng gói & CI/CD (`packaging/`, `.github/`)** | 22 | **1,161** |
 
-> Số liệu đo thực tế mới nhất tại phiên bản `v0.1.0` (tổng cộng hơn **86,050+** dòng mã nguồn, bài kiểm thử, tài liệu và quy trình CI/CD).
+> Số liệu đo thực tế mới nhất tại phiên bản `v0.1.1` (tổng cộng hơn **86,050+** dòng mã nguồn, bài kiểm thử, tài liệu và quy trình CI/CD).
 
 ```text
 src/ (80,962 lines across 56 files)

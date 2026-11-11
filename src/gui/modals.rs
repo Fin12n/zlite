@@ -477,21 +477,8 @@ impl ZaloGuiApp {
         }
 
         if do_logout {
-            self.is_logged_in = false;
-            self.user_name.clear();
-            self.user_uin.clear();
-            self.threads.clear();
-            self.selected_thread_index = 0;
-            self.qr_texture = None;
-            self.login_status_msg.clear();
-            self.qr_status = "Đang xin mã QR mới…".into();
-            self.status_msg = "Đã đăng xuất".into();
-            // `WorkerCmd::Logout` owns the file side: it removes `session.json` and
-            // `threads_cache.json` but keeps `zalo_history.db` (#21).
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::Logout);
-                let _ = tx.send(WorkerCmd::RequestQr);
-            }
+            // Issue #130: Ask for confirmation before logging out.
+            self.logout_confirm_open = true;
         }
         if do_wipe {
             // Destructive and irreversible, so it asks first.
@@ -2260,10 +2247,13 @@ impl ZaloGuiApp {
                                                         if crate::history_sync::PHONE_SYNC_RUNNING
                                                             .load(std::sync::atomic::Ordering::Relaxed)
                                                         {
+                                                            let safe_prog = if self.phone_sync_progress.is_finite() {
+                                                                self.phone_sync_progress.clamp(0.05, 1.0)
+                                                            } else {
+                                                                0.05
+                                                            };
                                                             ui.add(
-                                                                egui::ProgressBar::new(
-                                                                    self.phone_sync_progress.clamp(0.05, 1.0),
-                                                                )
+                                                                egui::ProgressBar::new(safe_prog)
                                                                 .text(&self.phone_sync_status)
                                                                 .animate(true),
                                                             );
@@ -2547,6 +2537,331 @@ impl ZaloGuiApp {
                                                             );
                                                         }
                                                     });
+                                                });
+                                            ui.add_space(16.0);
+
+                                            // ---------------------------------------------------------------
+                                            // Font Family & Display Zoom (Issue #88, origin/pr-105)
+                                            // ---------------------------------------------------------------
+                                            ui.label(RichText::new("Phông chữ & Kích thước hiển thị").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 12.0))
+                                                .show(ui, |ui| {
+                                                    let mut font_changed = false;
+                                                    let mut scale_changed = false;
+
+                                                    // Row 1: Font Family Selector
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new("Phông chữ hiển thị").color(pal.text_primary).size(13.2).strong());
+                                                            ui.label(RichText::new("Tự động dùng Be Vietnam Pro làm fallback nếu font thiếu ký tự tiếng Việt").color(pal.text_secondary).size(11.5));
+                                                        });
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            let current_label = match self.settings.font_family.as_str() {
+                                                                "segoe_ui" | "segoe" => "Segoe UI",
+                                                                "arial" => "Arial",
+                                                                "tahoma" => "Tahoma",
+                                                                _ => "Mặc định (Be Vietnam Pro)",
+                                                            };
+                                                            egui::ComboBox::from_id_salt("appearance_font_family_combo")
+                                                                .selected_text(current_label)
+                                                                .width(190.0)
+                                                                .show_ui(ui, |ui| {
+                                                                    if ui.selectable_value(&mut self.settings.font_family, "default".into(), "Mặc định (Be Vietnam Pro)").changed() {
+                                                                        font_changed = true;
+                                                                    }
+                                                                    if ui.selectable_value(&mut self.settings.font_family, "segoe_ui".into(), "Segoe UI").changed() {
+                                                                        font_changed = true;
+                                                                    }
+                                                                    if ui.selectable_value(&mut self.settings.font_family, "arial".into(), "Arial").changed() {
+                                                                        font_changed = true;
+                                                                    }
+                                                                    if ui.selectable_value(&mut self.settings.font_family, "tahoma".into(), "Tahoma").changed() {
+                                                                        font_changed = true;
+                                                                    }
+                                                                });
+                                                        });
+                                                    });
+
+                                                    ui.add_space(10.0);
+                                                    ui.separator();
+                                                    ui.add_space(10.0);
+
+                                                    // Row 2: UI Zoom / Font Scale presets and slider
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new("Thu phóng giao diện & Cỡ chữ").color(pal.text_primary).size(13.2).strong());
+                                                            ui.label(RichText::new("Thu phóng toàn bộ kích thước chữ và biểu tượng giao diện").color(pal.text_secondary).size(11.5));
+                                                        });
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            for (pct_str, factor) in [("125%", 1.25_f32), ("110%", 1.10_f32), ("100%", 1.00_f32), ("90%", 0.90_f32)] {
+                                                                let is_sel = (self.settings.font_scale - factor).abs() < 0.01;
+                                                                if ui.selectable_label(is_sel, pct_str).clicked() {
+                                                                    self.settings.font_scale = factor;
+                                                                    scale_changed = true;
+                                                                }
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(6.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new(format!("{:.0}%", self.settings.font_scale * 100.0)).color(pal.text_secondary).size(12.0));
+                                                        let mut pct = (self.settings.font_scale * 100.0).round();
+                                                        let slider = egui::Slider::new(&mut pct, 80.0_f32..=140.0_f32)
+                                                            .step_by(5.0)
+                                                            .suffix("%")
+                                                            .show_value(true);
+                                                        if ui.add(slider).changed() {
+                                                            self.settings.font_scale = (pct / 100.0 * 100.0).round() / 100.0;
+                                                            scale_changed = true;
+                                                        }
+                                                    });
+
+                                                    if font_changed {
+                                                        crate::gui::theme::setup_custom_fonts_with_choice(ui.ctx(), &self.settings.font_family);
+                                                        self.settings.save();
+                                                        ui.ctx().request_repaint();
+                                                    }
+                                                    if scale_changed {
+                                                        ui.ctx().set_zoom_factor(self.settings.normalized_font_scale());
+                                                        self.settings.save();
+                                                        ui.ctx().request_repaint();
+                                                    }
+                                                });
+                                            ui.add_space(16.0);
+
+                                            // ---------------------------------------------------------------
+                                            // Direct Color Customizer & Live Bubble Preview (Issue #88, origin/pr-105)
+                                            // ---------------------------------------------------------------
+                                            ui.label(RichText::new("Tùy biến màu sắc giao diện & Bong bóng").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 12.0))
+                                                .show(ui, |ui| {
+                                                    let mut color_changed = false;
+
+                                                    // 1) Preset Swatches
+                                                    ui.label(RichText::new("Bảng màu chủ đề gợi ý:").color(pal.text_secondary).size(12.0).strong());
+                                                    ui.add_space(6.0);
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                                                        let swatches = [
+                                                            ("Zalo Blue", "#0068FF", Color32::from_rgb(0, 104, 255)),
+                                                            ("Atom Blue", "#528BFF", Color32::from_rgb(82, 139, 255)),
+                                                            ("Emerald", "#059669", Color32::from_rgb(5, 150, 105)),
+                                                            ("Violet", "#7C3AED", Color32::from_rgb(124, 58, 237)),
+                                                            ("Rose", "#E11D48", Color32::from_rgb(225, 29, 72)),
+                                                            ("Amber", "#D97706", Color32::from_rgb(217, 119, 6)),
+                                                            ("Slate", "#475569", Color32::from_rgb(71, 85, 105)),
+                                                        ];
+                                                        for (name, hex, col) in swatches {
+                                                            let is_active = self.settings.custom_primary_color.as_deref() == Some(hex);
+                                                            let (btn_rect, btn_resp) = ui.allocate_exact_size(Vec2::new(94.0, 28.0), Sense::click());
+                                                            let fill_c = if btn_resp.hovered() { pal.bg_hover } else { pal.bg_app };
+                                                            let stroke_c = if is_active { pal.primary_hover } else if btn_resp.hovered() { pal.text_secondary } else { pal.border };
+                                                            ui.painter().rect_filled(btn_rect, Rounding::same(6.0), fill_c);
+                                                            ui.painter().rect_stroke(btn_rect, Rounding::same(6.0), Stroke::new(if is_active { 1.8_f32 } else { 1.0_f32 }, stroke_c));
+                                                            let circle_center = Pos2::new(btn_rect.left() + 14.0, btn_rect.center().y);
+                                                            ui.painter().circle_filled(circle_center, 6.0, col);
+                                                            ui.painter().text(
+                                                                Pos2::new(btn_rect.left() + 25.0, btn_rect.center().y),
+                                                                egui::Align2::LEFT_CENTER,
+                                                                name,
+                                                                FontId::proportional(11.2),
+                                                                pal.text_primary,
+                                                            );
+                                                            if btn_resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                                                self.settings.custom_primary_color = Some(hex.to_string());
+                                                                color_changed = true;
+                                                            }
+                                                        }
+                                                    });
+
+                                                    ui.add_space(12.0);
+                                                    ui.separator();
+                                                    ui.add_space(10.0);
+
+                                                    // 2) Direct Color Pickers
+                                                    ui.label(RichText::new("Tùy chỉnh mã màu trực tiếp:").color(pal.text_secondary).size(12.0).strong());
+                                                    ui.add_space(6.0);
+
+                                                    // Primary
+                                                    let mut cur_primary = self.settings.custom_primary_color
+                                                        .as_deref()
+                                                        .and_then(crate::gui::theme::parse_hex_color)
+                                                        .unwrap_or(pal.primary);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Màu chủ đạo (Primary):").color(pal.text_primary).size(12.8));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if self.settings.custom_primary_color.is_some() {
+                                                                if ui.small_button("↺").on_hover_text("Khôi phục mặc định").clicked() {
+                                                                    self.settings.custom_primary_color = None;
+                                                                    color_changed = true;
+                                                                }
+                                                            }
+                                                            ui.label(RichText::new(crate::gui::theme::format_hex_color(cur_primary)).color(pal.text_secondary).monospace().size(11.5));
+                                                            if ui.color_edit_button_srgba(&mut cur_primary).changed() {
+                                                                self.settings.custom_primary_color = Some(crate::gui::theme::format_hex_color(cur_primary));
+                                                                color_changed = true;
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(6.0);
+
+                                                    // Accent
+                                                    let mut cur_accent = self.settings.custom_accent_color
+                                                        .as_deref()
+                                                        .and_then(crate::gui::theme::parse_hex_color)
+                                                        .unwrap_or(pal.accent_online);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Màu điểm nhấn (Accent / Trực tuyến):").color(pal.text_primary).size(12.8));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if self.settings.custom_accent_color.is_some() {
+                                                                if ui.small_button("↺").on_hover_text("Khôi phục mặc định").clicked() {
+                                                                    self.settings.custom_accent_color = None;
+                                                                    color_changed = true;
+                                                                }
+                                                            }
+                                                            ui.label(RichText::new(crate::gui::theme::format_hex_color(cur_accent)).color(pal.text_secondary).monospace().size(11.5));
+                                                            if ui.color_edit_button_srgba(&mut cur_accent).changed() {
+                                                                self.settings.custom_accent_color = Some(crate::gui::theme::format_hex_color(cur_accent));
+                                                                color_changed = true;
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(6.0);
+
+                                                    // Outbound Bubble
+                                                    let mut cur_bubble_out = self.settings.custom_bubble_out_bg
+                                                        .as_deref()
+                                                        .and_then(crate::gui::theme::parse_hex_color)
+                                                        .unwrap_or(pal.bubble_out_bg);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Màu nền bong bóng gửi đi (Outbound):").color(pal.text_primary).size(12.8));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if self.settings.custom_bubble_out_bg.is_some() {
+                                                                if ui.small_button("↺").on_hover_text("Khôi phục mặc định").clicked() {
+                                                                    self.settings.custom_bubble_out_bg = None;
+                                                                    color_changed = true;
+                                                                }
+                                                            }
+                                                            ui.label(RichText::new(crate::gui::theme::format_hex_color(cur_bubble_out)).color(pal.text_secondary).monospace().size(11.5));
+                                                            if ui.color_edit_button_srgba(&mut cur_bubble_out).changed() {
+                                                                self.settings.custom_bubble_out_bg = Some(crate::gui::theme::format_hex_color(cur_bubble_out));
+                                                                color_changed = true;
+                                                            }
+                                                        });
+                                                    });
+                                                    ui.add_space(6.0);
+
+                                                    // Inbound Bubble
+                                                    let mut cur_bubble_in = self.settings.custom_bubble_in_bg
+                                                        .as_deref()
+                                                        .and_then(crate::gui::theme::parse_hex_color)
+                                                        .unwrap_or(pal.bubble_in_bg);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("Màu nền bong bóng nhận (Inbound):").color(pal.text_primary).size(12.8));
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            if self.settings.custom_bubble_in_bg.is_some() {
+                                                                if ui.small_button("↺").on_hover_text("Khôi phục mặc định").clicked() {
+                                                                    self.settings.custom_bubble_in_bg = None;
+                                                                    color_changed = true;
+                                                                }
+                                                            }
+                                                            ui.label(RichText::new(crate::gui::theme::format_hex_color(cur_bubble_in)).color(pal.text_secondary).monospace().size(11.5));
+                                                            if ui.color_edit_button_srgba(&mut cur_bubble_in).changed() {
+                                                                self.settings.custom_bubble_in_bg = Some(crate::gui::theme::format_hex_color(cur_bubble_in));
+                                                                color_changed = true;
+                                                            }
+                                                        });
+                                                    });
+
+                                                    ui.add_space(12.0);
+                                                    ui.separator();
+                                                    ui.add_space(10.0);
+
+                                                    // 3) Live Chat Bubble Preview Box
+                                                    ui.label(RichText::new("Xem trước hiển thị trực tiếp (Live Preview):").color(pal.text_secondary).size(12.0).strong());
+                                                    ui.add_space(6.0);
+                                                    egui::Frame::none()
+                                                        .fill(pal.bg_chat_canvas)
+                                                        .stroke(Stroke::new(1.0_f32, pal.border))
+                                                        .rounding(Rounding::same(8.0))
+                                                        .inner_margin(Margin::symmetric(14.0, 12.0))
+                                                        .show(ui, |ui| {
+                                                            // Inbound message bubble
+                                                            ui.horizontal(|ui| {
+                                                                let lum_in = 0.299 * (cur_bubble_in.r() as f32) + 0.587 * (cur_bubble_in.g() as f32) + 0.114 * (cur_bubble_in.b() as f32);
+                                                                let in_text_col = if lum_in > 140.0 { Color32::from_rgb(15, 23, 42) } else { Color32::from_rgb(215, 218, 224) };
+                                                                let in_meta_col = if lum_in > 140.0 { Color32::from_rgb(100, 116, 139) } else { Color32::from_rgb(142, 150, 165) };
+                                                                egui::Frame::none()
+                                                                    .fill(cur_bubble_in)
+                                                                    .stroke(Stroke::new(1.0_f32, pal.bubble_in_border))
+                                                                    .rounding(Rounding::same(8.0))
+                                                                    .inner_margin(Margin::symmetric(10.0, 8.0))
+                                                                    .show(ui, |ui| {
+                                                                        ui.vertical(|ui| {
+                                                                            ui.label(RichText::new("Chào bạn! Màu sắc và font chữ mới hiển thị thế nào?").color(in_text_col).size(12.6));
+                                                                            ui.label(RichText::new("10:45").color(in_meta_col).size(10.5));
+                                                                        });
+                                                                    });
+                                                            });
+                                                            ui.add_space(6.0);
+                                                            // Outbound message bubble
+                                                            ui.horizontal(|ui| {
+                                                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                                    let lum_out = 0.299 * (cur_bubble_out.r() as f32) + 0.587 * (cur_bubble_out.g() as f32) + 0.114 * (cur_bubble_out.b() as f32);
+                                                                    let out_text_col = if lum_out > 140.0 { Color32::from_rgb(15, 23, 42) } else { Color32::from_rgb(235, 240, 246) };
+                                                                    let out_meta_col = if lum_out > 140.0 { Color32::from_rgb(71, 92, 122) } else { Color32::from_rgb(154, 171, 192) };
+                                                                    egui::Frame::none()
+                                                                        .fill(cur_bubble_out)
+                                                                        .rounding(Rounding::same(8.0))
+                                                                        .inner_margin(Margin::symmetric(10.0, 8.0))
+                                                                        .show(ui, |ui| {
+                                                                            ui.vertical(|ui| {
+                                                                                ui.label(RichText::new("Rất đẹp mắt, thay đổi cập nhật tức thì trên màn hình! 👍").color(out_text_col).size(12.6));
+                                                                                ui.label(RichText::new("10:46 · Đã gửi").color(out_meta_col).size(10.5));
+                                                                            });
+                                                                        });
+                                                                });
+                                                            });
+                                                        });
+
+                                                    ui.add_space(10.0);
+                                                    // 4) Reset Defaults Button
+                                                    ui.horizontal(|ui| {
+                                                        let reset_btn = egui::Button::new(RichText::new("Khôi phục mặc định").size(12.2).color(pal.text_primary))
+                                                            .fill(pal.bg_app)
+                                                            .stroke(Stroke::new(1.0_f32, pal.border))
+                                                            .rounding(Rounding::same(6.0));
+                                                        if ui.add(reset_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                                            self.settings.font_family = "default".into();
+                                                            self.settings.font_scale = 1.0;
+                                                            self.settings.custom_primary_color = None;
+                                                            self.settings.custom_accent_color = None;
+                                                            self.settings.custom_bubble_out_bg = None;
+                                                            self.settings.custom_bubble_in_bg = None;
+                                                            ui.ctx().set_zoom_factor(1.0);
+                                                            crate::gui::theme::setup_custom_fonts_with_choice(ui.ctx(), "default");
+                                                            self.theme_dirty = true;
+                                                            self.settings.save();
+                                                            ui.ctx().request_repaint();
+                                                            self.show_toast("Đã khôi phục cài đặt phông chữ và màu sắc về mặc định");
+                                                        }
+                                                    });
+
+                                                    if color_changed {
+                                                        self.theme_dirty = true;
+                                                        self.settings.save();
+                                                        ui.ctx().request_repaint();
+                                                    }
                                                 });
                                             ui.add_space(16.0);
 
@@ -3536,22 +3851,9 @@ impl ZaloGuiApp {
             });
 
         if do_logout {
-            // Lưu note pending vào đúng DB acc hiện tại trước khi logout/xoá cache.
-            self.flush_group_note_pending();
+            // Issue #130: Ask for confirmation before logging out.
             self.settings_modal_open = false;
-            self.is_logged_in = false;
-            self.user_name.clear();
-            self.user_uin.clear();
-            self.threads.clear();
-            self.selected_thread_index = 0;
-            self.qr_texture = None;
-            self.login_status_msg.clear();
-            self.qr_status = "Đang xin mã QR mới…".into();
-            self.status_msg = "Đã đăng xuất".into();
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::Logout);
-                let _ = tx.send(WorkerCmd::RequestQr);
-            }
+            self.logout_confirm_open = true;
         }
         if let Some(target) = switch_to_uin {
             self.settings_modal_open = false;
@@ -5466,7 +5768,12 @@ impl ZaloGuiApp {
                                 .size()
                                 .x
                             });
-                            let pill_w = (text_w + 32.0).clamp(180.0, max_bot_w);
+                            let pill_max_w = max_bot_w.max(180.0);
+                            let pill_w = if text_w.is_finite() {
+                                (text_w + 32.0).clamp(180.0, pill_max_w)
+                            } else {
+                                180.0
+                            };
                             let (pill_rect, _) = ui.allocate_exact_size(
                                 Vec2::new(pill_w, 28.0),
                                 Sense::hover(),
@@ -7008,6 +7315,256 @@ impl ZaloGuiApp {
         }
     }
 
+    pub(super) fn render_logout_confirm(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.logout_confirm_open {
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.logout_confirm_open = false;
+            return;
+        }
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Xác nhận đăng xuất")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(390.0, 165.0))
+            .show(ctx, |ui| {
+                let acc_label = if self.user_name.trim().is_empty() {
+                    "tài khoản hiện tại".to_string()
+                } else {
+                    format!("tài khoản \"{}\"", self.user_name)
+                };
+                ui.label(
+                    RichText::new(format!("Bạn có chắc chắn muốn đăng xuất khỏi {acc_label}?"))
+                        .size(13.0)
+                        .color(pal.text_primary)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Phiên đăng nhập và lịch sử trò chuyện vẫn được lưu trong danh sách tài khoản trên thiết bị để bạn có thể đăng nhập lại chỉ với 1 cú nhấp mà không cần quét lại mã QR.",
+                    )
+                    .size(12.0)
+                    .color(pal.text_secondary),
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_sized(
+                            [140.0, 32.0],
+                            egui::Button::new(
+                                RichText::new("Đăng xuất")
+                                    .size(12.5)
+                                    .color(pal.danger)
+                                    .strong(),
+                            )
+                            .fill(pal.danger.linear_multiply(0.14))
+                            .stroke(Stroke::new(1.0_f32, pal.danger.linear_multiply(0.45)))
+                            .rounding(Rounding::same(7.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ui
+                        .add_sized(
+                            [105.0, 32.0],
+                            egui::Button::new(
+                                RichText::new("Hủy").size(12.5).color(pal.text_secondary),
+                            )
+                            .fill(pal.bg_input)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .rounding(Rounding::same(7.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.logout_confirm_open = false;
+            self.settings_modal_open = false;
+            self.profile_menu_open = false;
+            // Lưu note pending và snapshot tài khoản hiện tại trước khi xóa session gốc (#80, #130)
+            // để màn hình đăng nhập có thể đăng nhập lại 1-click mà không cần quét lại QR.
+            self.flush_group_note_pending();
+            if !self.user_uin.is_empty() {
+                let _ = crate::account_manager::save_current_account_snapshot(&self.user_uin);
+            }
+            self.is_logged_in = false;
+            self.user_name.clear();
+            self.user_uin.clear();
+            self.threads.clear();
+            self.selected_thread_index = 0;
+            self.qr_texture = None;
+            self.login_status_msg.clear();
+            self.qr_status = "Đang xin mã QR mới…".into();
+            self.status_msg = "Đã đăng xuất".into();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::Logout);
+                let _ = tx.send(WorkerCmd::RequestQr);
+            }
+        } else if cancel || !open {
+            self.logout_confirm_open = false;
+        }
+    }
+
+    pub(super) fn render_saved_accounts_on_login(
+        &mut self,
+        ui: &mut egui::Ui,
+        pal: &ThemePalette,
+    ) {
+        let saved = crate::account_manager::list_saved_accounts(&self.user_uin);
+        if saved.is_empty() {
+            return;
+        }
+
+        ui.add_space(16.0);
+        let mut switch_to_uin: Option<String> = None;
+        let mut delete_uin: Option<String> = None;
+
+        egui::Frame::none()
+            .fill(pal.bg_elevated)
+            .rounding(Rounding::same(14.0))
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .inner_margin(Margin::symmetric(20.0, 16.0))
+            .show(ui, |ui| {
+                ui.set_width(376.0);
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.label(
+                        RichText::new("Tài khoản đã lưu trên thiết bị")
+                            .size(13.2)
+                            .color(pal.text_primary)
+                            .strong(),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Chọn để đăng nhập nhanh không cần quét lại mã QR")
+                            .size(11.5)
+                            .color(pal.text_secondary),
+                    );
+                    ui.add_space(10.0);
+
+                    for acc in &saved {
+                        egui::Frame::none()
+                            .fill(pal.bg_input)
+                            .rounding(Rounding::same(10.0))
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .inner_margin(Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let (av_r, _) = ui.allocate_exact_size(
+                                        Vec2::splat(36.0),
+                                        Sense::hover(),
+                                    );
+                                    let disp_name = if acc.display_name.trim().is_empty() {
+                                        &acc.uin
+                                    } else {
+                                        &acc.display_name
+                                    };
+                                    let av_opt = acc
+                                        .avatar
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty());
+                                    paint_user_avatar(
+                                        ui.painter(),
+                                        av_r.center(),
+                                        18.0,
+                                        disp_name,
+                                        false,
+                                        av_opt,
+                                        &self.sticker_textures,
+                                        &mut self.loading_stickers,
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(truncate_chars(disp_name, 22))
+                                                .size(13.0)
+                                                .color(pal.text_primary)
+                                                .strong(),
+                                        );
+                                        ui.label(
+                                            RichText::new(format!("UID: {}", acc.uin))
+                                                .size(11.0)
+                                                .color(pal.text_muted),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            let del_btn = egui::Button::new(
+                                                RichText::new("🗑")
+                                                    .size(12.0)
+                                                    .color(pal.danger),
+                                            )
+                                            .fill(pal.danger.linear_multiply(0.10))
+                                            .stroke(Stroke::new(
+                                                0.8_f32,
+                                                pal.danger.linear_multiply(0.35),
+                                            ))
+                                            .rounding(Rounding::same(6.0))
+                                            .min_size(Vec2::new(28.0, 28.0));
+                                            if ui
+                                                .add(del_btn)
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Xóa tài khoản này khỏi thiết bị")
+                                                .clicked()
+                                            {
+                                                delete_uin = Some(acc.uin.clone());
+                                            }
+
+                                            let login_btn = egui::Button::new(
+                                                RichText::new("Đăng nhập")
+                                                    .size(12.0)
+                                                    .color(pal.primary_fg)
+                                                    .strong(),
+                                            )
+                                            .fill(pal.primary)
+                                            .rounding(Rounding::same(6.0))
+                                            .min_size(Vec2::new(82.0, 28.0));
+                                            if ui
+                                                .add(login_btn)
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .on_hover_text("Đăng nhập ngay bằng phiên đã lưu")
+                                                .clicked()
+                                            {
+                                                switch_to_uin = Some(acc.uin.clone());
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+
+        if let Some(target_uin) = switch_to_uin {
+            self.pending_add_account_uin = None;
+            self.status_msg = "Đang khôi phục phiên đăng nhập đã lưu…".into();
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SwitchAccount { target_uin });
+            }
+        }
+        if let Some(uin) = delete_uin {
+            match crate::account_manager::delete_saved_account(&uin) {
+                Ok(()) => self.show_toast("Đã xóa tài khoản đã lưu khỏi thiết bị"),
+                Err(e) => self.show_toast(format!("⚠️ {e}")),
+            }
+        }
+    }
+
     pub(super) fn render_forward_dialog(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         if self.forward_msg.is_none() {
             return;
@@ -7784,15 +8341,23 @@ impl ZaloGuiApp {
                             pal.text_muted
                         },
                     );
+                    let edit_min_x = sbox_rect.left() + 28.0;
+                    let edit_max_x = (sbox_rect.right() - 8.0).max(edit_min_x + 24.0);
                     let edit_rect = Rect::from_min_max(
-                        Pos2::new(sbox_rect.left() + 28.0, sbox_rect.top() + 5.0),
-                        Pos2::new(sbox_rect.right() - 8.0, sbox_rect.bottom() - 5.0),
+                        Pos2::new(edit_min_x, sbox_rect.top() + 4.0),
+                        Pos2::new(edit_max_x, sbox_rect.bottom() - 4.0),
                     );
-                    ui.put(
-                        edit_rect,
+                    let mut edit_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(edit_rect)
+                            .layout(Layout::left_to_right(Align::Center)),
+                    );
+                    edit_ui.set_clip_rect(edit_rect.intersect(ui.clip_rect()));
+                    edit_ui.add(
                         egui::TextEdit::singleline(&mut self.contacts_search_query)
                             .id(Id::new("contacts_sidebar_search"))
                             .frame(false)
+                            .clip_text(true)
                             .hint_text("Tìm kiếm")
                             .desired_width(edit_rect.width()),
                     );
@@ -8033,23 +8598,31 @@ impl ZaloGuiApp {
                                                         13.5,
                                                         pal.text_muted,
                                                     );
+                                                    let fb_min_x = fb_rect.left() + 29.0;
+                                                    let fb_max_x = (fb_rect.right() - 8.0).max(fb_min_x + 24.0);
                                                     let fb_edit = Rect::from_min_max(
                                                         Pos2::new(
-                                                            fb_rect.left() + 29.0,
-                                                            fb_rect.top() + 6.0,
+                                                            fb_min_x,
+                                                            fb_rect.top() + 5.0,
                                                         ),
                                                         Pos2::new(
-                                                            fb_rect.right() - 8.0,
-                                                            fb_rect.bottom() - 6.0,
+                                                            fb_max_x,
+                                                            fb_rect.bottom() - 5.0,
                                                         ),
                                                     );
-                                                    ui.put(
-                                                        fb_edit,
+                                                    let mut fb_ui = ui.new_child(
+                                                        egui::UiBuilder::new()
+                                                            .max_rect(fb_edit)
+                                                            .layout(Layout::left_to_right(Align::Center)),
+                                                    );
+                                                    fb_ui.set_clip_rect(fb_edit.intersect(ui.clip_rect()));
+                                                    fb_ui.add(
                                                         egui::TextEdit::singleline(
                                                             &mut self.contacts_search_query,
                                                         )
                                                         .id(Id::new("contacts_main_filter_input"))
                                                         .frame(false)
+                                                        .clip_text(true)
                                                         .hint_text(if want_group {
                                                             "Tìm nhóm..."
                                                         } else {
@@ -8329,15 +8902,23 @@ impl ZaloGuiApp {
                         pal.text_muted
                     },
                 );
+                let edit_min_x = sbox_rect.left() + 31.0;
+                let edit_max_x = (sbox_rect.right() - 8.0).max(edit_min_x + 24.0);
                 let edit_rect = Rect::from_min_max(
-                    Pos2::new(sbox_rect.left() + 31.0, sbox_rect.top() + 5.0),
-                    Pos2::new(sbox_rect.right() - 8.0, sbox_rect.bottom() - 5.0),
+                    Pos2::new(edit_min_x, sbox_rect.top() + 4.0),
+                    Pos2::new(edit_max_x, sbox_rect.bottom() - 4.0),
                 );
-                ui.put(
-                    edit_rect,
+                let mut edit_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(edit_rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                edit_ui.set_clip_rect(edit_rect.intersect(ui.clip_rect()));
+                edit_ui.add(
                     egui::TextEdit::singleline(&mut self.feed_search_query)
                         .id(Id::new("feed_sidebar_search"))
                         .frame(false)
+                        .clip_text(true)
                         .hint_text("Tìm kiếm bạn bè trên Nhật ký…")
                         .desired_width(edit_rect.width()),
                 );
@@ -8558,7 +9139,11 @@ impl ZaloGuiApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let avail = ui.available_width();
-                        let feed_col_w = (avail - 48.0).clamp(420.0, 680.0);
+                        let feed_col_w = if avail.is_finite() {
+                            (avail - 48.0).clamp(420.0, 680.0)
+                        } else {
+                            520.0
+                        };
                         let side_pad = ((avail - feed_col_w) * 0.5).max(16.0);
                         ui.add_space(18.0);
                         ui.horizontal(|ui| {
@@ -8880,7 +9465,7 @@ impl ZaloGuiApp {
                                     });
                                 }
                             }
-                            let img_h = if m.width > 0 && m.height > 0 {
+                            let img_h = if m.width > 0 && m.height > 0 && avail_w.is_finite() {
                                 (avail_w * (m.height as f32 / m.width as f32)).clamp(200.0, 420.0)
                             } else {
                                 280.0
@@ -9241,8 +9826,9 @@ fn build_blurred_backdrop_image(src: &egui::ColorImage, is_dark: bool) -> egui::
                 let mut sg = 0u32;
                 let mut sb = 0u32;
                 let mut cnt = 0u32;
+                let max_x_idx = (dw as isize - 1).max(0);
                 for dx in -radius..=radius {
-                    let nx = (x as isize + dx).clamp(0, dw as isize - 1) as usize;
+                    let nx = (x as isize + dx).clamp(0, max_x_idx) as usize;
                     let c = buf[row_off + nx];
                     sr += c[0];
                     sg += c[1];
@@ -9253,6 +9839,7 @@ fn build_blurred_backdrop_image(src: &egui::ColorImage, is_dark: bool) -> egui::
             }
         }
         // Vertical pass
+        let max_y_idx = (dh as isize - 1).max(0);
         for y in 0..dh {
             for x in 0..dw {
                 let mut sr = 0u32;
@@ -9260,7 +9847,7 @@ fn build_blurred_backdrop_image(src: &egui::ColorImage, is_dark: bool) -> egui::
                 let mut sb = 0u32;
                 let mut cnt = 0u32;
                 for dy in -radius..=radius {
-                    let ny = (y as isize + dy).clamp(0, dh as isize - 1) as usize;
+                    let ny = (y as isize + dy).clamp(0, max_y_idx) as usize;
                     let c = tmp[ny * dw + x];
                     sr += c[0];
                     sg += c[1];

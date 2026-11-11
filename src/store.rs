@@ -160,7 +160,7 @@ pub fn parse_search_query(raw: &str) -> SearchQuery {
     q
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StoredThread {
     pub thread_id: String,
     pub name: String,
@@ -239,7 +239,8 @@ impl MessageStore {
                 last_ts INTEGER,
                 vanish_duration_sec INTEGER NOT NULL DEFAULT 0,
                 vanish_started_at_sec INTEGER NOT NULL DEFAULT 0,
-                last_read_msg_id TEXT NOT NULL DEFAULT ''
+                last_read_msg_id TEXT NOT NULL DEFAULT '',
+                contact_name INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS thread_vanish (
                 thread_id TEXT PRIMARY KEY,
@@ -297,6 +298,12 @@ impl MessageStore {
     if !cols.iter().any(|c| c == "last_read_msg_id") {
         let _ = conn.execute(
             "ALTER TABLE threads ADD COLUMN last_read_msg_id TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+    }
+    if !cols.iter().any(|c| c == "contact_name") {
+        let _ = conn.execute(
+            "ALTER TABLE threads ADD COLUMN contact_name INTEGER NOT NULL DEFAULT 0",
             [],
         );
     }
@@ -1260,7 +1267,7 @@ impl MessageStore {
     /// Callers that only carry messages (history_sync, import) MUST pass
     /// `vanish_duration_sec = 0` + `vanish_from_user = false`.
     pub fn upsert_thread(&mut self, t: &StoredThread) -> Result<()> {
-        self.upsert_thread_inner(t, false)
+        self.upsert_thread_inner(t, false, false)
     }
 
     /// `upsert_thread` with an explicit-disable flag. Pass `true` only when
@@ -1271,10 +1278,15 @@ impl MessageStore {
         t: &StoredThread,
         vanish_from_user: bool,
     ) -> Result<()> {
-        self.upsert_thread_inner(t, vanish_from_user)
+        self.upsert_thread_inner(t, vanish_from_user, false)
     }
 
-    fn upsert_thread_inner(&mut self, t: &StoredThread, vanish_from_user: bool) -> Result<()> {
+    fn upsert_thread_inner(
+        &mut self,
+        t: &StoredThread,
+        vanish_from_user: bool,
+        contact_name: bool,
+    ) -> Result<()> {
         // History-only upsert: keep stored vanish columns (CASE mirrors the
         // read-point CASE). User-intent upsert: overwrite (incl. explicit 0/0 disable).
         let (vanish_dur, vanish_start) = if vanish_from_user {
@@ -1284,16 +1296,40 @@ impl MessageStore {
             (-1, -1)
         };
         self.conn.execute(
-            "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, last_read_msg_id)
-             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 < 0 THEN 0 ELSE ?5 END, CASE WHEN ?6 < 0 THEN 0 ELSE ?6 END, ?7)
+            "INSERT INTO threads (thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, last_read_msg_id, contact_name)
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?5 < 0 THEN 0 ELSE ?5 END, CASE WHEN ?6 < 0 THEN 0 ELSE ?6 END, ?7, ?8)
              ON CONFLICT(thread_id) DO UPDATE SET
                  name = CASE
-                     WHEN excluded.name IS NOT NULL AND excluded.name != ''
-                          AND excluded.name NOT LIKE 'Người dùng %'
-                          AND excluded.name NOT LIKE 'Nhóm %'
-                          AND (threads.name IS NULL OR threads.name = '' OR threads.name LIKE 'Người dùng %' OR threads.name LIKE 'Nhóm %')
+                     WHEN excluded.contact_name != 0
+                          AND excluded.name IS NOT NULL AND TRIM(excluded.name) != ''
+                     THEN excluded.name
+                     WHEN threads.contact_name != 0
+                          AND threads.name IS NOT NULL AND TRIM(threads.name) != ''
+                     THEN threads.name
+                     WHEN excluded.name IS NOT NULL AND TRIM(excluded.name) != ''
+                          AND TRIM(excluded.name) != excluded.thread_id
+                          AND TRIM(excluded.name) != ('Người dùng ' || excluded.thread_id)
+                          AND TRIM(excluded.name) != ('Nhóm ' || excluded.thread_id)
+                          AND TRIM(excluded.name) != ('Nhóm ' || LTRIM(excluded.thread_id, 'gG_'))
+                          AND NOT (excluded.name LIKE 'Người dùng %' AND TRIM(SUBSTR(excluded.name, length('Người dùng ') + 1)) GLOB '[0-9]*')
+                          AND NOT (excluded.name LIKE 'Nhóm %' AND TRIM(SUBSTR(excluded.name, length('Nhóm ') + 1)) GLOB '[0-9]*')
+                          AND (
+                              threads.name IS NULL OR TRIM(threads.name) = ''
+                              OR TRIM(threads.name) = threads.thread_id
+                              OR TRIM(threads.name) = ('Người dùng ' || threads.thread_id)
+                              OR TRIM(threads.name) = ('Nhóm ' || threads.thread_id)
+                              OR TRIM(threads.name) = ('Nhóm ' || LTRIM(threads.thread_id, 'gG_'))
+                              OR (threads.name LIKE 'Người dùng %' AND TRIM(SUBSTR(threads.name, length('Người dùng ') + 1)) GLOB '[0-9]*')
+                              OR (threads.name LIKE 'Nhóm %' AND TRIM(SUBSTR(threads.name, length('Nhóm ') + 1)) GLOB '[0-9]*')
+                          )
                      THEN excluded.name
                      ELSE COALESCE(NULLIF(threads.name, ''), excluded.name)
+                 END,
+                 contact_name = CASE
+                     WHEN excluded.contact_name != 0
+                          AND excluded.name IS NOT NULL AND TRIM(excluded.name) != ''
+                     THEN 1
+                     ELSE threads.contact_name
                  END,
                  is_group = excluded.is_group,
                  last_ts = MAX(COALESCE(last_ts, 0), excluded.last_ts),
@@ -1318,6 +1354,7 @@ impl MessageStore {
                 vanish_dur,
                 vanish_start,
                 t.last_read_msg_id,
+                if contact_name { 1i64 } else { 0i64 },
             ],
         )?;
         if vanish_from_user {
@@ -1482,9 +1519,17 @@ impl MessageStore {
 
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
     pub fn all_threads(&self) -> Result<Vec<StoredThread>> {
+        Ok(self
+            .all_threads_with_contact_flag()?
+            .into_iter()
+            .map(|(st, _)| st)
+            .collect())
+    }
+
+    fn all_threads_with_contact_flag(&self) -> Result<Vec<(StoredThread, bool)>> {
         // Cột vanish chỉ có sau migration 2; SELECT liệt kê tường minh + fallback PRAGMA
         // để DB cũ chưa migrate vẫn đọc được (migration chạy ở `open`, đây là lưới an toàn).
-        let has_vcols = self
+        let cols: Vec<String> = self
             .conn
             .prepare("PRAGMA table_info(threads)")
             .ok()
@@ -1493,49 +1538,43 @@ impl MessageStore {
                     .ok()
                     .map(|rows| rows.flatten().collect::<Vec<_>>())
             })
-            .is_some_and(|cols| {
-                cols.iter().any(|c| c == "vanish_duration_sec")
-                    && cols.iter().any(|c| c == "vanish_started_at_sec")
-            });
-        let has_read_col = self
-            .conn
-            .prepare("PRAGMA table_info(threads)")
-            .ok()
-            .and_then(|mut s| {
-                s.query_map([], |r| r.get::<_, String>(1))
-                    .ok()
-                    .map(|rows| rows.flatten().any(|c| c == "last_read_msg_id"))
-            })
-            .unwrap_or(false);
-        let sql = if has_vcols && has_read_col {
-            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, last_read_msg_id
-             FROM threads
-             ORDER BY last_ts DESC"
-        } else if has_vcols {
-            "SELECT thread_id, name, is_group, last_ts, vanish_duration_sec, vanish_started_at_sec, ''
-             FROM threads
-             ORDER BY last_ts DESC"
-        } else if has_read_col {
-            "SELECT thread_id, name, is_group, last_ts, 0, 0, last_read_msg_id
-             FROM threads
-             ORDER BY last_ts DESC"
+            .unwrap_or_default();
+        let has_vcols = cols.iter().any(|c| c == "vanish_duration_sec")
+            && cols.iter().any(|c| c == "vanish_started_at_sec");
+        let has_read_col = cols.iter().any(|c| c == "last_read_msg_id");
+        let has_contact_col = cols.iter().any(|c| c == "contact_name");
+        let v_select = if has_vcols {
+            "vanish_duration_sec, vanish_started_at_sec"
         } else {
-            "SELECT thread_id, name, is_group, last_ts, 0, 0, ''
+            "0, 0"
+        };
+        let r_select = if has_read_col {
+            "last_read_msg_id"
+        } else {
+            "''"
+        };
+        let c_select = if has_contact_col { "contact_name" } else { "0" };
+        let sql = format!(
+            "SELECT thread_id, name, is_group, last_ts, {v_select}, {r_select}, {c_select}
              FROM threads
              ORDER BY last_ts DESC"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             let is_group_num: i64 = row.get(2).unwrap_or(0);
-            Ok(StoredThread {
-                thread_id: row.get(0)?,
-                name: row.get(1).unwrap_or_default(),
-                is_group: is_group_num != 0,
-                last_ts: row.get(3).unwrap_or(0),
-                vanish_duration_sec: row.get(4).unwrap_or(0),
-                vanish_started_at_sec: row.get(5).unwrap_or(0),
-                last_read_msg_id: row.get(6).unwrap_or_default(),
-            })
+            let contact_num: i64 = row.get(7).unwrap_or(0);
+            Ok((
+                StoredThread {
+                    thread_id: row.get(0)?,
+                    name: row.get(1).unwrap_or_default(),
+                    is_group: is_group_num != 0,
+                    last_ts: row.get(3).unwrap_or(0),
+                    vanish_duration_sec: row.get(4).unwrap_or(0),
+                    vanish_started_at_sec: row.get(5).unwrap_or(0),
+                    last_read_msg_id: row.get(6).unwrap_or_default(),
+                },
+                contact_num != 0,
+            ))
         })?;
         let mut out = Vec::new();
         for r in rows {
@@ -1553,14 +1592,23 @@ impl MessageStore {
     ) -> Result<usize> {
         crate::chat::deduplicate_threads(threads, None);
 
-        let stored_threads = self.all_threads().unwrap_or_default();
-        for st in stored_threads {
+        let stored_threads = self.all_threads_with_contact_flag().unwrap_or_default();
+        for (st, st_contact_name) in stored_threads {
             if st.thread_id.is_empty() || st.thread_id == "0" {
                 continue;
             }
             if let Some(existing) = threads.iter_mut().find(|t| t.id == st.thread_id) {
-                if !st.name.is_empty() && !crate::chat::is_generic_thread_name(&st.name) {
-                    existing.name = st.name.clone();
+                if !st.name.trim().is_empty() {
+                    if st_contact_name {
+                        crate::chat::adopt_thread_name(existing, st.name.clone(), true);
+                    } else if !existing.presentation.contact_name
+                        && !crate::chat::is_placeholder_thread_name(&st.name, &st.thread_id)
+                        && (existing.name.trim().is_empty()
+                            || crate::chat::is_placeholder_thread_name(&existing.name, &existing.id)
+                            || crate::chat::is_generic_thread_name(&existing.name))
+                    {
+                        existing.name = st.name.clone();
+                    }
                 }
                 existing.is_group = existing.is_group || st.is_group;
                 apply_stored_vanish(existing, &st, self);
@@ -1595,12 +1643,21 @@ impl MessageStore {
                 if !st.last_read_msg_id.is_empty() {
                     unread.last_seen_id = Some(st.last_read_msg_id.clone());
                 }
+                let is_placeholder =
+                    crate::chat::is_placeholder_thread_name(&st.name, &st.thread_id);
                 threads.push(Thread {
-                    presentation: Default::default(),
+                    presentation: crate::chat::SidebarPresentation {
+                        contact_name: st_contact_name,
+                        ..Default::default()
+                    },
                     unread,
                     id: st.thread_id.clone(),
-                    name: if st.name.is_empty() {
-                        format!("Người dùng {}", st.thread_id)
+                    name: if st.name.trim().is_empty() || (!st_contact_name && is_placeholder) {
+                        if st.is_group {
+                            format!("Nhóm {}", st.thread_id)
+                        } else {
+                            format!("Người dùng {}", st.thread_id)
+                        }
                     } else {
                         st.name.clone()
                     },
@@ -1806,6 +1863,11 @@ impl MessageStore {
                     time,
                     is_outgoing: sm.is_outgoing,
                     ts: sm.ts,
+                    delivery: if sm.is_outgoing {
+                        crate::message_model::DeliveryState::ServerAccepted
+                    } else {
+                        crate::message_model::DeliveryState::Unknown
+                    },
                     sticker_id,
                     sticker_cate_id,
                     sticker_type,
@@ -2051,7 +2113,7 @@ fn persist_threads_inner(store: &mut MessageStore, threads: &[Thread]) -> Result
         };
         // RAM snapshot carries the user's vanish intent (incl. explicit disable),
         // unlike history-sync pages which must preserve stored vanish (#376).
-        store.upsert_thread_with_vanish_intent(&st, true)?;
+        store.upsert_thread_inner(&st, true, t.presentation.contact_name)?;
         for m in t.messages.iter().filter(|m| m.text != "sendBubbleMessage") {
             let mut sm = StoredMessage::from(m);
             sm.thread_id = t.id.clone();
@@ -2370,7 +2432,11 @@ fn query_names_from_index_db(
             let uid: String = r.get(0)?;
             let dname: String = r.get(1).unwrap_or_default();
             let zname: String = r.get(2).unwrap_or_default();
-            let name = if !zname.is_empty() { zname } else { dname };
+            let name = if !dname.trim().is_empty() {
+                dname
+            } else {
+                zname
+            };
             Ok((uid, name))
         })?;
         for r in rows.flatten() {
@@ -2384,7 +2450,11 @@ fn query_names_from_index_db(
             let uid: String = r.get(0)?;
             let dname: String = r.get(1).unwrap_or_default();
             let zname: String = r.get(2).unwrap_or_default();
-            let name = if !zname.is_empty() { zname } else { dname };
+            let name = if !dname.trim().is_empty() {
+                dname
+            } else {
+                zname
+            };
             Ok((uid, name))
         })?;
         for r in rows.flatten() {
@@ -3612,5 +3682,104 @@ mod tests {
         assert!(store.delete_reminder(id).unwrap());
         assert!(!store.delete_reminder(id).unwrap());
         assert!(store.list_reminders().is_empty());
+    }
+
+    #[test]
+    fn issue_126_contact_aliases_and_group_prefix_names_survive_offline_restart_and_placeholders() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+
+        // 1) Genuine numeric contact alias "123" and "Nhóm học" persisted via persist_threads
+        let initial_threads = vec![
+            Thread {
+                presentation: crate::chat::SidebarPresentation {
+                    contact_name: true,
+                    ..Default::default()
+                },
+                id: "1000000000001".into(),
+                name: "123".into(),
+                is_group: false,
+                ..Default::default()
+            },
+            Thread {
+                presentation: crate::chat::SidebarPresentation {
+                    contact_name: true,
+                    ..Default::default()
+                },
+                id: "1000000000002".into(),
+                name: "Nhóm học".into(),
+                is_group: false,
+                ..Default::default()
+            },
+        ];
+        persist_threads(&mut store, &initial_threads).unwrap();
+
+        // 2) Generated placeholders or non-contact profile names must NOT overwrite persisted contact aliases
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "1000000000001".into(),
+                name: "Người dùng 1000000000001".into(),
+                is_group: false,
+                last_ts: 200,
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "1000000000002".into(),
+                name: "Nhóm 1000000000002".into(),
+                is_group: false,
+                last_ts: 200,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // 3) Offline restart: hydrate_threads into an empty Vec or over placeholder threads
+        let mut restarted: Vec<Thread> = Vec::new();
+        store.hydrate_threads(&mut restarted, 20).unwrap();
+        let t1 = restarted.iter().find(|t| t.id == "1000000000001").unwrap();
+        let t2 = restarted.iter().find(|t| t.id == "1000000000002").unwrap();
+        assert_eq!(t1.name, "123");
+        assert!(t1.presentation.contact_name);
+        assert_eq!(t2.name, "Nhóm học");
+        assert!(t2.presentation.contact_name);
+
+        // 4) Also verify hydrate_threads replaces generated placeholders on existing in-memory threads
+        let mut placeholder_ram = vec![
+            Thread {
+                id: "1000000000001".into(),
+                name: "Người dùng 1000000000001".into(),
+                is_group: false,
+                ..Default::default()
+            },
+            Thread {
+                id: "1000000000002".into(),
+                name: "Nhóm 1000000000002".into(),
+                is_group: false,
+                ..Default::default()
+            },
+        ];
+        store.hydrate_threads(&mut placeholder_ram, 20).unwrap();
+        assert_eq!(placeholder_ram[0].name, "123");
+        assert!(placeholder_ram[0].presentation.contact_name);
+        assert_eq!(placeholder_ram[1].name, "Nhóm học");
+        assert!(placeholder_ram[1].presentation.contact_name);
+    }
+
+    #[test]
+    fn query_names_from_index_db_prefers_display_name_over_zalo_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE friends_info (userId TEXT, displayName TEXT, zaloName TEXT);
+             CREATE TABLE friend (userId TEXT, displayName TEXT, zaloName TEXT);
+             INSERT INTO friends_info VALUES ('u1', 'Biệt danh 1', 'Tên Gốc 1');
+             INSERT INTO friend VALUES ('u2', '123', 'Tên Gốc 2');
+             INSERT INTO friend VALUES ('u3', '   ', 'Tên Gốc 3');",
+        )
+        .unwrap();
+        let mut map = std::collections::HashMap::new();
+        query_names_from_index_db(&conn, &mut map).unwrap();
+        assert_eq!(map.get("u1").map(|x| x.0.as_str()), Some("Biệt danh 1"));
+        assert_eq!(map.get("u2").map(|x| x.0.as_str()), Some("123"));
+        assert_eq!(map.get("u3").map(|x| x.0.as_str()), Some("Tên Gốc 3"));
     }
 }

@@ -1083,9 +1083,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     );
                                                     ctx_ws.request_repaint();
                                                     let needs_resolve = ws_threads.iter().any(|t| {
-                                                        t.name.is_empty()
-                                                            || t.name.starts_with("Người dùng ")
-                                                            || crate::chat::is_generic_thread_name(&t.name)
+                                                        !t.presentation.contact_name
+                                                            && (t.name.is_empty()
+                                                                || crate::chat::is_placeholder_thread_name(&t.name, &t.id)
+                                                                || crate::chat::is_generic_thread_name(&t.name))
                                                     });
                                                     if needs_resolve {
                                                         let s_bg = s_snap.clone();
@@ -1670,9 +1671,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                                     .iter_mut()
                                                                     .find(|t| t.id == ft.id)
                                                                 {
-                                                                    if !ft.name.is_empty() {
-                                                                        ex.name = ft.name;
-                                                                    }
+                                                                    crate::chat::adopt_thread_name(
+                                                                        ex,
+                                                                        ft.name,
+                                                                        ft.presentation.contact_name,
+                                                                    );
                                                                     if crate::chat::should_replace_avatar(
                                                                         ex.avatar.as_deref(),
                                                                         ft.avatar.as_deref(),
@@ -1864,9 +1867,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         Ok(friends) => {
                                             for ft in friends {
                                                 if let Some(ex) = list.iter_mut().find(|t| t.id == ft.id) {
-                                                    if !ft.name.is_empty() {
-                                                        ex.name = ft.name;
-                                                    }
+                                                    crate::chat::adopt_thread_name(
+                                                        ex,
+                                                        ft.name,
+                                                        ft.presentation.contact_name,
+                                                    );
                                                     if crate::chat::should_replace_avatar(
                                                         ex.avatar.as_deref(),
                                                         ft.avatar.as_deref(),
@@ -2196,9 +2201,10 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 ctx_clone.request_repaint();
 
                                                 let needs_resolve = temp_threads.iter().any(|t| {
-                                                    t.name.is_empty()
-                                                        || t.name.starts_with("Người dùng ")
-                                                        || crate::chat::is_generic_thread_name(&t.name)
+                                                    !t.presentation.contact_name
+                                                        && (t.name.is_empty()
+                                                            || crate::chat::is_placeholder_thread_name(&t.name, &t.id)
+                                                            || crate::chat::is_generic_thread_name(&t.name))
                                                 });
                                                 if needs_resolve {
                                                     crate::chat::resolve_thread_names(
@@ -2519,6 +2525,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 time: now,
                                                 is_outgoing: true,
                                                 ts: (crate::login::unix_now() * 1000) as i64,
+                                                delivery: crate::message_model::DeliveryState::ServerAccepted,
                                                 link_url: Some(meta.url),
                                                 link_title: if meta.title.is_empty() {
                                                     None
@@ -2690,6 +2697,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 time: crate::ui::clock(),
                                                 is_outgoing: true,
                                                 ts: (crate::login::unix_now() * 1000) as i64,
+                                                delivery: crate::message_model::DeliveryState::ServerAccepted,
                                                 link_url: msg.link_url.clone(),
                                                 link_thumb: msg.link_thumb.clone(),
                                                 link_src: msg.link_src.clone(),
@@ -3845,9 +3853,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         if let Some(ex) =
                                                             list.iter_mut().find(|t| t.id == ft.id)
                                                         {
-                                                            if !ft.name.is_empty() {
-                                                                ex.name = ft.name;
-                                                            }
+                                                            crate::chat::adopt_thread_name(
+                                                                ex,
+                                                                ft.name,
+                                                                ft.presentation.contact_name,
+                                                            );
                                                             if crate::chat::should_replace_avatar(
                                                                 ex.avatar.as_deref(),
                                                                 ft.avatar.as_deref(),

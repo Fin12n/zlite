@@ -375,6 +375,7 @@ pub fn run_script(
     if script.code.len() > MAX_CODE_BYTES {
         anyhow::bail!("script quá dài (> 50KB)");
     }
+    let _ = crate::store::MessageStore::open(db_path);
     let outbox: Arc<Mutex<Vec<OutboxMsg>>> = Arc::new(Mutex::new(Vec::new()));
     let toasts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let logs: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));

@@ -688,6 +688,7 @@ pub struct SidebarPresentation {
     pub pinned: bool,
     pub muted: bool,
     pub hidden: bool,
+    pub contact_name: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -918,6 +919,35 @@ pub fn is_generic_thread_name(name: &str) -> bool {
         || t.starts_with("Người dùng ")
         || t.starts_with("Nhóm ")
         || t.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Return `true` if `name` is empty or a generated placeholder for `thread_id`
+/// (`"Người dùng {id}"`, `"Nhóm {id}"`, or bare `{id}`), while preserving genuine
+/// contact/group aliases like `"123"` or `"Nhóm học"` (#126).
+pub fn is_placeholder_thread_name(name: &str, thread_id: &str) -> bool {
+    let t = name.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let tid = thread_id.trim();
+    let clean_tid = tid
+        .trim_start_matches("group_")
+        .trim_start_matches('g')
+        .trim_start_matches('G');
+    if !tid.is_empty() && (t == tid || (!clean_tid.is_empty() && t == clean_tid)) {
+        return true;
+    }
+    if let Some(rest) = t.strip_prefix("Người dùng ").map(str::trim) {
+        return rest.is_empty()
+            || (!tid.is_empty() && (rest == tid || rest == clean_tid))
+            || rest.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some(rest) = t.strip_prefix("Nhóm ").map(str::trim) {
+        return rest.is_empty()
+            || (!tid.is_empty() && (rest == tid || rest == clean_tid))
+            || rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
 }
 
 /// Extract the stable avatar filename (e.g. `"00000000000000000000000000000001.jpg"`) from a Zalo CDN URL.
@@ -1171,8 +1201,12 @@ impl MessageIdentityIndex {
                     return None;
                 }
             }
+            let is_recall = incoming.text.trim() == "[Tin nhắn đã thu hồi]"
+                || existing.text.trim() == "[Tin nhắn đã thu hồi]"
+                || incoming.text.starts_with("[Đã thu hồi]")
+                || existing.text.starts_with("[Đã thu hồi]");
             if key.0 != 2 {
-                if key.0 == 3 {
+                if key.0 == 3 && !is_recall {
                     if let (Some(a), Some(b)) = (
                         wire_identity(existing.wire_ref.server_id.as_ref()),
                         wire_identity(incoming.wire_ref.server_id.as_ref()),
@@ -1182,6 +1216,9 @@ impl MessageIdentityIndex {
                         }
                     }
                 }
+                return Some(index);
+            }
+            if is_recall {
                 return Some(index);
             }
             // Client-only packets can replay before a server ID is known. A client
@@ -1203,8 +1240,56 @@ impl MessageIdentityIndex {
     }
 }
 
+fn delivery_rank(state: crate::message_model::DeliveryState) -> u8 {
+    use crate::message_model::DeliveryState;
+    match state {
+        DeliveryState::Unknown | DeliveryState::DeliveryUnknown => 0,
+        DeliveryState::Failed => 1,
+        DeliveryState::Pending => 2,
+        DeliveryState::ServerAccepted => 3,
+        DeliveryState::Delivered => 4,
+        DeliveryState::Read => 5,
+    }
+}
+
+fn merge_delivery_state(
+    existing: &mut crate::message_model::DeliveryState,
+    incoming: crate::message_model::DeliveryState,
+) {
+    if delivery_rank(incoming) > delivery_rank(*existing) {
+        *existing = incoming;
+    }
+}
+
+fn apply_recall_merge(existing: &mut ChatMessage, incoming_text: &str) {
+    let inc_trim = incoming_text.trim();
+    let ex_trim = existing.text.trim();
+    if inc_trim == "[Tin nhắn đã thu hồi]" {
+        if ex_trim.is_empty() || ex_trim == "[Tin nhắn đã thu hồi]" {
+            existing.text = "[Tin nhắn đã thu hồi]".to_string();
+        } else if !ex_trim.starts_with("[Đã thu hồi]") {
+            existing.text = format!("[Đã thu hồi] {}", existing.text);
+        }
+    } else if ex_trim == "[Tin nhắn đã thu hồi]"
+        && !inc_trim.is_empty()
+        && !inc_trim.starts_with("[Đã thu hồi]")
+    {
+        existing.text = format!("[Đã thu hồi] {incoming_text}");
+    }
+}
+
 /// Merge a local send acknowledgement without replacing an existing server clock.
 pub(crate) fn merge_sent_message(thread: &mut Thread, mut message: ChatMessage) {
+    if message.is_outgoing
+        && matches!(
+            message.delivery,
+            crate::message_model::DeliveryState::Unknown
+                | crate::message_model::DeliveryState::DeliveryUnknown
+                | crate::message_model::DeliveryState::Pending
+        )
+    {
+        message.delivery = crate::message_model::DeliveryState::ServerAccepted;
+    }
     let mut identities = MessageIdentityIndex::default();
     for (row, existing) in thread.messages.iter().enumerate() {
         identities.insert(existing, row);
@@ -1227,6 +1312,30 @@ pub(crate) fn merge_sent_message(thread: &mut Thread, mut message: ChatMessage) 
     );
 }
 
+/// Update `target.name` from an incoming thread/friend entry, giving precedence to
+/// contact aliases (`is_contact_name == true`) and preventing non-contact or placeholder
+/// names from overwriting contact aliases or real names (#125, #126).
+pub fn adopt_thread_name(target: &mut Thread, name: String, is_contact_name: bool) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if is_contact_name {
+        target.name = name;
+        target.presentation.contact_name = true;
+        return;
+    }
+    if target.presentation.contact_name {
+        return;
+    }
+    if !is_placeholder_thread_name(trimmed, &target.id)
+        && (is_placeholder_thread_name(&target.name, &target.id)
+            || (is_generic_thread_name(&target.name) && !is_generic_thread_name(trimmed)))
+    {
+        target.name = name;
+    }
+}
+
 /// Merge `incoming` thread into `target`. When `incoming_id_is_authoritative` is `true`,
 /// `target.id` is migrated to `incoming.id` so actions (chat/VoIP call) always target the active session's `userId`.
 pub fn merge_thread_into(
@@ -1240,9 +1349,7 @@ pub fn merge_thread_into(
     if incoming_id_is_authoritative && !incoming.id.is_empty() && incoming.id != "0" {
         target.id = incoming.id;
     }
-    if is_generic_thread_name(&target.name) && !incoming.name.is_empty() {
-        target.name = incoming.name;
-    }
+    adopt_thread_name(target, incoming.name, incoming.presentation.contact_name);
     if should_replace_avatar(target.avatar.as_deref(), incoming.avatar.as_deref()) {
         target.avatar = incoming.avatar;
     }
@@ -1275,26 +1382,20 @@ pub fn merge_thread_into(
             let existing_msg = &mut target.messages[idx];
             identities.remove(existing_msg, idx);
             existing_msg.merge_reaction_metadata(&msg);
+            merge_delivery_state(&mut existing_msg.delivery, msg.delivery);
             if existing_msg.id.starts_with("out_")
                 && !msg.id.is_empty()
                 && !msg.id.starts_with("out_")
             {
                 existing_msg.id = msg.id.clone();
             }
-            if msg.ts > 0 && existing_msg.ts != msg.ts {
+            let is_undo_msg = msg.text.trim() == "[Tin nhắn đã thu hồi]";
+            if msg.ts > 0 && existing_msg.ts != msg.ts && (!is_undo_msg || existing_msg.ts == 0) {
                 existing_msg.ts = msg.ts;
                 existing_msg.time = msg.time;
             }
-            if msg.text.trim() == "[Tin nhắn đã thu hồi]" {
-                if !existing_msg.text.starts_with("[Đã thu hồi]") {
-                    if existing_msg.text.trim().is_empty() {
-                        existing_msg.text = "[Tin nhắn đã thu hồi]".to_string();
-                    } else {
-                        existing_msg.text = format!("[Đã thu hồi] {}", existing_msg.text);
-                    }
-                }
-                // Anti-recall: Retain sticker, link_url, link_thumb so user can still view recalled photos & media!
-            }
+            apply_recall_merge(existing_msg, &msg.text);
+            // Anti-recall: Retain sticker, link_url, link_thumb so user can still view recalled photos & media!
             if existing_msg.sticker_id.is_none() && msg.sticker_id.is_some() {
                 existing_msg.sticker_id = msg.sticker_id;
                 existing_msg.sticker_cate_id = msg.sticker_cate_id;
@@ -1311,7 +1412,10 @@ pub fn merge_thread_into(
                 existing_msg.link_desc = msg.link_desc;
                 existing_msg.link_thumb = msg.link_thumb;
                 existing_msg.link_src = msg.link_src;
-                if !msg.text.is_empty() {
+                if !msg.text.is_empty()
+                    && !existing_msg.text.starts_with("[Đã thu hồi]")
+                    && existing_msg.text.trim() != "[Tin nhắn đã thu hồi]"
+                {
                     existing_msg.text = msg.text;
                 }
             }
@@ -1339,7 +1443,7 @@ pub fn merge_thread_into(
     }
     if latest_incoming_ts > 0 {
         for m in target.messages.iter_mut() {
-            if m.is_outgoing && m.ts <= latest_incoming_ts {
+            if m.is_outgoing && m.ts > 0 && m.ts <= latest_incoming_ts {
                 m.delivery = crate::message_model::DeliveryState::Read;
             }
         }
@@ -1602,15 +1706,20 @@ pub async fn get_friends(s: &Session) -> Result<Vec<Thread>> {
 }
 
 fn parse_thread(v: &Value) -> Option<Thread> {
-    let id = pick_str(v, &["userId", "uid", "id", "friendId", "globalId"])?;
-    let name = pick_str(v, &["displayName", "zaloName", "display_name", "name"])
+    let id = pick_str(
+        v,
+        &["userId", "uid", "id", "friendId", "globalId", "groupId"],
+    )?;
+    let picked_name = pick_str(v, &["displayName", "zaloName", "display_name", "name"])
         .or_else(|| {
             v.get("profile_displayName")
                 .or_else(|| v.get("profile").and_then(|p| p.get("displayName")))
                 .and_then(Value::as_str)
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| id.clone());
+        .filter(|s| !s.trim().is_empty());
+    let contact_name = picked_name.is_some();
+    let name = picked_name.unwrap_or_else(|| id.clone());
     let avatar = pick_str(v, &["avatar", "avt", "profile_avatar"]);
     let is_group = is_group_flag(v);
     let time = v
@@ -1624,7 +1733,10 @@ fn parse_thread(v: &Value) -> Option<Thread> {
         .unwrap_or_default();
 
     Some(Thread {
-        presentation: Default::default(),
+        presentation: SidebarPresentation {
+            contact_name,
+            ..Default::default()
+        },
         unread: Default::default(),
         id,
         name,
@@ -1640,7 +1752,7 @@ fn parse_thread(v: &Value) -> Option<Thread> {
 pub(crate) fn pick_str(v: &Value, keys: &[&str]) -> Option<String> {
     for k in keys {
         match v.get(*k) {
-            Some(Value::String(s)) if !s.is_empty() => return Some(s.clone()),
+            Some(Value::String(s)) if !s.trim().is_empty() => return Some(s.clone()),
             Some(Value::Number(n)) => return Some(n.to_string()),
             _ => {}
         }
@@ -2351,6 +2463,7 @@ pub async fn send_attachment_ext(
             time: now_str,
             is_outgoing: true,
             ts: client_id as i64,
+            delivery: crate::message_model::DeliveryState::ServerAccepted,
             link_url: Some(final_url),
             link_title: Some(clean_title),
             link_desc: if caption.trim().is_empty() {
@@ -2524,6 +2637,7 @@ pub async fn send_attachment_ext(
         time: crate::ui::clock(),
         is_outgoing: true,
         ts: client_id as i64,
+        delivery: crate::message_model::DeliveryState::ServerAccepted,
         link_url: if final_url.is_empty() {
             None
         } else {
@@ -2691,6 +2805,7 @@ pub fn parse_voice_send_response(
         time: crate::ui::clock(),
         is_outgoing: true,
         ts: client_id as i64,
+        delivery: crate::message_model::DeliveryState::ServerAccepted,
         kind: crate::message_model::MessageKind::Voice,
         link_url: if file_url.is_empty() { None } else { Some(file_url) },
         link_title: Some(format!("Tin nhắn thoại ({mm:02}:{ss:02})")),
@@ -4903,7 +5018,7 @@ fn format_multi_group_avatar(
             .to_string();
         let mut m_ava = String::new();
         if let Some(p) = profiles.get(uid) {
-            if let Some(n) = pick_str(p, &["zaloName", "displayName", "name", "display_name"]) {
+            if let Some(n) = pick_str(p, &["displayName", "zaloName", "name", "display_name"]) {
                 if !n.is_empty() {
                     m_name = n;
                 }
@@ -5114,8 +5229,10 @@ pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
         .filter(|t| {
             !t.is_group
                 && !t.name.contains("Cloud của tôi")
-                && (t.name.starts_with("Người dùng ")
-                    || t.name.is_empty()
+                && ((!t.presentation.contact_name
+                    && (t.name.is_empty()
+                        || is_placeholder_thread_name(&t.name, &t.id)
+                        || is_generic_thread_name(&t.name)))
                     || t.avatar.as_deref().unwrap_or("").is_empty())
         })
         .map(|t| t.id.clone())
@@ -5126,9 +5243,13 @@ pub async fn resolve_thread_names(s: &Session, threads: &mut [Thread]) {
             if let Ok(profiles) = get_mini_profiles(s, chunk).await {
                 for t in threads.iter_mut() {
                     if let Some(p) = profiles.get(&t.id) {
-                        if t.name.starts_with("Người dùng ") || t.name.is_empty() {
+                        if !t.presentation.contact_name
+                            && (t.name.is_empty()
+                                || is_placeholder_thread_name(&t.name, &t.id)
+                                || is_generic_thread_name(&t.name))
+                        {
                             if let Some(name) =
-                                pick_str(p, &["zaloName", "displayName", "name", "display_name"])
+                                pick_str(p, &["displayName", "zaloName", "name", "display_name"])
                             {
                                 if !name.is_empty() {
                                     t.name = name;
@@ -5649,11 +5770,61 @@ fn extract_content_text(v: &Value) -> Option<String> {
                     return Some(title.to_string());
                 }
             }
-            for k in ["description", "caption", "text", "msg", "title"] {
-                if let Some(Value::String(s)) = o.get(k) {
-                    let t = s.trim();
-                    if !t.is_empty() && t != "sendBubbleMessage" {
-                        return Some(s.clone());
+            for k in [
+                "description",
+                "caption",
+                "text",
+                "msg",
+                "title",
+                "content",
+                "message",
+                "body",
+            ] {
+                if let Some(val) = o.get(k) {
+                    match val {
+                        Value::String(s) => {
+                            let t = s.trim();
+                            if !t.is_empty() && t != "sendBubbleMessage" {
+                                if t.starts_with('{') && t.ends_with('}') {
+                                    if let Some(inner) = extract_content_text(val) {
+                                        if !inner.is_empty() {
+                                            return Some(inner);
+                                        }
+                                    }
+                                } else {
+                                    return Some(s.clone());
+                                }
+                            }
+                        }
+                        Value::Object(_) => {
+                            if let Some(inner) = extract_content_text(val) {
+                                if !inner.is_empty() {
+                                    return Some(inner);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            for nested_key in ["data", "params"] {
+                if let Some(nested) = o.get(nested_key) {
+                    match nested {
+                        Value::Object(_) => {
+                            if let Some(inner) = extract_content_text(nested) {
+                                if !inner.is_empty() {
+                                    return Some(inner);
+                                }
+                            }
+                        }
+                        Value::String(s) if s.trim().starts_with('{') => {
+                            if let Some(inner) = extract_content_text(nested) {
+                                if !inner.is_empty() {
+                                    return Some(inner);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -6169,29 +6340,61 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         };
     }
 
-    let undo_target_id = if is_undo_type {
-        raw_content_val.and_then(|rv| match rv {
-            Value::Object(_) => pick_str(rv, &["globalMsgId", "msgId", "cliMsgId"]),
+    let (undo_server_id, undo_client_id) = if is_undo_type {
+        let pick_non_zero = |v: &Value, keys: &[&str]| -> Option<String> {
+            keys.iter().find_map(|k| wire_identity(v.get(*k)))
+        };
+        let from_rv = raw_content_val.and_then(|rv| match rv {
+            Value::Object(_) => Some((
+                pick_non_zero(
+                    rv,
+                    &["globalMsgId", "msgId", "realMsgId", "undoMsgId", "srcMsgId"],
+                ),
+                pick_non_zero(rv, &["cliMsgId", "clientId", "client_message_id"]),
+            )),
             Value::String(s) if s.trim().starts_with('{') => {
-                serde_json::from_str::<Value>(s.trim())
-                    .ok()
-                    .and_then(|parsed| pick_str(&parsed, &["globalMsgId", "msgId", "cliMsgId"]))
+                serde_json::from_str::<Value>(s.trim()).ok().map(|parsed| {
+                    (
+                        pick_non_zero(
+                            &parsed,
+                            &["globalMsgId", "msgId", "realMsgId", "undoMsgId", "srcMsgId"],
+                        ),
+                        pick_non_zero(&parsed, &["cliMsgId", "clientId", "client_message_id"]),
+                    )
+                })
             }
             _ => None,
-        })
+        });
+        let srv = from_rv
+            .as_ref()
+            .and_then(|(s, _)| s.clone())
+            .or_else(|| pick_non_zero(it, &["globalMsgId", "realMsgId", "undoMsgId", "srcMsgId"]));
+        let cli = from_rv
+            .and_then(|(_, c)| c)
+            .or_else(|| pick_non_zero(it, &["cliMsgId", "clientId", "client_message_id"]));
+        (srv, cli)
     } else {
-        None
+        (None, None)
     };
 
     // Preserve the persisted canonical ID contract until a schema-aware migration
     // can replace legacy cliMsgId keys without duplicating cached messages.
-    let msg_id = undo_target_id
-        .or_else(|| {
-            ["msgId", "cliMsgId", "globalMsgId", "lastMsgId", "id"]
-                .iter()
-                .find_map(|key| wire_identity(it.get(*key)))
-        })
-        .unwrap_or_default();
+    let msg_id = if is_undo_type {
+        undo_server_id
+            .clone()
+            .or_else(|| undo_client_id.clone())
+            .or_else(|| {
+                ["msgId", "cliMsgId", "globalMsgId", "lastMsgId", "id"]
+                    .iter()
+                    .find_map(|key| wire_identity(it.get(*key)))
+            })
+            .unwrap_or_default()
+    } else {
+        ["msgId", "cliMsgId", "globalMsgId", "lastMsgId", "id"]
+            .iter()
+            .find_map(|key| wire_identity(it.get(*key)))
+            .unwrap_or_default()
+    };
 
     if content.is_empty() && msg_id.is_empty() {
         return None;
@@ -6319,18 +6522,44 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         None
     };
 
-    Some(ChatMessage {
-        id: msg_id,
-        client_message_id: ["cliMsgId", "clientId", "client_message_id"]
+    let parsed_client_id = if is_undo_type {
+        undo_client_id
+            .clone()
+            .or_else(|| {
+                ["cliMsgId", "clientId", "client_message_id"]
+                    .iter()
+                    .find_map(|key| wire_identity(it.get(*key)))
+            })
+            .unwrap_or_default()
+    } else {
+        ["cliMsgId", "clientId", "client_message_id"]
             .iter()
             .find_map(|key| wire_identity(it.get(*key)))
-            .unwrap_or_default(),
-        wire_ref: crate::message_model::WireMessageRef::from_raw(it),
+            .unwrap_or_default()
+    };
+
+    let mut wire_ref = crate::message_model::WireMessageRef::from_raw(it);
+    if is_undo_type && (undo_server_id.is_some() || undo_client_id.is_some()) {
+        wire_ref.server_id = undo_server_id.map(Value::String);
+        if let Some(cli) = undo_client_id {
+            wire_ref.client_id = Some(Value::String(cli));
+        }
+    }
+
+    Some(ChatMessage {
+        id: msg_id,
+        client_message_id: parsed_client_id,
+        wire_ref,
         sender: display_sender,
         text: content,
         time,
         is_outgoing,
         ts,
+        delivery: if is_outgoing {
+            crate::message_model::DeliveryState::ServerAccepted
+        } else {
+            crate::message_model::DeliveryState::Unknown
+        },
         sticker_id: sticker_meta.map(|(sid, _, _)| sid),
         sticker_cate_id: sticker_meta.map(|(_, cid, _)| cid),
         sticker_type: sticker_meta.map(|(_, _, st)| st),
@@ -6422,18 +6651,16 @@ fn extract_message_thread_id_ext(
         .or_else(|| pick_str(entry, &["idTo", "toid", "toId"]))
         .unwrap_or_default();
 
-    if (id_to.is_empty() || id_to == "0") && (uid_from.is_empty() || uid_from == "0") {
-        if let Some(cid) = cloud_thread_id {
-            if !cid.is_empty() {
-                return Some((cid.to_string(), false));
-            }
+    if let Some(cid) = cloud_thread_id.filter(|c| !c.is_empty()) {
+        if ((id_to.is_empty() || id_to == "0") && (uid_from.is_empty() || uid_from == "0"))
+            || id_to == cid
+            || uid_from == cid
+        {
+            return Some((cid.to_string(), false));
         }
     }
 
-    if !uid_from.is_empty()
-        && uid_from != "0"
-        && (id_to.is_empty() || id_to == "0" || Some(id_to.as_str()) == cloud_thread_id)
-    {
+    if !uid_from.is_empty() && uid_from != "0" && (id_to.is_empty() || id_to == "0") {
         // Incoming 1-1 message: peer sent it to us -> thread ID is `uid_from`
         Some((uid_from, false))
     } else if !id_to.is_empty() && id_to != "0" {
@@ -6618,25 +6845,22 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                     let existing = &mut t.messages[row];
                     identities.remove(existing, row);
                     existing.merge_reaction_metadata(&parsed);
+                    merge_delivery_state(&mut existing.delivery, parsed.delivery);
                     if existing.id.starts_with("out_")
                         && !parsed.id.is_empty()
                         && !parsed.id.starts_with("out_")
                     {
                         existing.id = parsed.id;
                     }
-                    if parsed.ts > 0 && existing.ts != parsed.ts {
+                    let is_undo_msg = parsed.text.trim() == "[Tin nhắn đã thu hồi]";
+                    if parsed.ts > 0
+                        && existing.ts != parsed.ts
+                        && (!is_undo_msg || existing.ts == 0)
+                    {
                         existing.ts = parsed.ts;
                         existing.time = parsed.time;
                     }
-                    if parsed.text.trim() == "[Tin nhắn đã thu hồi]" {
-                        if !existing.text.starts_with("[Đã thu hồi]") {
-                            if existing.text.trim().is_empty() {
-                                existing.text = "[Tin nhắn đã thu hồi]".to_string();
-                            } else {
-                                existing.text = format!("[Đã thu hồi] {}", existing.text);
-                            }
-                        }
-                    }
+                    apply_recall_merge(existing, &parsed.text);
                     if existing.sticker_id.is_none() && parsed.sticker_id.is_some() {
                         existing.sticker_id = parsed.sticker_id;
                         existing.sticker_cate_id = parsed.sticker_cate_id;
@@ -6653,7 +6877,10 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                         existing.link_desc = parsed.link_desc;
                         existing.link_thumb = parsed.link_thumb;
                         existing.link_src = parsed.link_src;
-                        if !parsed.text.is_empty() {
+                        if !parsed.text.is_empty()
+                            && !existing.text.starts_with("[Đã thu hồi]")
+                            && existing.text.trim() != "[Tin nhắn đã thu hồi]"
+                        {
                             existing.text = parsed.text;
                         }
                     }
@@ -6678,7 +6905,7 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                 }
                 if is_incoming {
                     for em in t.messages.iter_mut() {
-                        if em.is_outgoing && (em.ts <= parsed_ts || parsed_ts == 0) {
+                        if em.is_outgoing && em.ts > 0 && (em.ts <= parsed_ts || parsed_ts == 0) {
                             em.delivery = crate::message_model::DeliveryState::Read;
                         }
                     }
@@ -6778,17 +7005,27 @@ pub fn merge_group_history(thread: &mut Thread, resp: &Value) {
                 let existing = &mut thread.messages[row];
                 identities.remove(existing, row);
                 existing.merge_reaction_metadata(&m);
+                merge_delivery_state(&mut existing.delivery, m.delivery);
                 if existing.id.starts_with("out_") && !m.id.is_empty() && !m.id.starts_with("out_")
                 {
                     existing.id = m.id.clone();
                 }
+                let is_undo_msg = m.text.trim() == "[Tin nhắn đã thu hồi]";
+                if m.ts > 0 && existing.ts != m.ts && (!is_undo_msg || existing.ts == 0) {
+                    existing.ts = m.ts;
+                    existing.time = m.time;
+                }
+                apply_recall_merge(existing, &m.text);
                 if existing.link_url.is_none() && m.link_url.is_some() {
                     existing.link_url = m.link_url;
                     existing.link_title = m.link_title;
                     existing.link_desc = m.link_desc;
                     existing.link_thumb = m.link_thumb;
                     existing.link_src = m.link_src;
-                    if !m.text.is_empty() {
+                    if !m.text.is_empty()
+                        && !existing.text.starts_with("[Đã thu hồi]")
+                        && existing.text.trim() != "[Tin nhắn đã thu hồi]"
+                    {
                         existing.text = m.text;
                     }
                 }
@@ -10147,5 +10384,174 @@ mod send_identity_tests {
             let err = json!({"error_code": code, "error_message": "fail", "data": {}});
             assert!(parse_voice_send_response(&err, 77, 65).is_err(), "code {code}");
         }
+    }
+
+    #[test]
+    fn pr125_and_issue126_contact_name_and_placeholder_distinction() {
+        use serde_json::json;
+
+        assert!(is_placeholder_thread_name("", "987654"));
+        assert!(is_placeholder_thread_name("987654", "987654"));
+        assert!(is_placeholder_thread_name("Người dùng 987654", "987654"));
+        assert!(is_placeholder_thread_name("Nhóm 987654", "987654"));
+
+        // Genuine contact aliases ("123") and group prefix names ("Nhóm học") are NOT placeholders.
+        assert!(!is_placeholder_thread_name("123", "987654"));
+        assert!(!is_placeholder_thread_name("Nhóm học", "987654"));
+
+        // parse_thread marks displayName as contact_name = true.
+        let friend_json = json!({
+            "userId": "987654",
+            "displayName": "123",
+            "zaloName": "Nguyen Van A"
+        });
+        let mut t = parse_thread(&friend_json).expect("parse_thread");
+        assert_eq!(t.name, "123");
+        assert!(t.presentation.contact_name);
+
+        // Non-contact name or placeholder cannot overwrite a contact_name alias.
+        adopt_thread_name(&mut t, "Nguyen Van A".into(), false);
+        assert_eq!(t.name, "123");
+        assert!(t.presentation.contact_name);
+
+        adopt_thread_name(&mut t, "Người dùng 987654".into(), false);
+        assert_eq!(t.name, "123");
+
+        // Updated contact_name can update it.
+        adopt_thread_name(&mut t, "456".into(), true);
+        assert_eq!(t.name, "456");
+        assert!(t.presentation.contact_name);
+
+        // Group prefix "Nhóm học" is preserved over "Nhóm {id}" placeholder.
+        let group_json = json!({
+            "groupId": "777888",
+            "name": "Nhóm học"
+        });
+        let mut g = parse_thread(&group_json).expect("parse_thread group");
+        assert_eq!(g.name, "Nhóm học");
+        adopt_thread_name(&mut g, "Nhóm 777888".into(), false);
+        assert_eq!(g.name, "Nhóm học");
+    }
+
+    #[test]
+    fn issue128_my_cloud_text_extraction_and_routing() {
+        use serde_json::json;
+
+        let self_uid = "10001";
+        let cloud_id = "20002";
+
+        // 1. Plain string content sent to send2me_id routes to cloud_id and extracts text.
+        let msg_str = json!({
+            "msgId": "mc-1",
+            "cliMsgId": "cli-mc-1",
+            "uidFrom": self_uid,
+            "idTo": cloud_id,
+            "msgType": "webchat",
+            "content": "Ghi chú đám mây 1",
+            "ts": "1700000001000"
+        });
+        let (tid1, is_group1) =
+            extract_message_thread_id_ext(&msg_str, &msg_str, false, Some(cloud_id)).unwrap();
+        assert_eq!(tid1, cloud_id);
+        assert!(!is_group1);
+        let cm1 = parse_chat_message(&msg_str).unwrap();
+        assert_eq!(cm1.text, "Ghi chú đám mây 1");
+
+        // 2. Structured object content in My Cloud extracts nested text/title/description.
+        let msg_obj = json!({
+            "msgId": "mc-2",
+            "cliMsgId": "cli-mc-2",
+            "uidFrom": "0",
+            "idTo": cloud_id,
+            "msgType": "webchat",
+            "content": {
+                "data": {
+                    "text": "Ghi chú có cấu trúc"
+                }
+            },
+            "ts": "1700000002000"
+        });
+        let (tid2, is_group2) =
+            extract_message_thread_id_ext(&msg_obj, &msg_obj, false, Some(cloud_id)).unwrap();
+        assert_eq!(tid2, cloud_id);
+        assert!(!is_group2);
+        let cm2 = parse_chat_message(&msg_obj).unwrap();
+        assert_eq!(cm2.text, "Ghi chú có cấu trúc");
+        assert!(cm2.is_outgoing);
+        assert_eq!(cm2.delivery, crate::message_model::DeliveryState::ServerAccepted);
+    }
+
+    #[test]
+    fn issue128_recall_deduplication_and_issue81_initial_sent_status() {
+        use serde_json::json;
+
+        let peer_uid = "30003";
+
+        let orig = json!({
+            "msgId": "msg-500",
+            "cliMsgId": "cli-500",
+            "uidFrom": "0",
+            "idTo": peer_uid,
+            "msgType": "webchat",
+            "content": "Tin nhắn gốc",
+            "ts": "1700000010000"
+        });
+        let cm_orig = parse_chat_message(&orig).unwrap();
+        assert_eq!(cm_orig.delivery, crate::message_model::DeliveryState::ServerAccepted);
+
+        // Recall event where globalMsgId is "0" on outer envelope and real target ID is in content.
+        let undo1 = json!({
+            "msgId": "undo-notif-1",
+            "cliMsgId": "cli-500",
+            "globalMsgId": "0",
+            "uidFrom": "0",
+            "idTo": peer_uid,
+            "msgType": "chat.undo",
+            "content": {
+                "globalMsgId": "msg-500",
+                "cliMsgId": "cli-500",
+                "deleteMsg": 1
+            },
+            "ts": "1700000020000"
+        });
+        let undo2 = json!({
+            "msgId": "undo-notif-2",
+            "cliMsgId": "cli-500",
+            "globalMsgId": "0",
+            "uidFrom": "0",
+            "idTo": peer_uid,
+            "msgType": "chat.undo",
+            "content": {
+                "globalMsgId": "msg-500",
+                "cliMsgId": "cli-500",
+                "deleteMsg": 1
+            },
+            "ts": "1700000025000"
+        });
+
+        let cm_undo1 = parse_chat_message(&undo1).unwrap();
+        let _cm_undo2 = parse_chat_message(&undo2).unwrap();
+        assert_eq!(cm_undo1.id, "msg-500");
+        assert_eq!(cm_undo1.text, "[Tin nhắn đã thu hồi]");
+
+        let mut threads = vec![Thread {
+            id: peer_uid.into(),
+            name: "Bạn bè".into(),
+            messages: vec![cm_orig],
+            ..Default::default()
+        }];
+
+        let resp = json!({
+            "data": [undo1, undo2]
+        });
+        merge_previews(&mut threads, &resp);
+
+        assert_eq!(
+            threads[0].messages.len(),
+            1,
+            "recall must update in place without inserting duplicate rows"
+        );
+        assert_eq!(threads[0].messages[0].text, "[Đã thu hồi] Tin nhắn gốc");
+        assert_eq!(threads[0].messages[0].ts, 1700000010000);
     }
 }

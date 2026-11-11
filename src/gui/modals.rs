@@ -586,13 +586,14 @@ impl ZaloGuiApp {
             if elapsed_ms >= POPUP_DURATION_MS || !self.settings.enable_notifications {
                 close_popup = true;
             } else {
+                const POPUP_TITLE: &str = "ctdozlite — Tin nhắn mới";
                 ctx.request_repaint_after(Duration::from_millis(200));
-                let popup_w = 380.0_f32;
-                let popup_h = 156.0_f32;
+                let popup_w = 384.0_f32;
+                let popup_h = 148.0_f32;
                 let corner_pos = get_desktop_bottom_right_pos(ctx, popup_w, popup_h);
                 let vp_id = egui::ViewportId::from_hash_of("zalo_corner_notification_popup");
                 let builder = egui::ViewportBuilder::default()
-                    .with_title("ctdozlite — Tin nhắn mới")
+                    .with_title(POPUP_TITLE)
                     .with_decorations(false)
                     .with_always_on_top()
                     .with_taskbar(false)
@@ -602,7 +603,7 @@ impl ZaloGuiApp {
 
                 let tid_cl = popup.thread_id.clone();
                 let s_name = popup.sender_name.clone();
-                let p_text = popup.preview_text.clone();
+                let p_text = popup.preview_text.replace(['\r', '\n'], " ");
                 let is_grp = popup.is_group;
                 let unread_cnt = popup.unread_total;
                 let avt_tex = popup
@@ -615,7 +616,15 @@ impl ZaloGuiApp {
                 let mut paused = !draft_local.trim().is_empty();
 
                 ctx.show_viewport_immediate(vp_id, builder, |vp_ctx, _class| {
-                    let theme_sig = (pal.is_dark, pal.primary.to_array(), pal.bg_elevated.to_array());
+                    #[cfg(target_os = "windows")]
+                    if super::win32_frameless::sync_frameless_window_by_title(POPUP_TITLE) {
+                        vp_ctx.request_repaint();
+                    }
+                    let theme_sig = (
+                        pal.is_dark,
+                        pal.primary.to_array(),
+                        pal.bg_elevated.to_array(),
+                    );
                     let needs_style = vp_ctx.data(|d| {
                         d.get_temp::<(bool, [u8; 4], [u8; 4])>(Id::new("popup_theme_sig"))
                             != Some(theme_sig)
@@ -625,9 +634,15 @@ impl ZaloGuiApp {
                         vp_ctx.data_mut(|d| {
                             d.insert_temp(Id::new("popup_theme_sig"), theme_sig);
                         });
+                        vp_ctx.request_repaint();
                     }
-                    vp_ctx.request_repaint_after(Duration::from_millis(200));
-                    if vp_ctx.input(|i| i.pointer.has_pointer()) {
+                    // Keep early frames responsive so post-show winit style overrides are stripped immediately.
+                    if elapsed_ms < 250 {
+                        vp_ctx.request_repaint();
+                    } else {
+                        vp_ctx.request_repaint_after(Duration::from_millis(200));
+                    }
+                    if vp_ctx.input(|i| i.pointer.hover_pos().is_some()) {
                         paused = true;
                     }
                     if vp_ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -635,91 +650,120 @@ impl ZaloGuiApp {
                     }
 
                     let card_bg = pal.bg_elevated;
+                    let header_accent = if pal.is_dark {
+                        pal.primary_hover
+                    } else {
+                        pal.primary
+                    };
                     egui::CentralPanel::default()
                         .frame(
                             egui::Frame::none()
                                 .fill(card_bg)
-                                .stroke(Stroke::new(1.0_f32, pal.primary))
-                                .rounding(Rounding::same(12.0))
-                                .inner_margin(Margin::symmetric(14.0, 10.0)),
+                                .rounding(Rounding::ZERO)
+                                .inner_margin(Margin {
+                                    left: 14.0,
+                                    right: 14.0,
+                                    top: 11.0,
+                                    bottom: 11.0,
+                                }),
                         )
                         .show(vp_ctx, |ui| {
-                            let full_rect = ui.max_rect();
-                            // Top accent line
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    Pos2::new(full_rect.left() - 12.0, full_rect.top() - 10.0),
-                                    Vec2::new(popup_w, 3.0),
-                                ),
-                                Rounding {
-                                    nw: 12.0,
-                                    ne: 12.0,
-                                    sw: 0.0,
-                                    se: 0.0,
-                                },
-                                pal.primary,
-                            );
+                            ui.spacing_mut().item_spacing.y = 0.0;
 
                             // Header row
                             ui.horizontal(|ui| {
                                 if let Some(ref ltex) = logo_tex {
                                     ui.add(
-                                        egui::Image::from_texture((ltex.id(), Vec2::splat(15.0)))
-                                            .rounding(Rounding::same(6.0)),
+                                        egui::Image::from_texture((ltex.id(), Vec2::splat(16.0)))
+                                            .rounding(Rounding::same(4.0)),
                                     );
                                 } else {
                                     let (dr, _) =
                                         ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                                     ui.painter().circle_filled(dr.center(), 4.0, pal.primary);
                                 }
+                                ui.add_space(4.0);
                                 ui.label(
                                     RichText::new("ctdozlite · Tin nhắn mới")
                                         .size(11.5)
-                                        .color(pal.primary)
+                                        .color(header_accent)
                                         .strong(),
                                 );
                                 if unread_cnt > 1 {
-                                    egui::Frame::none()
-                                        .fill(pal.primary.linear_multiply(0.18))
-                                        .rounding(Rounding::same(11.0))
-                                        .inner_margin(Margin::symmetric(6.0, 1.5))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                RichText::new(format!("{unread_cnt} chưa đọc"))
-                                                    .size(11.0)
-                                                    .color(pal.primary)
-                                                    .strong(),
-                                            );
-                                        });
+                                    ui.add_space(6.0);
+                                    draw_inline_pill(
+                                        ui,
+                                        &format!("{unread_cnt} chưa đọc"),
+                                        10.5,
+                                        header_accent,
+                                        pal.primary.linear_multiply(0.18),
+                                        Stroke::NONE,
+                                        8.5,
+                                        6.0,
+                                        18.0,
+                                        true,
+                                    );
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        let close_btn = egui::Button::new(
-                                            RichText::new(lucide::X)
-                                                .size(12.5)
-                                                .color(pal.text_muted),
-                                        )
-                                        .frame(false);
-                                        if ui
-                                            .add(close_btn)
+                                        let (close_r, close_resp) = ui.allocate_exact_size(
+                                            Vec2::new(22.0, 22.0),
+                                            Sense::click(),
+                                        );
+                                        if close_resp.hovered() {
+                                            ui.painter().rect_filled(
+                                                close_r,
+                                                Rounding::same(5.0),
+                                                pal.bg_hover,
+                                            );
+                                        }
+                                        draw_lucide_icon(
+                                            ui.painter(),
+                                            close_r.center(),
+                                            lucide::X,
+                                            12.0,
+                                            if close_resp.hovered() {
+                                                pal.text_primary
+                                            } else {
+                                                pal.text_secondary
+                                            },
+                                        );
+                                        if close_resp
                                             .on_hover_cursor(CursorIcon::PointingHand)
                                             .on_hover_text("Đóng thông báo (Esc)")
                                             .clicked()
                                         {
                                             close_popup = true;
                                         }
-                                        ui.add_space(4.0);
+
+                                        ui.add_space(6.0);
+                                        let open_fg = if pal.is_dark {
+                                            Color32::from_rgb(147, 197, 253)
+                                        } else {
+                                            pal.primary
+                                        };
                                         let open_btn = egui::Button::new(
                                             RichText::new("Mở chat")
-                                                .size(11.5)
-                                                .color(pal.primary)
+                                                .size(11.2)
+                                                .color(open_fg)
                                                 .strong(),
                                         )
-                                        .fill(pal.primary.linear_multiply(0.14))
-                                        .rounding(Rounding::same(6.0));
-                                        if ui
-                                            .add(open_btn)
+                                        .fill(pal.primary.linear_multiply(0.18))
+                                        .stroke(Stroke::new(
+                                            1.0_f32,
+                                            pal.primary.linear_multiply(0.45),
+                                        ))
+                                        .rounding(Rounding::same(6.0))
+                                        .min_size(Vec2::new(58.0, 22.0));
+                                        let open_resp = ui
+                                            .scope(|ui| {
+                                                ui.spacing_mut().button_padding =
+                                                    Vec2::new(8.0, 3.0);
+                                                ui.add(open_btn)
+                                            })
+                                            .inner;
+                                        if open_resp
                                             .on_hover_cursor(CursorIcon::PointingHand)
                                             .clicked()
                                         {
@@ -730,11 +774,28 @@ impl ZaloGuiApp {
                                 );
                             });
 
-                            ui.add_space(6.0);
+                            ui.add_space(8.0);
 
-                            // Body row: Avatar + Sender + Message Preview (clickable to jump to chat)
-                            let body_resp = ui
-                                .horizontal(|ui| {
+                            // Body row: full-width clickable card strip (Avatar + Sender + Preview)
+                            let body_w = ui.available_width();
+                            let (body_rect, _) =
+                                ui.allocate_exact_size(Vec2::new(body_w, 48.0), Sense::hover());
+                            let body_click = ui.interact(
+                                body_rect,
+                                Id::new("popup_body_jump_click"),
+                                Sense::click(),
+                            );
+                            if body_click.hovered() {
+                                ui.painter().rect_filled(
+                                    body_rect.expand2(Vec2::new(4.0, 2.0)),
+                                    Rounding::same(8.0),
+                                    pal.bg_hover.linear_multiply(0.55),
+                                );
+                                vp_ctx.set_cursor_icon(CursorIcon::PointingHand);
+                            }
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(body_rect), |ui| {
+                                ui.style_mut().interaction.selectable_labels = false;
+                                ui.horizontal_centered(|ui| {
                                     let (av_rect, _) =
                                         ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
                                     if let Some(ref tex) = avt_tex {
@@ -791,64 +852,66 @@ impl ZaloGuiApp {
                                     ui.painter().circle_filled(dot_pos, 5.5, card_bg);
                                     ui.painter().circle_filled(dot_pos, 4.0, pal.accent_online);
 
-                                    ui.add_space(8.0);
-                                    ui.vertical(|ui| {
-                                        ui.set_max_width(popup_w - 86.0);
-                                        let s_short: String = if s_name.chars().count() > 36 {
-                                            let t: String = s_name.chars().take(36).collect();
-                                            format!("{t}…")
-                                        } else {
-                                            s_name.clone()
-                                        };
-                                        ui.label(
-                                            RichText::new(s_short)
-                                                .size(13.5)
-                                                .color(pal.text_primary)
-                                                .strong(),
-                                        );
-                                        ui.add_space(2.0);
-                                        ui.label(
-                                            RichText::new(&p_text)
-                                                .size(12.0)
-                                                .color(pal.text_secondary),
-                                        );
-                                    });
-                                })
-                                .response;
-
-                            let body_click = ui.interact(
-                                body_resp.rect,
-                                Id::new("popup_body_jump_click"),
-                                Sense::click(),
-                            );
-                            if body_click.hovered() {
-                                vp_ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
+                                    ui.add_space(10.0);
+                                    let text_w = (body_rect.width() - 56.0).max(120.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(text_w, 42.0),
+                                        Layout::top_down(Align::Min),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.y = 3.0;
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&s_name)
+                                                        .size(13.5)
+                                                        .color(pal.text_primary)
+                                                        .strong(),
+                                                )
+                                                .truncate(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&p_text)
+                                                        .size(12.2)
+                                                        .color(pal.text_secondary),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
+                                    );
+                                });
+                            });
                             if body_click.clicked() {
                                 jump_to_tid = Some(tid_cl.clone());
                                 close_popup = true;
                             }
 
-                            ui.add_space(6.0);
+                            ui.add_space(8.0);
 
                             // Quick Reply bar right inside the corner popup
                             ui.horizontal(|ui| {
-                                let input_w = (ui.available_width() - 58.0).max(160.0);
-                                let te_resp = ui.add_sized(
-                                    [input_w, 29.0],
-                                    egui::TextEdit::singleline(&mut draft_local)
-                                        .hint_text("Trả lời nhanh… (Enter để gửi)")
-                                        .margin(Margin::symmetric(8.0, 5.0))
-                                        .font(FontId::proportional(12.0)),
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                let send_w = 52.0_f32;
+                                let input_w = (ui.available_width() - send_w - 6.0).max(160.0);
+                                let te_resp = super::render_styled_text_field(
+                                    ui,
+                                    &mut draft_local,
+                                    super::StyledFieldSpec {
+                                        hint: "Trả lời nhanh… (Enter để gửi)",
+                                        size: Vec2::new(input_w, 30.0),
+                                        font_size: 12.0,
+                                        margin: Margin::symmetric(10.0, 6.0),
+                                        is_password: false,
+                                    },
+                                    pal,
                                 );
                                 if te_resp.has_focus() {
                                     paused = true;
                                 }
-                                let enter_send = te_resp.lost_focus()
+                                let enter_send = (te_resp.lost_focus() || te_resp.has_focus())
                                     && vp_ctx.input(|i| i.key_pressed(Key::Enter));
                                 let btn_send = ui
                                     .add_sized(
-                                        [50.0, 29.0],
+                                        [send_w, 30.0],
                                         egui::Button::new(
                                             RichText::new("Gửi")
                                                 .size(12.0)
@@ -870,24 +933,41 @@ impl ZaloGuiApp {
                                     close_popup = true;
                                 }
                             });
-
-                            // Countdown progress bar at bottom edge
-                            let frac = if paused {
-                                1.0_f32
-                            } else {
-                                (1.0 - (elapsed_ms as f32 / POPUP_DURATION_MS as f32))
-                                    .clamp(0.0, 1.0)
-                            };
-                            let bar_y = full_rect.bottom() + 7.0;
-                            ui.painter().rect_filled(
-                                Rect::from_min_size(
-                                    Pos2::new(full_rect.left() - 12.0, bar_y),
-                                    Vec2::new(popup_w * frac, 2.5),
-                                ),
-                                Rounding::ZERO,
-                                pal.primary.linear_multiply(0.75),
-                            );
                         });
+
+                    // Paint crisp 1px outer border, top accent stripe, and bottom countdown bar
+                    // directly from `vp_ctx.screen_rect()` so margins never clip or misalign them.
+                    let vp_rect = vp_ctx.screen_rect();
+                    let overlay = vp_ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        Id::new("popup_chrome_overlay"),
+                    ));
+                    overlay.rect_stroke(
+                        vp_rect.shrink(0.5),
+                        Rounding::ZERO,
+                        Stroke::new(1.0_f32, pal.border),
+                    );
+                    overlay.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(vp_rect.left() + 1.0, vp_rect.top() + 1.0),
+                            Vec2::new((vp_rect.width() - 2.0).max(0.0), 2.5),
+                        ),
+                        Rounding::ZERO,
+                        pal.primary,
+                    );
+                    let frac = if paused {
+                        1.0_f32
+                    } else {
+                        (1.0 - (elapsed_ms as f32 / POPUP_DURATION_MS as f32)).clamp(0.0, 1.0)
+                    };
+                    overlay.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(vp_rect.left() + 1.0, vp_rect.bottom() - 3.5),
+                            Vec2::new(((vp_rect.width() - 2.0) * frac).max(0.0), 2.5),
+                        ),
+                        Rounding::ZERO,
+                        pal.primary.linear_multiply(0.85),
+                    );
                 });
 
                 popup.reply_draft = draft_local;
@@ -901,7 +981,7 @@ impl ZaloGuiApp {
             ctx.request_repaint();
         }
         if let Some((tid, is_group, text)) = quick_reply_send {
-            let now_ts = crate::login::unix_now() as i64;
+            let now_ts = crate::login::unix_now();
             let now_time = crate::ui::clock();
             if let Some(t) = self.threads.iter_mut().find(|t| t.id == tid) {
                 t.preview = format!("Bạn: {text}");
@@ -946,10 +1026,8 @@ impl ZaloGuiApp {
         ctx.request_repaint_after(Duration::from_millis(200));
         egui::Area::new(Id::new("floating_toast_notice"))
             .order(egui::Order::Tooltip)
-            .fixed_pos(Pos2::new(
-                (screen.right() - 320.0).max(80.0),
-                screen.bottom() - 54.0,
-            ))
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -16.0))
+            .constrain_to(screen.shrink(8.0))
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::none()

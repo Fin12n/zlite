@@ -170,6 +170,11 @@ mod win32_frameless {
         any_match: usize,
     }
 
+    struct EnumTitleState<'a> {
+        target_title: &'a str,
+        matched: usize,
+    }
+
     #[link(name = "opengl32")]
     extern "system" {
         fn wglGetCurrentDC() -> usize;
@@ -178,6 +183,16 @@ mod win32_frameless {
     #[link(name = "kernel32")]
     extern "system" {
         fn GetCurrentThreadId() -> u32;
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: usize,
+            dw_attribute: u32,
+            pv_attribute: *const u32,
+            cb_attribute: u32,
+        ) -> i32;
     }
 
     #[link(name = "user32")]
@@ -190,6 +205,7 @@ mod win32_frameless {
             l_param: isize,
         ) -> i32;
         fn GetWindow(hwnd: usize, u_cmd: u32) -> usize;
+        fn GetWindowTextW(hwnd: usize, lp_string: *mut u16, n_max_count: i32) -> i32;
         fn IsWindow(hwnd: usize) -> i32;
         fn IsWindowVisible(hwnd: usize) -> i32;
         fn GetWindowLongW(hwnd: usize, n_index: i32) -> i32;
@@ -387,6 +403,60 @@ mod win32_frameless {
         // SAFETY: `GetActiveWindow` returns the thread's active `HWND` or zero.
         let active = unsafe { GetActiveWindow() };
         get_monitor_work_area(active)
+    }
+
+    unsafe extern "system" fn enum_title_window_cb(hwnd: usize, l_param: isize) -> i32 {
+        // SAFETY: `l_param` points to stack-allocated `EnumTitleState` owned by `sync_frameless_window_by_title`.
+        let state = unsafe { &mut *(l_param as *mut EnumTitleState<'_>) };
+        let mut buf = [0u16; 128];
+        // SAFETY: `hwnd` comes from `EnumThreadWindows` and `buf` is a 128-code-unit stack buffer.
+        let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+        if len > 0 {
+            let title = String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]);
+            if title == state.target_title {
+                state.matched = hwnd;
+                return 0;
+            }
+        }
+        1
+    }
+
+    /// Strip non-client caption/border bits for a secondary frameless viewport (such as the
+    /// corner notification popup) identified by its exact window title on the GUI thread.
+    pub(super) fn sync_frameless_window_by_title(title: &str) -> bool {
+        let mut state = EnumTitleState {
+            target_title: title,
+            matched: 0,
+        };
+        // SAFETY: `state` outlives the synchronous `EnumThreadWindows` call on this thread.
+        unsafe {
+            let tid = GetCurrentThreadId();
+            let _ = EnumThreadWindows(
+                tid,
+                enum_title_window_cb,
+                (&mut state as *mut EnumTitleState<'_>) as isize,
+            );
+        }
+        if state.matched == 0 {
+            return false;
+        }
+        let changed = sync_frameless_style(state.matched);
+        if changed {
+            // Enable hardware-clipped rounded corners on Windows 11; Windows 10 ignores this safely.
+            const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+            const DWMWCP_ROUND: u32 = 2;
+            let pref = DWMWCP_ROUND;
+            // SAFETY: `state.matched` is a valid HWND and `pref` is a stack 4-byte DWORD.
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    state.matched,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &pref,
+                    std::mem::size_of::<u32>() as u32,
+                )
+            };
+        }
+        changed
     }
 }
 
@@ -3128,6 +3198,11 @@ impl ZaloGuiApp {
             if hwnd != 0 && win32_frameless::sync_frameless_style(hwnd) {
                 ctx.request_repaint();
             }
+            if self.incoming_popup.is_some()
+                && win32_frameless::sync_frameless_window_by_title("ctdozlite — Tin nhắn mới")
+            {
+                ctx.request_repaint();
+            }
             if self.win_initial_sync_frames > 0 {
                 self.win_initial_sync_frames -= 1;
                 ctx.request_repaint();
@@ -3891,12 +3966,16 @@ impl ZaloGuiApp {
                                                     .strong(),
                                             );
                                             ui.add_space(5.0);
-                                            let phone_resp = render_login_text_field(
+                                            let phone_resp = render_styled_text_field(
                                                 ui,
                                                 &mut self.phone_input,
-                                                "Ví dụ: 0912345678",
-                                                inner_w,
-                                                false,
+                                                StyledFieldSpec {
+                                                    hint: "Ví dụ: 0912345678",
+                                                    size: Vec2::new(inner_w, 38.0),
+                                                    font_size: 14.0,
+                                                    margin: Margin::symmetric(12.0, 9.0),
+                                                    is_password: false,
+                                                },
                                                 pal,
                                             );
                                             ui.add_space(12.0);
@@ -3908,12 +3987,16 @@ impl ZaloGuiApp {
                                                     .strong(),
                                             );
                                             ui.add_space(5.0);
-                                            let pass_resp = render_login_text_field(
+                                            let pass_resp = render_styled_text_field(
                                                 ui,
                                                 &mut self.password_input,
-                                                "Nhập mật khẩu Zalo",
-                                                inner_w,
-                                                true,
+                                                StyledFieldSpec {
+                                                    hint: "Nhập mật khẩu Zalo",
+                                                    size: Vec2::new(inner_w, 38.0),
+                                                    font_size: 14.0,
+                                                    margin: Margin::symmetric(12.0, 9.0),
+                                                    is_password: true,
+                                                },
                                                 pal,
                                             );
                                             let enter_pressed =
@@ -3985,14 +4068,20 @@ impl ZaloGuiApp {
     }
 }
 
-/// Render a palette-locked single-line login field so OS light/dark theme overrides never
-/// wash out input background contrast.
-fn render_login_text_field(
+struct StyledFieldSpec<'a> {
+    hint: &'a str,
+    size: Vec2,
+    font_size: f32,
+    margin: Margin,
+    is_password: bool,
+}
+
+/// Render a palette-locked single-line text input so OS light/dark theme overrides never
+/// wash out input contrast in login fields or notification quick-reply boxes.
+fn render_styled_text_field(
     ui: &mut egui::Ui,
     value: &mut String,
-    hint: &str,
-    width: f32,
-    is_password: bool,
+    spec: StyledFieldSpec<'_>,
     pal: &ThemePalette,
 ) -> egui::Response {
     ui.scope(|ui| {
@@ -4004,13 +4093,14 @@ fn render_login_text_field(
         vis.widgets.active.bg_stroke = Stroke::new(1.5_f32, pal.primary);
         vis.selection.stroke = Stroke::new(1.5_f32, pal.primary);
         ui.add_sized(
-            [width, 38.0],
+            [spec.size.x, spec.size.y],
             egui::TextEdit::singleline(value)
-                .password(is_password)
+                .password(spec.is_password)
                 .text_color(pal.text_primary)
-                .margin(Margin::symmetric(12.0, 9.0))
+                .font(FontId::proportional(spec.font_size))
+                .margin(spec.margin)
                 .vertical_align(Align::Center)
-                .hint_text(RichText::new(hint).color(pal.text_muted)),
+                .hint_text(RichText::new(spec.hint).color(pal.text_muted)),
         )
     })
     .inner

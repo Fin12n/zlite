@@ -517,26 +517,9 @@ impl ZaloGuiApp {
         fn get_desktop_bottom_right_pos(ctx: &egui::Context, popup_w: f32, popup_h: f32) -> Pos2 {
             #[cfg(target_os = "windows")]
             {
-                #[repr(C)]
-                #[derive(Default, Copy, Clone)]
-                struct WinRect {
-                    left: i32,
-                    top: i32,
-                    right: i32,
-                    bottom: i32,
-                }
-                #[repr(C)]
-                struct MonitorInfo {
-                    cb_size: u32,
-                    rc_monitor: WinRect,
-                    rc_work: WinRect,
-                    dw_flags: u32,
-                }
+                use super::WinRect;
                 #[link(name = "user32")]
                 extern "system" {
-                    fn GetActiveWindow() -> usize;
-                    fn MonitorFromWindow(hwnd: usize, dw_flags: u32) -> usize;
-                    fn GetMonitorInfoW(hmonitor: usize, lpmi: *mut MonitorInfo) -> i32;
                     fn SystemParametersInfoW(
                         ui_action: u32,
                         ui_param: u32,
@@ -550,32 +533,13 @@ impl ZaloGuiApp {
                 extern "system" {
                     fn GetDeviceCaps(hdc: usize, index: i32) -> i32;
                 }
-                let mut work = WinRect::default();
-                let mut got_work = false;
-                // Prefer the monitor currently hosting the active window for multi-monitor setups.
-                let active_hwnd = unsafe { GetActiveWindow() };
-                if active_hwnd != 0 {
-                    let hmon = unsafe { MonitorFromWindow(active_hwnd, 2) }; // MONITOR_DEFAULTTONEAREST
-                    if hmon != 0 {
-                        let mut mi = MonitorInfo {
-                            cb_size: std::mem::size_of::<MonitorInfo>() as u32,
-                            rc_monitor: WinRect::default(),
-                            rc_work: WinRect::default(),
-                            dw_flags: 0,
-                        };
-                        if unsafe { GetMonitorInfoW(hmon, &mut mi) } != 0
-                            && mi.rc_work.right > mi.rc_work.left
-                            && mi.rc_work.bottom > mi.rc_work.top
-                        {
-                            work = mi.rc_work;
-                            got_work = true;
-                        }
-                    }
-                }
+                let mut work = super::win32_frameless::active_window_work_area().unwrap_or_default();
+                let mut got_work = work.width() > 0 && work.height() > 0;
                 if !got_work {
+                    // SAFETY: `work` is a zero-initialized stack `WinRect` passed to SPI_GETWORKAREA.
                     got_work = unsafe { SystemParametersInfoW(0x0030, 0, &mut work, 0) } != 0
-                        && work.right > work.left
-                        && work.bottom > work.top;
+                        && work.width() > 0
+                        && work.height() > 0;
                 }
                 if got_work {
                     let hdc = unsafe { GetDC(0) };

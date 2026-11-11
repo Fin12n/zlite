@@ -41,6 +41,355 @@ fn merge_sent_message(thread: &mut Thread, message: ChatMessage) {
     crate::chat::merge_sent_message(thread, message);
 }
 
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WinRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl WinRect {
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn width(self) -> i32 {
+        self.right.saturating_sub(self.left)
+    }
+
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    fn height(self) -> i32 {
+        self.bottom.saturating_sub(self.top)
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug)]
+struct WinResizeDrag {
+    dir: egui::ResizeDirection,
+    start_cursor_x: i32,
+    start_cursor_y: i32,
+    start_rect: WinRect,
+}
+
+/// Compute the target outer window rectangle when dragging a border or corner edge,
+/// clamping to `min_w`/`min_h` while keeping the opposite edge anchored.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn compute_resized_rect(
+    start: WinRect,
+    dir: egui::ResizeDirection,
+    dx: i32,
+    dy: i32,
+    min_w: i32,
+    min_h: i32,
+) -> WinRect {
+    let min_w = min_w.max(1);
+    let min_h = min_h.max(1);
+    let mut r = start;
+
+    match dir {
+        egui::ResizeDirection::West
+        | egui::ResizeDirection::NorthWest
+        | egui::ResizeDirection::SouthWest => {
+            let max_left = r.right.saturating_sub(min_w);
+            r.left = start.left.saturating_add(dx).min(max_left);
+        }
+        egui::ResizeDirection::East
+        | egui::ResizeDirection::NorthEast
+        | egui::ResizeDirection::SouthEast => {
+            let min_right = r.left.saturating_add(min_w);
+            r.right = start.right.saturating_add(dx).max(min_right);
+        }
+        egui::ResizeDirection::North | egui::ResizeDirection::South => {}
+    }
+
+    match dir {
+        egui::ResizeDirection::North
+        | egui::ResizeDirection::NorthWest
+        | egui::ResizeDirection::NorthEast => {
+            let max_top = r.bottom.saturating_sub(min_h);
+            r.top = start.top.saturating_add(dy).min(max_top);
+        }
+        egui::ResizeDirection::South
+        | egui::ResizeDirection::SouthWest
+        | egui::ResizeDirection::SouthEast => {
+            let min_bottom = r.top.saturating_add(min_h);
+            r.bottom = start.bottom.saturating_add(dy).max(min_bottom);
+        }
+        egui::ResizeDirection::West | egui::ResizeDirection::East => {}
+    }
+
+    r
+}
+
+#[cfg(target_os = "windows")]
+mod win32_frameless {
+    use super::WinRect;
+
+    const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
+
+    // winit 0.30 keeps WS_CAPTION | WS_BORDER | WS_THICKFRAME and WS_EX_WINDOWEDGE even
+    // for undecorated windows, which makes Intel/hybrid WGL drivers offset rendering by (7, 29)px.
+    const WS_BORDER: u32 = 0x0080_0000;
+    const WS_DLGFRAME: u32 = 0x0040_0000;
+    const WS_CAPTION: u32 = WS_BORDER | WS_DLGFRAME;
+    const WS_THICKFRAME: u32 = 0x0004_0000;
+    const STRIP_STYLE_MASK: u32 = WS_CAPTION | WS_THICKFRAME;
+
+    const WS_EX_DLGMODALFRAME: u32 = 0x0000_0001;
+    const WS_EX_WINDOWEDGE: u32 = 0x0000_0100;
+    const WS_EX_CLIENTEDGE: u32 = 0x0000_0200;
+    const STRIP_EX_STYLE_MASK: u32 = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE;
+
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    const GW_OWNER: u32 = 4;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+    #[repr(C)]
+    struct RawPoint {
+        x: i32,
+        y: i32,
+    }
+
+    #[repr(C)]
+    struct MonitorInfo {
+        cb_size: u32,
+        rc_monitor: WinRect,
+        rc_work: WinRect,
+        dw_flags: u32,
+    }
+
+    struct EnumSearchState {
+        visible_match: usize,
+        any_match: usize,
+    }
+
+    #[link(name = "opengl32")]
+    extern "system" {
+        fn wglGetCurrentDC() -> usize;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn WindowFromDC(hdc: usize) -> usize;
+        fn GetActiveWindow() -> usize;
+        fn EnumThreadWindows(
+            dw_thread_id: u32,
+            lpfn: unsafe extern "system" fn(usize, isize) -> i32,
+            l_param: isize,
+        ) -> i32;
+        fn GetWindow(hwnd: usize, u_cmd: u32) -> usize;
+        fn IsWindow(hwnd: usize) -> i32;
+        fn IsWindowVisible(hwnd: usize) -> i32;
+        fn GetWindowLongW(hwnd: usize, n_index: i32) -> i32;
+        fn SetWindowLongW(hwnd: usize, n_index: i32, dw_new_long: i32) -> i32;
+        fn SetWindowPos(
+            hwnd: usize,
+            hwnd_insert_after: usize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            u_flags: u32,
+        ) -> i32;
+        fn GetWindowRect(hwnd: usize, lp_rect: *mut WinRect) -> i32;
+        fn GetCursorPos(lp_point: *mut RawPoint) -> i32;
+        fn MonitorFromWindow(hwnd: usize, dw_flags: u32) -> usize;
+        fn GetMonitorInfoW(h_monitor: usize, lpmi: *mut MonitorInfo) -> i32;
+    }
+
+    unsafe extern "system" fn enum_thread_window_cb(hwnd: usize, l_param: isize) -> i32 {
+        // SAFETY: `l_param` points to stack-allocated `EnumSearchState` owned by `find_window_hwnd`.
+        let state = unsafe { &mut *(l_param as *mut EnumSearchState) };
+        // SAFETY: Win32 passes a valid thread `HWND` into `EnumThreadWindows` callback.
+        let is_top_level = unsafe { GetWindow(hwnd, GW_OWNER) } == 0;
+        if !is_top_level {
+            return 1;
+        }
+        let Some(rect) = get_window_rect(hwnd) else {
+            return 1;
+        };
+        // Skip winit/IME 4x4 hidden helper windows so only the main app window matches.
+        if rect.width() < 200 || rect.height() < 200 {
+            return 1;
+        }
+        // SAFETY: `hwnd` was enumerated by Win32 and verified non-null above.
+        if unsafe { IsWindowVisible(hwnd) } != 0 {
+            state.visible_match = hwnd;
+            return 0;
+        }
+        if state.any_match == 0 {
+            state.any_match = hwnd;
+        }
+        1
+    }
+
+    pub(super) fn is_valid_window(hwnd: usize) -> bool {
+        if hwnd == 0 {
+            return false;
+        }
+        // SAFETY: `IsWindow` safely validates arbitrary handle integers without dereferencing.
+        unsafe { IsWindow(hwnd) != 0 }
+    }
+
+    pub(super) fn find_window_hwnd() -> usize {
+        // SAFETY: `wglGetCurrentDC` and `WindowFromDC` operate on thread-local GL state.
+        let dc_hwnd = unsafe {
+            let hdc = wglGetCurrentDC();
+            if hdc == 0 {
+                0
+            } else {
+                WindowFromDC(hdc)
+            }
+        };
+        if dc_hwnd != 0
+            && get_window_rect(dc_hwnd).is_some_and(|r| r.width() >= 200 && r.height() >= 200)
+        {
+            return dc_hwnd;
+        }
+
+        // SAFETY: `GetActiveWindow` returns the calling thread's active window or zero.
+        let active = unsafe { GetActiveWindow() };
+        if active != 0 {
+            // SAFETY: `active` is non-zero and owned by the calling thread.
+            let is_top_level = unsafe { GetWindow(active, GW_OWNER) } == 0;
+            if is_top_level
+                && get_window_rect(active).is_some_and(|r| r.width() >= 200 && r.height() >= 200)
+            {
+                return active;
+            }
+        }
+
+        let mut state = EnumSearchState {
+            visible_match: 0,
+            any_match: 0,
+        };
+        // SAFETY: `state` outlives the synchronous `EnumThreadWindows` call on this thread.
+        unsafe {
+            let tid = GetCurrentThreadId();
+            let _ = EnumThreadWindows(
+                tid,
+                enum_thread_window_cb,
+                (&mut state as *mut EnumSearchState) as isize,
+            );
+        }
+        if state.visible_match != 0 {
+            state.visible_match
+        } else {
+            state.any_match
+        }
+    }
+
+    /// Strip non-client caption/border bits that winit re-injects on show/maximize while
+    /// preserving taskbar/system menu capabilities (`WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`).
+    pub(super) fn sync_frameless_style(hwnd: usize) -> bool {
+        if !is_valid_window(hwnd) {
+            return false;
+        }
+        // SAFETY: `hwnd` was just verified by `IsWindow` on the GUI thread.
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            if (style & STRIP_STYLE_MASK) == 0 && (ex_style & STRIP_EX_STYLE_MASK) == 0 {
+                return false;
+            }
+            let new_style = (style & !STRIP_STYLE_MASK) as i32;
+            let new_ex_style = (ex_style & !STRIP_EX_STYLE_MASK) as i32;
+            let _ = SetWindowLongW(hwnd, GWL_STYLE, new_style);
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex_style);
+            let _ = SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            true
+        }
+    }
+
+    pub(super) fn get_window_rect(hwnd: usize) -> Option<WinRect> {
+        if !is_valid_window(hwnd) {
+            return None;
+        }
+        let mut raw = WinRect::default();
+        // SAFETY: `hwnd` is a valid Win32 window and `raw` is a properly aligned output struct.
+        let ok = unsafe { GetWindowRect(hwnd, &mut raw) != 0 };
+        ok.then_some(raw)
+    }
+
+    pub(super) fn set_window_rect(hwnd: usize, rect: WinRect, frame_changed: bool) {
+        if !is_valid_window(hwnd) {
+            return;
+        }
+        let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+        if frame_changed {
+            flags |= SWP_FRAMECHANGED;
+        }
+        // SAFETY: `hwnd` was verified by `IsWindow` and width/height are clamped positive.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                0,
+                rect.left,
+                rect.top,
+                rect.width().max(1),
+                rect.height().max(1),
+                flags,
+            );
+        }
+    }
+
+    pub(super) fn get_cursor_pos() -> Option<(i32, i32)> {
+        let mut pt = RawPoint { x: 0, y: 0 };
+        // SAFETY: `pt` is a stack-allocated Win32 `POINT` initialized to zero.
+        let ok = unsafe { GetCursorPos(&mut pt) != 0 };
+        ok.then_some((pt.x, pt.y))
+    }
+
+    pub(super) fn get_monitor_work_area(hwnd: usize) -> Option<WinRect> {
+        if !is_valid_window(hwnd) {
+            return None;
+        }
+        // SAFETY: `MonitorFromWindow` accepts valid `HWND` and `MonitorInfo` sets `cb_size` first.
+        unsafe {
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if mon == 0 {
+                return None;
+            }
+            let mut info = MonitorInfo {
+                cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+                rc_monitor: WinRect::default(),
+                rc_work: WinRect::default(),
+                dw_flags: 0,
+            };
+            if GetMonitorInfoW(mon, &mut info) == 0 {
+                return None;
+            }
+            (info.rc_work.width() > 0 && info.rc_work.height() > 0).then_some(info.rc_work)
+        }
+    }
+
+    pub(super) fn active_window_work_area() -> Option<WinRect> {
+        // SAFETY: `GetActiveWindow` returns the thread's active `HWND` or zero.
+        let active = unsafe { GetActiveWindow() };
+        get_monitor_work_area(active)
+    }
+}
+
 pub enum GuiEvent {
     /// Terminal response for a Settings authorization action.
     NotificationAuthorization {
@@ -573,6 +922,16 @@ pub struct ZaloGuiApp {
     // when sent from new() before winit creates the window).
     theme_apply_pending: bool,
     cached_palette: ThemePalette,
+    #[cfg(target_os = "windows")]
+    win_hwnd: usize,
+    #[cfg(target_os = "windows")]
+    win_initial_sync_frames: u8,
+    #[cfg(target_os = "windows")]
+    win_maximized: bool,
+    #[cfg(target_os = "windows")]
+    win_restore_rect: Option<WinRect>,
+    #[cfg(target_os = "windows")]
+    win_resize_drag: Option<WinResizeDrag>,
 
     // Session state
     is_logged_in: bool,
@@ -835,11 +1194,30 @@ impl ZaloGuiApp {
             .map(|(idx, _)| idx)
             .unwrap_or(0);
 
+        #[cfg(target_os = "windows")]
+        let initial_hwnd = {
+            let hwnd = win32_frameless::find_window_hwnd();
+            if hwnd != 0 {
+                let _ = win32_frameless::sync_frameless_style(hwnd);
+            }
+            hwnd
+        };
+
         let app = Self {
             dark_mode,
             theme_dirty: false,
             theme_apply_pending: true,
             cached_palette: initial_palette,
+            #[cfg(target_os = "windows")]
+            win_hwnd: initial_hwnd,
+            #[cfg(target_os = "windows")]
+            win_initial_sync_frames: 3,
+            #[cfg(target_os = "windows")]
+            win_maximized: false,
+            #[cfg(target_os = "windows")]
+            win_restore_rect: None,
+            #[cfg(target_os = "windows")]
+            win_resize_drag: None,
             is_logged_in,
             user_name,
             user_uin,
@@ -2447,6 +2825,8 @@ impl ZaloGuiApp {
 
 impl eframe::App for ZaloGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_windows_frameless(ctx);
+
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q)) {
             self.request_graceful_exit(ctx);
         }
@@ -2618,7 +2998,7 @@ impl eframe::App for ZaloGuiApp {
 
         let pal = self.palette();
 
-        Self::handle_frameless_resize(ctx);
+        self.handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
@@ -2680,7 +3060,7 @@ impl eframe::App for ZaloGuiApp {
         // Auto-notification modal for new GitHub Releases (works on both Login & Chat screens)
         self.render_update_notification_modal(ctx, &pal);
 
-        if !ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+        if !self.is_window_maximized(ctx) {
             let screen = ctx.screen_rect();
             ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
@@ -2716,10 +3096,177 @@ impl eframe::App for ZaloGuiApp {
 // ---------------------------------------------------------------------------
 
 impl ZaloGuiApp {
-    fn handle_frameless_resize(ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+    fn resize_cursor_for(dir: egui::ResizeDirection) -> CursorIcon {
+        match dir {
+            egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => {
+                CursorIcon::ResizeNwSe
+            }
+            egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => {
+                CursorIcon::ResizeNeSw
+            }
+            egui::ResizeDirection::West | egui::ResizeDirection::East => {
+                CursorIcon::ResizeHorizontal
+            }
+            egui::ResizeDirection::North | egui::ResizeDirection::South => {
+                CursorIcon::ResizeVertical
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn resolve_windows_hwnd(&mut self) -> usize {
+        if !win32_frameless::is_valid_window(self.win_hwnd) {
+            self.win_hwnd = win32_frameless::find_window_hwnd();
+        }
+        self.win_hwnd
+    }
+
+    fn sync_windows_frameless(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.resolve_windows_hwnd();
+            if hwnd != 0 && win32_frameless::sync_frameless_style(hwnd) {
+                ctx.request_repaint();
+            }
+            if self.win_initial_sync_frames > 0 {
+                self.win_initial_sync_frames -= 1;
+                ctx.request_repaint();
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = ctx;
+    }
+
+    fn is_window_maximized(&self, ctx: &egui::Context) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.win_maximized {
+            return true;
+        }
+        ctx.input(|i| i.viewport().maximized.unwrap_or(false))
+    }
+
+    fn toggle_maximize(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.resolve_windows_hwnd();
+            if hwnd != 0 {
+                if !self.win_maximized {
+                    self.win_restore_rect = win32_frameless::get_window_rect(hwnd);
+                    if let Some(work) = win32_frameless::get_monitor_work_area(hwnd) {
+                        win32_frameless::set_window_rect(hwnd, work, true);
+                        self.win_maximized = true;
+                        ctx.request_repaint();
+                        return;
+                    }
+                } else {
+                    let target = self.win_restore_rect.take().unwrap_or_else(|| {
+                        let ppp = ctx.pixels_per_point().max(1.0);
+                        let w = (1000.0 * ppp).round() as i32;
+                        let h = (640.0 * ppp).round() as i32;
+                        if let Some(work) = win32_frameless::get_monitor_work_area(hwnd) {
+                            let left = work.left + (work.width() - w).max(0) / 2;
+                            let top = work.top + (work.height() - h).max(0) / 2;
+                            WinRect {
+                                left,
+                                top,
+                                right: left + w,
+                                bottom: top + h,
+                            }
+                        } else {
+                            WinRect {
+                                left: 80,
+                                top: 80,
+                                right: 80 + w,
+                                bottom: 80 + h,
+                            }
+                        }
+                    });
+                    win32_frameless::set_window_rect(hwnd, target, true);
+                    self.win_maximized = false;
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+        }
+        let is_max = self.is_window_maximized(ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+    }
+
+    fn restore_before_drag_if_maximized(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        if self.win_maximized {
+            let hwnd = self.resolve_windows_hwnd();
+            if hwnd != 0 {
+                let ppp = ctx.pixels_per_point().max(1.0);
+                let fallback_w = (1000.0 * ppp).round() as i32;
+                let fallback_h = (640.0 * ppp).round() as i32;
+                let min_w = (480.0 * ppp).round() as i32;
+                let min_h = (360.0 * ppp).round() as i32;
+                let prev = self.win_restore_rect.take();
+                let rw = prev.map_or(fallback_w, |r| r.width()).max(min_w);
+                let rh = prev.map_or(fallback_h, |r| r.height()).max(min_h);
+                if let (Some((cx, cy)), Some(work)) = (
+                    win32_frameless::get_cursor_pos(),
+                    win32_frameless::get_monitor_work_area(hwnd),
+                ) {
+                    let frac =
+                        ((cx - work.left) as f32 / work.width().max(1) as f32).clamp(0.05, 0.95);
+                    let left = cx - (rw as f32 * frac).round() as i32;
+                    let top = (cy - (16.0 * ppp).round() as i32).max(work.top);
+                    win32_frameless::set_window_rect(
+                        hwnd,
+                        WinRect {
+                            left,
+                            top,
+                            right: left + rw,
+                            bottom: top + rh,
+                        },
+                        true,
+                    );
+                }
+                self.win_maximized = false;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = ctx;
+    }
+
+    fn handle_frameless_resize(&mut self, ctx: &egui::Context) {
+        if self.is_window_maximized(ctx) {
+            #[cfg(target_os = "windows")]
+            {
+                self.win_resize_drag = None;
+            }
             return;
         }
+
+        #[cfg(target_os = "windows")]
+        if let Some(drag) = self.win_resize_drag {
+            if ctx.input(|i| i.pointer.primary_down()) {
+                ctx.set_cursor_icon(Self::resize_cursor_for(drag.dir));
+                let hwnd = self.resolve_windows_hwnd();
+                if hwnd != 0 {
+                    if let Some((cx, cy)) = win32_frameless::get_cursor_pos() {
+                        let ppp = ctx.pixels_per_point().max(1.0);
+                        let min_w = (480.0 * ppp).round() as i32;
+                        let min_h = (360.0 * ppp).round() as i32;
+                        let target = compute_resized_rect(
+                            drag.start_rect,
+                            drag.dir,
+                            cx.saturating_sub(drag.start_cursor_x),
+                            cy.saturating_sub(drag.start_cursor_y),
+                            min_w,
+                            min_h,
+                        );
+                        win32_frameless::set_window_rect(hwnd, target, false);
+                    }
+                }
+                ctx.request_repaint();
+                return;
+            }
+            self.win_resize_drag = None;
+        }
+
         let screen = ctx.screen_rect();
         let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else {
             return;
@@ -2736,36 +3283,59 @@ impl ZaloGuiApp {
         let top_c = (pos.y - screen.top()).abs() <= corner;
         let bottom_c = (screen.bottom() - pos.y).abs() <= corner;
 
-        let dir_and_cursor = if top_c && left_c && (top || left) {
-            Some((egui::ResizeDirection::NorthWest, CursorIcon::ResizeNwSe))
+        let dir = if top_c && left_c && (top || left) {
+            Some(egui::ResizeDirection::NorthWest)
         } else if top_c && right_c && (top || right) {
-            Some((egui::ResizeDirection::NorthEast, CursorIcon::ResizeNeSw))
+            Some(egui::ResizeDirection::NorthEast)
         } else if bottom_c && left_c && (bottom || left) {
-            Some((egui::ResizeDirection::SouthWest, CursorIcon::ResizeNeSw))
+            Some(egui::ResizeDirection::SouthWest)
         } else if bottom_c && right_c && (bottom || right) {
-            Some((egui::ResizeDirection::SouthEast, CursorIcon::ResizeNwSe))
+            Some(egui::ResizeDirection::SouthEast)
         } else if left {
-            Some((egui::ResizeDirection::West, CursorIcon::ResizeHorizontal))
+            Some(egui::ResizeDirection::West)
         } else if right {
-            Some((egui::ResizeDirection::East, CursorIcon::ResizeHorizontal))
+            Some(egui::ResizeDirection::East)
         } else if top {
-            Some((egui::ResizeDirection::North, CursorIcon::ResizeVertical))
+            Some(egui::ResizeDirection::North)
         } else if bottom {
-            Some((egui::ResizeDirection::South, CursorIcon::ResizeVertical))
+            Some(egui::ResizeDirection::South)
         } else {
             None
         };
 
-        if let Some((dir, cursor)) = dir_and_cursor {
-            ctx.set_cursor_icon(cursor);
+        if let Some(dir) = dir {
+            ctx.set_cursor_icon(Self::resize_cursor_for(dir));
             if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+                #[cfg(target_os = "windows")]
+                {
+                    let hwnd = self.resolve_windows_hwnd();
+                    if let (Some((cx, cy)), Some(rect)) = (
+                        win32_frameless::get_cursor_pos(),
+                        win32_frameless::get_window_rect(hwnd),
+                    ) {
+                        self.win_resize_drag = Some(WinResizeDrag {
+                            dir,
+                            start_cursor_x: cx,
+                            start_cursor_y: cy,
+                            start_rect: rect,
+                        });
+                        ctx.request_repaint();
+                        return;
+                    }
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
             }
         }
     }
 
     fn render_custom_title_bar(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
-        let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let is_maximized = self.is_window_maximized(ctx);
+        let mut toggle_max_requested = false;
+        let mut drag_started = false;
+        #[cfg(target_os = "windows")]
+        let resizing_now = self.win_resize_drag.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let resizing_now = false;
         let total_unread: usize = self.unread_counts.values().sum();
         if self.last_synced_icon_unread != Some(total_unread) {
             self.last_synced_icon_unread = Some(total_unread);
@@ -2935,7 +3505,7 @@ impl ZaloGuiApp {
                             pal,
                         );
                         if max_resp.clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+                            toggle_max_requested = true;
                         }
 
                         // Minimize Button (46x32)
@@ -3083,9 +3653,11 @@ impl ZaloGuiApp {
                     Stroke::new(1.0_f32, pal.border),
                 );
 
-                // 3. Interactive drag / double-click region covering everything left of the control buttons
+                // 3. Interactive drag / double-click region covering everything left of the control
+                // buttons, inset from top edge when unmaximized so north border resize still works.
+                let drag_top = bar_rect.min.y + if is_maximized { 0.0 } else { 5.0 };
                 let drag_rect = Rect::from_min_max(
-                    bar_rect.min,
+                    Pos2::new(bar_rect.min.x, drag_top),
                     Pos2::new((buttons_left_x - 2.0).max(bar_rect.left() + 40.0), bar_rect.max.y),
                 );
                 let drag_resp = ui.interact(
@@ -3094,11 +3666,18 @@ impl ZaloGuiApp {
                     Sense::click_and_drag(),
                 );
                 if drag_resp.double_clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
-                } else if drag_resp.drag_started_by(egui::PointerButton::Primary) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    toggle_max_requested = true;
+                } else if !resizing_now && drag_resp.drag_started_by(egui::PointerButton::Primary) {
+                    drag_started = true;
                 }
             });
+
+        if toggle_max_requested {
+            self.toggle_maximize(ctx);
+        } else if drag_started {
+            self.restore_before_drag_if_maximized(ctx);
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
     }
 
     fn render_login_screen(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
@@ -3439,7 +4018,8 @@ fn render_login_text_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_semver, phone_sync_completion_message};
+    use super::{compute_resized_rect, is_newer_semver, phone_sync_completion_message, WinRect};
+    use eframe::egui::ResizeDirection;
 
     #[test]
     fn sent_message_reconciles_when_server_push_arrives_first() {
@@ -3531,5 +4111,117 @@ mod tests {
 
         let failed = phone_sync_completion_message(0, 0, false, Some("network"));
         assert!(failed.contains("Đồng bộ thất bại: network"));
+    }
+
+    #[test]
+    fn compute_resized_rect_handles_all_eight_directions_and_clamps_without_drifting_anchor() {
+        let start = WinRect {
+            left: 100,
+            top: 80,
+            right: 1100,
+            bottom: 720,
+        };
+        let min_w = 480;
+        let min_h = 360;
+
+        // East / South expansion & clamping keeps left/top anchored
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::East, 120, 45, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 80,
+                right: 1220,
+                bottom: 720
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::East, -900, 0, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 80,
+                right: 580,
+                bottom: 720
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::South, 50, -500, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 80,
+                right: 1100,
+                bottom: 440
+            }
+        );
+
+        // West / North clamping keeps right/bottom anchored
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::West, 900, 30, min_w, min_h),
+            WinRect {
+                left: 620,
+                top: 80,
+                right: 1100,
+                bottom: 720
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::North, 30, 500, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 360,
+                right: 1100,
+                bottom: 720
+            }
+        );
+
+        // Diagonal corners (NW, NE, SW, SE) including negative monitor coordinates
+        let neg_monitor = WinRect {
+            left: -1200,
+            top: -400,
+            right: -200,
+            bottom: 240,
+        };
+        assert_eq!(
+            compute_resized_rect(
+                neg_monitor,
+                ResizeDirection::NorthWest,
+                800,
+                500,
+                min_w,
+                min_h
+            ),
+            WinRect {
+                left: -680,
+                top: -120,
+                right: -200,
+                bottom: 240
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::NorthEast, 40, -20, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 60,
+                right: 1140,
+                bottom: 720
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::SouthWest, -40, 20, min_w, min_h),
+            WinRect {
+                left: 60,
+                top: 80,
+                right: 1100,
+                bottom: 740
+            }
+        );
+        assert_eq!(
+            compute_resized_rect(start, ResizeDirection::SouthEast, 60, 80, min_w, min_h),
+            WinRect {
+                left: 100,
+                top: 80,
+                right: 1160,
+                bottom: 800
+            }
+        );
     }
 }

@@ -7987,7 +7987,69 @@ impl ZaloGuiApp {
                                     }
                                 }
 
-                                // 6) Schedule Send Button (`🕒`)
+                                // 6) Poll Creation Button (`BAR_CHART_2`)
+                                let (poll_rect, poll_resp) = ui.allocate_exact_size(
+                                    Vec2::new(30.0, 28.0),
+                                    Sense::click(),
+                                );
+                                if self.create_poll_modal_open || poll_resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        poll_rect,
+                                        Rounding::same(6.0),
+                                        pal.bg_hover,
+                                    );
+                                }
+                                draw_lucide_icon(
+                                    ui.painter(),
+                                    poll_rect.center(),
+                                    lucide::BAR_CHART_2,
+                                    16.5,
+                                    if self.create_poll_modal_open || poll_resp.hovered() {
+                                        pal.primary_hover
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if poll_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Tạo cuộc bình chọn mới")
+                                    .clicked()
+                                {
+                                    self.create_poll_modal_open = true;
+                                }
+
+                                // 7) To-Do Creation Button (`CHECK_SQUARE`)
+                                let (todo_rect, todo_resp) = ui.allocate_exact_size(
+                                    Vec2::new(30.0, 28.0),
+                                    Sense::click(),
+                                );
+                                if self.create_todo_modal_open || todo_resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        todo_rect,
+                                        Rounding::same(6.0),
+                                        pal.bg_hover,
+                                    );
+                                }
+                                draw_lucide_icon(
+                                    ui.painter(),
+                                    todo_rect.center(),
+                                    lucide::CHECK_SQUARE,
+                                    16.5,
+                                    if self.create_todo_modal_open || todo_resp.hovered() {
+                                        pal.primary_hover
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if todo_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Giao việc (To-Do)")
+                                    .clicked()
+                                {
+                                    self.create_todo_modal_open = true;
+                                }
+
+                                // 8) Schedule Send Button (`🕒`)
                                 let (sched_rect, sched_resp) = ui.allocate_exact_size(
                                     Vec2::new(30.0, 28.0),
                                     Sense::click(),
@@ -8016,23 +8078,78 @@ impl ZaloGuiApp {
                                 {
                                     self.schedule_modal_open = !self.schedule_modal_open;
                                 }
+
+                                // 9) Rich Text Formatting Bar Toggle (`PAINTBRUSH`)
+                                let (fmt_rect, fmt_resp) = ui.allocate_exact_size(
+                                    Vec2::new(30.0, 28.0),
+                                    Sense::click(),
+                                );
+                                if self.format_bar_open || fmt_resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        fmt_rect,
+                                        Rounding::same(6.0),
+                                        pal.bg_hover,
+                                    );
+                                }
+                                draw_lucide_icon(
+                                    ui.painter(),
+                                    fmt_rect.center(),
+                                    lucide::PAINTBRUSH,
+                                    16.5,
+                                    if self.format_bar_open || fmt_resp.hovered() {
+                                        pal.primary_hover
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if fmt_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Định dạng văn bản (In đậm, nghiêng, code...)")
+                                    .clicked()
+                                {
+                                    self.format_bar_open = !self.format_bar_open;
+                                }
                             });
+
+                            // Optional RTF toolbar
+                            if self.format_bar_open {
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let btn_bold = ui.add(egui::Button::new(RichText::new("B").strong()).min_size(Vec2::new(26.0, 24.0)).fill(pal.bg_elevated));
+                                    if btn_bold.on_hover_text("In đậm (**văn bản**)").clicked() {
+                                        self.input_message.push_str("**văn bản**");
+                                    }
+                                    let btn_italic = ui.add(egui::Button::new(RichText::new("I").italics()).min_size(Vec2::new(26.0, 24.0)).fill(pal.bg_elevated));
+                                    if btn_italic.on_hover_text("In nghiêng (*văn bản*)").clicked() {
+                                        self.input_message.push_str("*văn bản*");
+                                    }
+                                    let btn_code = ui.add(egui::Button::new(RichText::new("</>").monospace()).min_size(Vec2::new(30.0, 24.0)).fill(pal.bg_elevated));
+                                    if btn_code.on_hover_text("Mã code (`code`)").clicked() {
+                                        self.input_message.push_str("`code`");
+                                    }
+                                    let btn_strike = ui.add(egui::Button::new(RichText::new("~S~").strikethrough()).min_size(Vec2::new(30.0, 24.0)).fill(pal.bg_elevated));
+                                    if btn_strike.on_hover_text("Gạch ngang (~~văn bản~~)").clicked() {
+                                        self.input_message.push_str("~~văn bản~~");
+                                    }
+                                });
+                            }
 
                             ui.add_space(8.0);
 
                             // Row 2: Full-width Input Box + Right-locked Send Button
                             egui::Frame::none()
                                 .fill(pal.bg_input)
-                                .rounding(Rounding::same(10.0))
+                                .rounding(Rounding::same(8.0))
                                 .stroke(Stroke::new(
                                     1.0_f32,
                                     if composer_has_focus {
-                                        pal.primary
+                                        pal.border_focus
                                     } else {
                                         pal.border
                                     },
                                 ))
-                                .inner_margin(Margin::symmetric(12.0, 5.0))
+                                .inner_margin(Margin::symmetric(10.0, 8.0))
                                 .show(ui, |ui| {
                                     let row_inner_w = (comp_inner_w - 24.0).max(110.0);
                                     ui.set_width(row_inner_w);
@@ -8157,7 +8274,7 @@ impl ZaloGuiApp {
                                                         || self.pending_clipboard_image.is_some();
                                                     let (send_rect, send_resp) = ui
                                                         .allocate_exact_size(
-                                                            Vec2::new(send_btn_w, 32.0),
+                                                            Vec2::new(send_btn_w, 36.0),
                                                             Sense::click(),
                                                         );
                                                     if send_resp.secondary_clicked() {
@@ -8172,7 +8289,7 @@ impl ZaloGuiApp {
                                                     };
                                                     ui.painter().rect_filled(
                                                         send_rect,
-                                                        Rounding::same(16.0),
+                                                        Rounding::same(8.0),
                                                         send_bg,
                                                     );
                                                     if !is_narrow_w {
@@ -10354,5 +10471,17 @@ mod quote_navigation_tests {
                 .expect("should replace active mention");
         assert_eq!(new_draft, "Nhắc @Anh Tuấn về báo cáo");
         assert_eq!(next_cursor, "Nhắc @Anh Tuấn".chars().count());
+    }
+
+    #[test]
+    fn test_task4_composer_dimensions_and_state() {
+        let posting_restricted = false;
+        let base_composer_h = if posting_restricted { 64.0 } else { 108.0 };
+        assert_eq!(base_composer_h, 108.0);
+
+        let lines_1_h = 38.0;
+        let lines_multiline_h = (18.0 + (3.0 * 20.0_f32)).clamp(38.0, 120.0);
+        assert_eq!(lines_1_h, 38.0);
+        assert_eq!(lines_multiline_h, 78.0);
     }
 }

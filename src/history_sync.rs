@@ -784,6 +784,15 @@ pub async fn import_mobile_backup_container(
                     } else if msg_type_num == 12 {
                         msg_type = "chat.link".to_string();
                         text = "[Liên kết]".to_string();
+                    } else if msg_type_num == 26 {
+                        msg_type = "chat.poll".to_string();
+                        text = "[Bình chọn]".to_string();
+                    } else if msg_type_num == 27 {
+                        msg_type = "chat.todo".to_string();
+                        text = "[Giao việc]".to_string();
+                    } else if msg_type_num == 28 {
+                        msg_type = "chat.reminder".to_string();
+                        text = "[Nhắc hẹn]".to_string();
                     }
                 }
             }
@@ -795,6 +804,15 @@ pub async fn import_mobile_backup_container(
                     text = "[Hình ảnh]".to_string();
                 } else if msg_type_num == 12 {
                     text = "[Liên kết]".to_string();
+                } else if msg_type_num == 26 {
+                    msg_type = "chat.poll".to_string();
+                    text = "[Bình chọn]".to_string();
+                } else if msg_type_num == 27 {
+                    msg_type = "chat.todo".to_string();
+                    text = "[Giao việc]".to_string();
+                } else if msg_type_num == 28 {
+                    msg_type = "chat.reminder".to_string();
+                    text = "[Nhắc hẹn]".to_string();
                 }
             }
 

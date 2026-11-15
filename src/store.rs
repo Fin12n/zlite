@@ -1870,6 +1870,28 @@ impl MessageStore {
                     {
                         final_text = "[Video]".to_string();
                     }
+                } else if sm.msg_type == "chat.poll"
+                    || sm.msg_type == "poll"
+                    || final_text.starts_with("[Bình chọn]")
+                    || final_text.starts_with("📊")
+                {
+                    final_kind = crate::message_model::MessageKind::Poll;
+                } else if sm.msg_type == "chat.todo"
+                    || sm.msg_type == "todo"
+                    || final_text.starts_with("[Giao việc]")
+                    || final_text.starts_with("[To-Do]")
+                {
+                    final_kind = crate::message_model::MessageKind::Todo;
+                } else if sm.msg_type == "chat.reminder"
+                    || sm.msg_type == "reminder"
+                    || final_text.starts_with("[Nhắc hẹn]")
+                    || final_text.starts_with("⏰")
+                {
+                    final_kind = crate::message_model::MessageKind::Reminder;
+                } else if sm.msg_type == "chat.photo" {
+                    final_kind = crate::message_model::MessageKind::Photo;
+                } else if sm.msg_type == "chat.sticker" {
+                    final_kind = crate::message_model::MessageKind::Sticker;
                 }
                 let cm = ChatMessage {
                     id: sm.msg_id,
@@ -3801,5 +3823,74 @@ mod tests {
         assert_eq!(map.get("u1").map(|x| x.0.as_str()), Some("Biệt danh 1"));
         assert_eq!(map.get("u2").map(|x| x.0.as_str()), Some("123"));
         assert_eq!(map.get("u3").map(|x| x.0.as_str()), Some("Tên Gốc 3"));
+    }
+
+    #[test]
+    fn test_task8_sync_and_store_hydration() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "test_thread_v2".into(),
+                name: "Nhóm Kiểm Thử V2".into(),
+                is_group: true,
+                last_ts: 300,
+                ..Default::default()
+            })
+            .unwrap();
+
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "msg_p1".into(),
+                thread_id: "test_thread_v2".into(),
+                sender_id: "u1".into(),
+                sender_name: "Thành viên 1".into(),
+                text: "[Bình chọn] Ăn gì trưa nay?\nPhở | Cơm".into(),
+                msg_type: "chat.poll".into(),
+                ts: 100,
+                is_outgoing: false,
+                raw_json: String::new(),
+            })
+            .unwrap();
+
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "msg_t1".into(),
+                thread_id: "test_thread_v2".into(),
+                sender_id: "u1".into(),
+                sender_name: "Thành viên 1".into(),
+                text: "[Giao việc] Cập nhật ZDS v4.1 (Hạn: 18:00)".into(),
+                msg_type: "chat.todo".into(),
+                ts: 200,
+                is_outgoing: true,
+                raw_json: String::new(),
+            })
+            .unwrap();
+
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "msg_r1".into(),
+                thread_id: "test_thread_v2".into(),
+                sender_id: "u1".into(),
+                sender_name: "Thành viên 1".into(),
+                text: "[Nhắc hẹn] Đi họp Daily lúc 09:30".into(),
+                msg_type: "webchat".into(), // legacy type hydrated by text prefix
+                ts: 300,
+                is_outgoing: false,
+                raw_json: String::new(),
+            })
+            .unwrap();
+
+        let mut threads = vec![Thread {
+            id: "test_thread_v2".into(),
+            name: "Nhóm Kiểm Thử V2".into(),
+            is_group: true,
+            ..Default::default()
+        }];
+
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        assert_eq!(threads[0].messages.len(), 3);
+        assert_eq!(threads[0].messages[0].kind, crate::message_model::MessageKind::Poll);
+        assert_eq!(threads[0].messages[1].kind, crate::message_model::MessageKind::Todo);
+        assert_eq!(threads[0].messages[2].kind, crate::message_model::MessageKind::Reminder);
     }
 }

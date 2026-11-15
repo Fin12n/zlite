@@ -16,6 +16,14 @@ pub(super) struct ThemePalette {
     pub(super) bg_input: Color32,
     pub(super) bg_input_track: Color32,
     pub(super) border: Color32,
+    pub(super) border_subtle: Color32,
+    pub(super) border_focus: Color32,
+    pub(super) border_active: Color32,
+    pub(super) label_red: Color32,
+    pub(super) label_blue: Color32,
+    pub(super) label_green: Color32,
+    pub(super) label_yellow: Color32,
+    pub(super) label_purple: Color32,
     pub(super) text_primary: Color32,
     pub(super) text_secondary: Color32,
     pub(super) text_muted: Color32,
@@ -70,6 +78,14 @@ impl ThemePalette {
             bg_input: Color32::from_rgb(26, 29, 34),        // #1A1D22 (darker than bg_elevated)
             bg_input_track: Color32::from_rgb(31, 35, 41),  // #1F2329 segmented track
             border: Color32::from_rgb(55, 61, 69),          // #373D45
+            border_subtle: Color32::from_rgb(44, 50, 58),   // #2C323A
+            border_focus: Color32::from_rgb(0, 104, 255),   // #0068FF
+            border_active: Color32::from_rgb(37, 99, 235),  // #2563EB
+            label_red: Color32::from_rgb(235, 87, 87),      // #EB5757
+            label_blue: Color32::from_rgb(45, 120, 240),    // #2D78F0
+            label_green: Color32::from_rgb(39, 174, 96),    // #27AE60
+            label_yellow: Color32::from_rgb(242, 201, 76),  // #F2C94C
+            label_purple: Color32::from_rgb(155, 81, 224),  // #9B51E0
             text_primary: Color32::from_rgb(230, 233, 238), // #E6E9EE
             text_secondary: Color32::from_rgb(170, 178, 190), // #AAB2BE
             text_muted: Color32::from_rgb(142, 150, 164),   // #8E96A4 (4.66-5.48:1)
@@ -106,6 +122,14 @@ impl ThemePalette {
             bg_input: Color32::WHITE,                         // #FFFFFF
             bg_input_track: Color32::from_rgb(230, 236, 245), // #E6ECF5 segmented track
             border: Color32::from_rgb(203, 213, 225),         // #CBD5E1
+            border_subtle: Color32::from_rgb(226, 230, 237),   // #E2E6ED
+            border_focus: Color32::from_rgb(0, 104, 255),      // #0068FF
+            border_active: Color32::from_rgb(0, 90, 224),      // #005AE0
+            label_red: Color32::from_rgb(235, 87, 87),          // #EB5757
+            label_blue: Color32::from_rgb(0, 104, 255),         // #0068FF
+            label_green: Color32::from_rgb(21, 168, 95),        // #15A85F
+            label_yellow: Color32::from_rgb(247, 181, 3),       // #F7B503
+            label_purple: Color32::from_rgb(155, 81, 224),      // #9B51E0
             text_primary: Color32::from_rgb(15, 23, 42),      // #0F172A
             text_secondary: Color32::from_rgb(71, 85, 105),   // #475569
             text_muted: Color32::from_rgb(92, 100, 112),      // #5C6470 (5.22-5.98:1)
@@ -202,6 +226,18 @@ impl ThemePalette {
         ctx.set_theme(target_theme);
         ctx.set_style_of(target_theme, style.clone());
         ctx.set_style(style);
+    }
+
+    /// Resolve 40x40 badge background color based on file extension (ZDS / UI/UX Pro Max)
+    pub(super) fn file_badge_color(&self, ext: &str) -> Color32 {
+        match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+            "pdf" => Color32::from_rgb(235, 87, 87),          // Red #EB5757
+            "doc" | "docx" => Color32::from_rgb(45, 120, 240), // Blue #2D78F0
+            "xls" | "xlsx" | "csv" => Color32::from_rgb(39, 174, 96), // Green #27AE60
+            "ppt" | "pptx" => Color32::from_rgb(242, 153, 74), // Orange #F2994A
+            "zip" | "rar" | "7z" | "tar" | "gz" => Color32::from_rgb(242, 201, 76), // Amber #F2C94C
+            _ => self.primary,
+        }
     }
 
     /// Load either the built-in dark/light palette or apply custom overrides from `theme.json` (#7).
@@ -1716,5 +1752,25 @@ mod tests {
         assert_eq!(light_style.visuals.extreme_bg_color, light.bg_input);
         assert_eq!(light_style.visuals.widgets.inactive.weak_bg_fill, light.bg_elevated);
         assert_eq!(light_style.visuals.panel_fill, light.bg_app);
+    }
+
+    #[test]
+    fn test_zds_tokens_and_contrast() {
+        let dark = ThemePalette::dark();
+        let light = ThemePalette::light();
+
+        // WCAG 2.1 AA checks (>= 4.5:1)
+        assert!(contrast_ratio(dark.text_primary, dark.bg_app) >= 4.5);
+        assert!(contrast_ratio(light.text_primary, light.bg_app) >= 4.5);
+
+        // File kind colors
+        assert_eq!(dark.file_badge_color("pdf"), Color32::from_rgb(235, 87, 87));
+        assert_eq!(dark.file_badge_color("docx"), Color32::from_rgb(45, 120, 240));
+        assert_eq!(dark.file_badge_color("xlsx"), Color32::from_rgb(39, 174, 96));
+        assert_eq!(dark.file_badge_color("zip"), Color32::from_rgb(242, 201, 76));
+
+        // State borders & label tokens exist
+        assert_eq!(dark.border_focus, Color32::from_rgb(0, 104, 255));
+        assert_eq!(light.border_focus, Color32::from_rgb(0, 104, 255));
     }
 }

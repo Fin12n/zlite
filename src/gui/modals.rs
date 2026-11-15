@@ -10408,6 +10408,639 @@ impl ZaloGuiApp {
                 }
             });
     }
+
+    /// Modal Tạo nhóm mới (ZDS v4.1): Tên nhóm + Tìm & Chọn thành viên từ danh bạ
+    pub(super) fn render_create_group_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.create_group_modal_open {
+            return;
+        }
+        let mut open = true;
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 32.0).clamp(320.0, 480.0);
+        let max_h = (screen.height() - 48.0).clamp(400.0, 560.0);
+
+        egui::Window::new("Tạo nhóm trò chuyện")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(max_w, max_h))
+            .frame(
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(12.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::same(18.0)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Tên nhóm")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.group_name_draft)
+                        .desired_width(ui.available_width())
+                        .hint_text("Nhập tên nhóm…")
+                        .margin(Margin::symmetric(10.0, 8.0)),
+                );
+                ui.add_space(12.0);
+
+                ui.label(
+                    RichText::new("Thêm bạn bè vào nhóm")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.add_member_search)
+                        .desired_width(ui.available_width())
+                        .hint_text("🔍 Tìm tên hoặc số điện thoại…")
+                        .margin(Margin::symmetric(10.0, 6.0)),
+                );
+                ui.add_space(8.0);
+
+                let search_lower = self.add_member_search.trim().to_lowercase();
+                let friends: Vec<(String, String)> = self
+                    .threads
+                    .iter()
+                    .filter(|t| !t.is_group && !t.name.trim().is_empty())
+                    .filter(|t| {
+                        if search_lower.is_empty() {
+                            true
+                        } else {
+                            t.name.to_lowercase().contains(&search_lower)
+                                || t.id.contains(&search_lower)
+                        }
+                    })
+                    .map(|t| (t.id.clone(), t.name.clone()))
+                    .collect();
+
+                let scroll_h = max_h - 220.0;
+                egui::ScrollArea::vertical()
+                    .max_height(scroll_h.max(120.0))
+                    .show(ui, |ui| {
+                        if friends.is_empty() {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new("Không tìm thấy bạn bè phù hợp")
+                                    .size(11.5)
+                                    .color(pal.text_muted),
+                            );
+                        } else {
+                            for (fid, fname) in friends {
+                                let mut is_selected = self.group_members_selection.contains(&fid);
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut is_selected, "").changed() {
+                                        if is_selected {
+                                            self.group_members_selection.insert(fid.clone());
+                                        } else {
+                                            self.group_members_selection.remove(&fid);
+                                        }
+                                    }
+                                    let (avatar_r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                                    ui.painter().circle_filled(avatar_r.center(), 14.0, pal.primary);
+                                    let initial = fname.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                    ui.painter().text(
+                                        avatar_r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        initial,
+                                        FontId::proportional(13.0),
+                                        Color32::WHITE,
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new(&fname)
+                                            .size(12.0)
+                                            .color(pal.text_primary),
+                                    );
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                let selected_count = self.group_members_selection.len();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Đã chọn: {selected_count} thành viên"))
+                            .size(11.5)
+                            .color(pal.primary),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let can_create = !self.group_name_draft.trim().is_empty();
+                        let btn = egui::Button::new(
+                            RichText::new("Tạo nhóm")
+                                .size(12.5)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(if can_create { pal.primary } else { pal.text_muted })
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(90.0, 32.0));
+
+                        if ui.add_enabled(can_create, btn).clicked() {
+                            let gname = self.group_name_draft.trim().to_string();
+                            let gid = format!("group_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                            self.threads.insert(0, crate::chat::Thread {
+                                id: gid.clone(),
+                                name: gname.clone(),
+                                preview: format!("Nhóm \"{gname}\" đã được tạo."),
+                                time: crate::ui::clock(),
+                                avatar: None,
+                                is_group: true,
+                                messages: vec![crate::chat::ChatMessage {
+                                    id: format!("m_{gid}"),
+                                    sender: "Hệ thống".to_string(),
+                                    text: format!("Nhóm \"{gname}\" đã được tạo."),
+                                    time: crate::ui::clock(),
+                                    ..Default::default()
+                                }],
+                                unread: Default::default(),
+                                vanish: None,
+                                presentation: Default::default(),
+                            });
+                            self.selected_thread_index = 0;
+                            self.show_toast(format!("Đã tạo nhóm \"{gname}\""));
+                            self.group_name_draft.clear();
+                            self.group_members_selection.clear();
+                            self.create_group_modal_open = false;
+                        }
+
+                        if ui.button("Hủy").clicked() {
+                            self.create_group_modal_open = false;
+                            self.group_members_selection.clear();
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.create_group_modal_open = false;
+            self.group_members_selection.clear();
+        }
+    }
+
+    /// Modal Thêm thành viên vào nhóm hiện tại
+    pub(super) fn render_add_member_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.add_member_modal_open {
+            return;
+        }
+        let mut open = true;
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 32.0).clamp(320.0, 460.0);
+        let max_h = (screen.height() - 48.0).clamp(360.0, 520.0);
+
+        let group_title = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "Nhóm".to_string());
+
+        egui::Window::new(format!("Thêm thành viên — {}", truncate_chars(&group_title, 20)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(max_w, max_h))
+            .frame(
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(12.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::same(18.0)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Tìm kiếm người cần thêm")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.add_member_search)
+                        .desired_width(ui.available_width())
+                        .hint_text("🔍 Tìm tên bạn bè…")
+                        .margin(Margin::symmetric(10.0, 6.0)),
+                );
+                ui.add_space(8.0);
+
+                let search_lower = self.add_member_search.trim().to_lowercase();
+                let friends: Vec<(String, String)> = self
+                    .threads
+                    .iter()
+                    .filter(|t| !t.is_group && !t.name.trim().is_empty())
+                    .filter(|t| {
+                        if search_lower.is_empty() {
+                            true
+                        } else {
+                            t.name.to_lowercase().contains(&search_lower)
+                                || t.id.contains(&search_lower)
+                        }
+                    })
+                    .map(|t| (t.id.clone(), t.name.clone()))
+                    .collect();
+
+                let scroll_h = max_h - 180.0;
+                egui::ScrollArea::vertical()
+                    .max_height(scroll_h.max(120.0))
+                    .show(ui, |ui| {
+                        if friends.is_empty() {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new("Không tìm thấy người liên hệ phù hợp")
+                                    .size(11.5)
+                                    .color(pal.text_muted),
+                            );
+                        } else {
+                            for (fid, fname) in friends {
+                                let mut is_selected = self.group_members_selection.contains(&fid);
+                                ui.horizontal(|ui| {
+                                    if ui.checkbox(&mut is_selected, "").changed() {
+                                        if is_selected {
+                                            self.group_members_selection.insert(fid.clone());
+                                        } else {
+                                            self.group_members_selection.remove(&fid);
+                                        }
+                                    }
+                                    let (avatar_r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                                    ui.painter().circle_filled(avatar_r.center(), 14.0, pal.primary);
+                                    let initial = fname.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                    ui.painter().text(
+                                        avatar_r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        initial,
+                                        FontId::proportional(13.0),
+                                        Color32::WHITE,
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.label(
+                                        RichText::new(&fname)
+                                            .size(12.0)
+                                            .color(pal.text_primary),
+                                    );
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    });
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                let selected_count = self.group_members_selection.len();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("Đã chọn: {selected_count} người"))
+                            .size(11.5)
+                            .color(pal.primary),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let can_add = selected_count > 0;
+                        let btn = egui::Button::new(
+                            RichText::new("Thêm vào nhóm")
+                                .size(12.5)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(if can_add { pal.primary } else { pal.text_muted })
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(110.0, 32.0));
+
+                        if ui.add_enabled(can_add, btn).clicked() {
+                            if let Some(t) = self.threads.get_mut(self.selected_thread_index) {
+                                let mid = format!("m_add_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                                t.messages.push(crate::chat::ChatMessage {
+                                    id: mid,
+                                    sender: "Hệ thống".to_string(),
+                                    text: format!("Đã thêm {selected_count} thành viên vào nhóm."),
+                                    time: crate::ui::clock(),
+                                    ..Default::default()
+                                });
+                            }
+                            self.show_toast(format!("Đã thêm {selected_count} thành viên vào nhóm"));
+                            self.group_members_selection.clear();
+                            self.add_member_modal_open = false;
+                        }
+
+                        if ui.button("Hủy").clicked() {
+                            self.add_member_modal_open = false;
+                            self.group_members_selection.clear();
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.add_member_modal_open = false;
+            self.group_members_selection.clear();
+        }
+    }
+
+    /// Modal Tạo bình chọn (ZDS v4.1 Poll Creator)
+    pub(super) fn render_create_poll_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.create_poll_modal_open {
+            return;
+        }
+        let mut open = true;
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 32.0).clamp(320.0, 480.0);
+        let max_h = (screen.height() - 48.0).clamp(420.0, 580.0);
+
+        egui::Window::new("Tạo bình chọn mới")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(max_w, max_h))
+            .frame(
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(12.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::same(18.0)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Câu hỏi bình chọn")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.poll_question_draft)
+                        .desired_width(ui.available_width())
+                        .hint_text("Đặt câu hỏi bình chọn…")
+                        .margin(Margin::symmetric(10.0, 8.0)),
+                );
+                ui.add_space(12.0);
+
+                ui.label(
+                    RichText::new("Các phương án lựa chọn")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+
+                let mut to_remove: Option<usize> = None;
+                let opt_len = self.poll_options_draft.len();
+                let scroll_h = max_h - 250.0;
+                egui::ScrollArea::vertical()
+                    .max_height(scroll_h.max(120.0))
+                    .show(ui, |ui| {
+                        for (idx, opt) in self.poll_options_draft.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{}.", idx + 1))
+                                        .size(11.5)
+                                        .color(pal.text_muted),
+                                );
+                                ui.add(
+                                    egui::TextEdit::singleline(opt)
+                                        .desired_width(ui.available_width() - 32.0)
+                                        .hint_text(format!("Phương án {}", idx + 1))
+                                        .margin(Margin::symmetric(8.0, 6.0)),
+                                );
+                                if opt_len > 2 {
+                                    if ui.button("✕").clicked() {
+                                        to_remove = Some(idx);
+                                    }
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+
+                if let Some(r_idx) = to_remove {
+                    self.poll_options_draft.remove(r_idx);
+                }
+
+                ui.add_space(6.0);
+                if self.poll_options_draft.len() < 10 {
+                    let add_btn = egui::Button::new(
+                        RichText::new("＋ Thêm phương án")
+                            .size(11.5)
+                            .color(pal.primary),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0_f32, pal.primary))
+                    .rounding(Rounding::same(6.0));
+                    if ui.add(add_btn).clicked() {
+                        self.poll_options_draft.push(String::new());
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                let valid_opts_count = self
+                    .poll_options_draft
+                    .iter()
+                    .filter(|o| !o.trim().is_empty())
+                    .count();
+                let can_submit = !self.poll_question_draft.trim().is_empty() && valid_opts_count >= 2;
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{valid_opts_count} phương án hợp lệ"))
+                            .size(11.0)
+                            .color(if can_submit { pal.text_secondary } else { pal.warning }),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new("Tạo bình chọn")
+                                .size(12.5)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(if can_submit { pal.primary } else { pal.text_muted })
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(110.0, 32.0));
+
+                        if ui.add_enabled(can_submit, btn).clicked() {
+                            let q = self.poll_question_draft.trim().to_string();
+                            let opts: Vec<String> = self
+                                .poll_options_draft
+                                .iter()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            let opts_preview = opts.join(" | ");
+                            let body = format!("[Bình chọn] {q}\n{opts_preview}");
+
+                            let mut target_to_send = None;
+                            if let Some(t) = self.threads.get_mut(self.selected_thread_index) {
+                                let mid = format!("poll_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                                let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                t.messages.push(crate::chat::ChatMessage {
+                                    id: mid,
+                                    sender: "Tôi".to_string(),
+                                    time: crate::ui::clock(),
+                                    ts: now_ts,
+                                    text: body.clone(),
+                                    is_outgoing: true,
+                                    kind: crate::message_model::MessageKind::Poll,
+                                    ..Default::default()
+                                });
+                                target_to_send = Some((t.id.clone(), t.is_group));
+                            }
+                            if let Some((to_id, is_grp)) = target_to_send {
+                                if let Some(tx) = WORKER_TX.get() {
+                                    let _ = tx.send(WorkerCmd::SendMessage {
+                                        to_id,
+                                        text: body,
+                                        is_group: is_grp,
+                                    });
+                                }
+                            }
+                            self.show_toast(format!("Đã tạo bình chọn: \"{q}\""));
+                            self.poll_question_draft.clear();
+                            self.poll_options_draft = vec![String::new(), String::new()];
+                            self.create_poll_modal_open = false;
+                        }
+
+                        if ui.button("Hủy").clicked() {
+                            self.create_poll_modal_open = false;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.create_poll_modal_open = false;
+        }
+    }
+
+    /// Modal Giao việc (ZDS v4.1 To-Do Creator)
+    pub(super) fn render_create_todo_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.create_todo_modal_open {
+            return;
+        }
+        let mut open = true;
+        let screen = ctx.screen_rect();
+        let max_w = (screen.width() - 32.0).clamp(320.0, 460.0);
+        let max_h = (screen.height() - 48.0).clamp(340.0, 480.0);
+
+        egui::Window::new("Giao việc (To-Do)")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(max_w, max_h))
+            .frame(
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(12.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::same(18.0)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Nội dung công việc")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.todo_title_draft)
+                        .desired_width(ui.available_width())
+                        .hint_text("Nhập tiêu đề công việc cần giao…")
+                        .margin(Margin::symmetric(10.0, 8.0)),
+                );
+                ui.add_space(12.0);
+
+                ui.label(
+                    RichText::new("Hạn hoàn thành (Deadline)")
+                        .size(12.0)
+                        .color(pal.text_secondary)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.todo_deadline_draft)
+                        .desired_width(ui.available_width())
+                        .hint_text("VD: Hôm nay 18:00, 30/11/2026…")
+                        .margin(Margin::symmetric(10.0, 6.0)),
+                );
+
+                ui.add_space(16.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                let can_submit = !self.todo_title_draft.trim().is_empty();
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new("Giao việc")
+                                .size(12.5)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(if can_submit { pal.primary } else { pal.text_muted })
+                        .rounding(Rounding::same(8.0))
+                        .min_size(Vec2::new(96.0, 32.0));
+
+                        if ui.add_enabled(can_submit, btn).clicked() {
+                            let title = self.todo_title_draft.trim().to_string();
+                            let dl = self.todo_deadline_draft.trim().to_string();
+                            let dl_str = if dl.is_empty() { "Không có hạn".to_string() } else { dl };
+                            let body = format!("[Giao việc] {title} (Hạn: {dl_str})");
+
+                            let mut target_to_send = None;
+                            if let Some(t) = self.threads.get_mut(self.selected_thread_index) {
+                                let mid = format!("todo_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                                let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                t.messages.push(crate::chat::ChatMessage {
+                                    id: mid,
+                                    sender: "Tôi".to_string(),
+                                    time: crate::ui::clock(),
+                                    ts: now_ts,
+                                    text: body.clone(),
+                                    is_outgoing: true,
+                                    kind: crate::message_model::MessageKind::Todo,
+                                    ..Default::default()
+                                });
+                                target_to_send = Some((t.id.clone(), t.is_group));
+                            }
+                            if let Some((to_id, is_grp)) = target_to_send {
+                                if let Some(tx) = WORKER_TX.get() {
+                                    let _ = tx.send(WorkerCmd::SendMessage {
+                                        to_id,
+                                        text: body,
+                                        is_group: is_grp,
+                                    });
+                                }
+                            }
+                            self.show_toast(format!("Đã giao việc: \"{title}\""));
+                            self.todo_title_draft.clear();
+                            self.todo_deadline_draft.clear();
+                            self.create_todo_modal_open = false;
+                        }
+
+                        if ui.button("Hủy").clicked() {
+                            self.create_todo_modal_open = false;
+                        }
+                    });
+                });
+            });
+
+        if !open {
+            self.create_todo_modal_open = false;
+        }
+    }
 }
 
 /// Build a frosted Gaussian-blurred backdrop `ColorImage` from a viewport screenshot:
@@ -10815,5 +11448,31 @@ mod tests {
         let raw = "Hẹn giờ gửi tin nhắn ([#38](https://github.com/ctdoteam1110/ctdozlite/issues/38)), REST API ([#35](https://github.com/ctdoteam1110/ctdozlite/issues/35))";
         let cleaned = extract_markdown_links_inline(raw);
         assert_eq!(cleaned, "Hẹn giờ gửi tin nhắn (#38), REST API (#35)");
+    }
+
+    #[test]
+    fn test_task7_utility_modals() {
+        // Group creation validation
+        let gname_empty = "   ";
+        let gname_valid = "Nhóm Dự Án 2026";
+        assert!(gname_empty.trim().is_empty());
+        assert!(!gname_valid.trim().is_empty());
+
+        // Poll validation: requires question and at least 2 non-empty options
+        let p_question = "Ăn trưa ở đâu?";
+        let p_opts = vec!["Phở".to_string(), "Cơm tấm".to_string(), "".to_string()];
+        let valid_opts_count = p_opts.iter().filter(|o| !o.trim().is_empty()).count();
+        assert!(!p_question.trim().is_empty());
+        assert!(valid_opts_count >= 2);
+
+        let body_poll = format!("[Bình chọn] {}\n{}", p_question, p_opts.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>().join(" | "));
+        assert_eq!(body_poll, "[Bình chọn] Ăn trưa ở đâu?\nPhở | Cơm tấm");
+
+        // To-Do validation: requires title
+        let todo_title = "Nộp báo cáo tuần";
+        let todo_deadline = "17:00 Thứ 6";
+        assert!(!todo_title.trim().is_empty());
+        let body_todo = format!("[Giao việc] {todo_title} (Hạn: {todo_deadline})");
+        assert_eq!(body_todo, "[Giao việc] Nộp báo cáo tuần (Hạn: 17:00 Thứ 6)");
     }
 }

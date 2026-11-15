@@ -8793,6 +8793,10 @@ impl ZaloGuiApp {
         self.render_edit_history_modal(ctx, pal);
         self.render_folder_modal(ctx, pal);
         self.render_settings_modal(ctx, pal);
+        self.render_create_group_modal(ctx, pal);
+        self.render_add_member_modal(ctx, pal);
+        self.render_create_poll_modal(ctx, pal);
+        self.render_create_todo_modal(ctx, pal);
 
         if let Some((del_idx, del_tid, del_name, del_is_group, del_last_id)) =
             self.pending_delete_thread.clone()

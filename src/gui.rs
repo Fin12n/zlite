@@ -1667,6 +1667,7 @@ pub struct ZaloGuiApp {
     pub(crate) group_name_draft: String,
     pub(crate) add_member_modal_open: bool,
     pub(crate) add_member_search: String,
+    pub(crate) group_members_selection: HashSet<String>,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
     // Background channels
@@ -2017,6 +2018,7 @@ impl ZaloGuiApp {
             group_name_draft: String::new(),
             add_member_modal_open: false,
             add_member_search: String::new(),
+            group_members_selection: HashSet::new(),
             last_typing_sent_at: None,
             last_synced_icon_unread: None,
             event_rx: rx,

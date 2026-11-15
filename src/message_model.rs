@@ -21,6 +21,9 @@ pub enum MessageKind {
     Action,
     WebContent,
     Delete,
+    Poll,
+    Todo,
+    Reminder,
     #[default]
     Unknown,
 }
@@ -39,6 +42,9 @@ impl MessageKind {
             18 => Self::Video,
             19 => Self::File,
             20 => Self::Recall,
+            26 => Self::Poll,
+            27 => Self::Todo,
+            28 => Self::Reminder,
             _ => Self::Unknown,
         }
     }
@@ -130,6 +136,9 @@ impl MessageKind {
             "chat.list.action" => Self::Action,
             "chat.webcontent" | "chat.webcontent.v2" => Self::WebContent,
             "chat.delete" => Self::Delete,
+            "chat.poll" | "poll" => Self::Poll,
+            "chat.todo" | "todo" => Self::Todo,
+            "chat.reminder" | "reminder" => Self::Reminder,
             _ => Self::Unknown,
         }
     }
@@ -325,5 +334,15 @@ mod archive_code_tests {
             assert_eq!(MessageKind::archive_wire_name(code), None);
         }
         assert_ne!(MessageKind::from_archive_code(33), MessageKind::Recall);
+    }
+
+    #[test]
+    fn test_extended_message_kinds() {
+        assert_eq!(MessageKind::from_original_internal_code(26), MessageKind::Poll);
+        assert_eq!(MessageKind::from_original_internal_code(27), MessageKind::Todo);
+        assert_eq!(MessageKind::from_original_internal_code(28), MessageKind::Reminder);
+        assert_eq!(MessageKind::from_wire_name("chat.poll"), MessageKind::Poll);
+        assert_eq!(MessageKind::from_wire_name("chat.todo"), MessageKind::Todo);
+        assert_eq!(MessageKind::from_wire_name("chat.reminder"), MessageKind::Reminder);
     }
 }

@@ -325,6 +325,9 @@ impl ChatMessage {
                 Some(4) | Some(13) => Some("Sticker Zalo"),
                 Some(18) => Some("Video Zalo"),
                 Some(19) => Some("Tập tin Zalo"),
+                Some(26) => Some("Bình chọn Zalo"),
+                Some(27) => Some("Giao việc Zalo"),
+                Some(28) => Some("Nhắc hẹn Zalo"),
                 _ => None,
             }
         });
@@ -347,6 +350,9 @@ impl ChatMessage {
         let label_kind = match self.text.trim() {
             "[Photo]" | "[Hình ảnh]" => Some("Hình ảnh Zalo"),
             "[Video]" => Some("Video Zalo"),
+            "[Bình chọn]" | "[Poll]" => Some("Bình chọn Zalo"),
+            "[Giao việc]" | "[To-Do]" => Some("Giao việc Zalo"),
+            "[Nhắc hẹn]" | "[Reminder]" => Some("Nhắc hẹn Zalo"),
             _ => None,
         };
         if let Some(kind) = source_kind.or(label_kind) {

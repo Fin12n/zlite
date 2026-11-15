@@ -228,14 +228,17 @@ impl ThemePalette {
         ctx.set_style(style);
     }
 
-    /// Resolve 40x40 badge background color based on file extension (ZDS / UI/UX Pro Max)
-    pub(super) fn file_badge_color(&self, ext: &str) -> Color32 {
-        match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+    /// Resolve 40x40 badge background color based on file name or extension (ZDS / UI/UX Pro Max)
+    pub(super) fn file_badge_color(&self, ext_or_filename: &str) -> Color32 {
+        let clean = ext_or_filename.trim().to_ascii_lowercase();
+        let actual_ext = clean.rsplit('.').next().unwrap_or(&clean);
+        match actual_ext {
             "pdf" => Color32::from_rgb(235, 87, 87),          // Red #EB5757
             "doc" | "docx" => Color32::from_rgb(45, 120, 240), // Blue #2D78F0
             "xls" | "xlsx" | "csv" => Color32::from_rgb(39, 174, 96), // Green #27AE60
             "ppt" | "pptx" => Color32::from_rgb(242, 153, 74), // Orange #F2994A
             "zip" | "rar" | "7z" | "tar" | "gz" => Color32::from_rgb(242, 201, 76), // Amber #F2C94C
+            "mp4" | "mov" | "mkv" | "avi" | "webm" => Color32::from_rgb(124, 58, 237), // Purple #7C3AED
             _ => self.primary,
         }
     }

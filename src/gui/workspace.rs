@@ -1,4 +1,4 @@
-use super::*;
+﻿use super::*;
 
 /// Computes the vertical height reserved for the central chat message ScrollArea
 /// so the composer toolbar and optional sticker picker remain visible on compact windows (e.g. 480x360).
@@ -4264,540 +4264,491 @@ impl ZaloGuiApp {
                                 }
                             }
 
-                        // ── SECTION 3: Ảnh/Video (4-column grid + "Xem tất cả" like native Zalo) ──
+                        // ── KHO LƯU TRỮ: 3 TAB MEDIA / TỆP / LINK (ZDS v4.1 Segmented Repository) ──
                         {
-                            let sec_media_id = Id::new(("drw_sec_media", d_id.as_str()));
-                            let mut sec_media_open: bool =
-                                ui.ctx().data(|d| d.get_temp(sec_media_id)).unwrap_or(true);
-                            let all_media_id = Id::new(("drw_all_media", d_id.as_str()));
-                            let mut show_all_media: bool =
-                                ui.ctx().data(|d| d.get_temp(all_media_id)).unwrap_or(false);
+                            let media_tab_id = Id::new(("drw_media_tab", d_id.as_str()));
+                            let mut active_tab: usize =
+                                ui.ctx().data(|d| d.get_temp(media_tab_id)).unwrap_or(0);
+                            let all_items_id = Id::new(("drw_all_items", d_id.as_str()));
+                            let mut show_all: bool =
+                                ui.ctx().data(|d| d.get_temp(all_items_id)).unwrap_or(false);
 
                             egui::Frame::none()
                                 .inner_margin(Margin::symmetric(16.0, 12.0))
                                 .show(ui, |ui| {
-                                    let hdr_resp = ui
-                                        .horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new("Ảnh/Video")
-                                                    .size(13.0)
-                                                    .color(pal.text_primary)
-                                                    .strong(),
-                                            );
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        RichText::new(if sec_media_open {
-                                                            lucide::CHEVRON_DOWN
-                                                        } else {
-                                                            lucide::CHEVRON_RIGHT
-                                                        })
-                                                        .size(13.0)
-                                                        .color(pal.text_secondary),
-                                                    );
-                                                },
-                                            );
-                                        })
-                                        .response
-                                        .interact(Sense::click());
-                                    if hdr_resp.clicked() {
-                                        sec_media_open = !sec_media_open;
-                                        ui.ctx().data_mut(|d| d.insert_temp(sec_media_id, sec_media_open));
-                                    }
-
-                                    if sec_media_open {
-                                        ui.add_space(8.0);
-                                        if shared_photos.is_empty() {
-                                            ui.label(
-                                                RichText::new("Chưa có Ảnh/Video được chia sẻ trong hội thoại này")
-                                                    .size(11.5)
-                                                    .color(pal.text_muted),
-                                            );
-                                        } else {
-                                            let limit = if show_all_media { 40 } else { 8 };
-                                            let gap = 6.0_f32;
-                                            let cell_sz =
-                                                ((drawer_w - 32.0 - gap * 3.0) / 4.0).floor().max(48.0);
-                                            for chunk in shared_photos
-                                                .iter()
-                                                .take(limit)
-                                                .collect::<Vec<_>>()
-                                                .chunks(4)
-                                            {
-                                                ui.horizontal(|ui| {
-                                                    ui.spacing_mut().item_spacing.x = gap;
-                                                    for (tkey, thumb_u, full_u, ptitle) in chunk {
-                                                        if !self.sticker_textures.contains_key(tkey)
-                                                            && self.loading_stickers.insert(tkey.clone())
-                                                        {
-                                                            if let Some(tx) = WORKER_TX.get() {
-                                                                let _ = tx.send(
-                                                                    WorkerCmd::FetchStickerImage {
-                                                                        key: tkey.clone(),
-                                                                        url: thumb_u.clone(),
-                                                                    },
-                                                                );
-                                                            }
-                                                        }
-                                                        let (cell_r, cell_resp) = ui
-                                                            .allocate_exact_size(
-                                                                Vec2::splat(cell_sz),
-                                                                Sense::click(),
-                                                            );
-                                                        ui.painter().rect_filled(
-                                                            cell_r,
-                                                            Rounding::same(6.0),
-                                                            pal.bg_elevated,
-                                                        );
-                                                        if let Some(tex) =
-                                                            self.sticker_textures.get(tkey)
-                                                        {
-                                                            ui.painter().image(
-                                                                tex.id(),
-                                                                cell_r,
-                                                                Rect::from_min_max(
-                                                                    Pos2::ZERO,
-                                                                    Pos2::new(1.0, 1.0),
-                                                                ),
-                                                                Color32::WHITE,
-                                                            );
-                                                        } else {
-                                                            draw_icon_image(
-                                                                ui.painter(),
-                                                                cell_r.center(),
-                                                                18.0,
-                                                                pal.text_muted,
-                                                            );
-                                                        }
-                                                        ui.painter().rect_stroke(
-                                                            cell_r,
-                                                            Rounding::same(6.0),
-                                                            Stroke::new(
-                                                                1.0_f32,
-                                                                if cell_resp.hovered() {
-                                                                    pal.primary
-                                                                } else {
-                                                                    pal.border
-                                                                },
-                                                            ),
-                                                        );
-                                                        if cell_resp
-                                                            .on_hover_cursor(CursorIcon::PointingHand)
-                                                            .on_hover_text("Xem ảnh phóng to")
-                                                            .clicked()
-                                                        {
-                                                            self.image_viewer =
-                                                                Some(ImageViewerModal {
-                                                                    tex_key: tkey.clone(),
-                                                                    hd_tex_key: self
-                                                                        .request_hd_texture(full_u),
-                                                                    full_url: full_u.clone(),
-                                                                    title: ptitle.clone(),
-                                                                    sender: d_name.clone(),
-                                                                    time: String::new(),
-                                                                    zoom: 1.0,
-                                                                    pan: Vec2::ZERO,
-                                                                });
-                                                        }
-                                                    }
-                                                });
-                                                ui.add_space(gap);
-                                            }
-
-                                            ui.add_space(4.0);
-                                            let view_all_btn = egui::Button::new(
-                                                RichText::new(if show_all_media {
-                                                    "Thu gọn"
-                                                } else {
-                                                    "Xem tất cả"
-                                                })
-                                                .size(12.0)
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("Kho lưu trữ")
+                                                .size(13.0)
                                                 .color(pal.text_primary)
                                                 .strong(),
-                                            )
-                                            .fill(pal.bg_elevated)
-                                            .stroke(Stroke::new(1.0_f32, pal.border))
-                                            .rounding(Rounding::same(6.0))
-                                            .min_size(Vec2::new(drawer_w - 32.0, 30.0));
-                                            if ui
-                                                .add(view_all_btn)
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .clicked()
-                                            {
-                                                show_all_media = !show_all_media;
-                                                ui.ctx().data_mut(|d| {
-                                                    d.insert_temp(all_media_id, show_all_media)
-                                                });
-                                            }
-                                        }
-                                    }
-                                });
-
-                            let (sep_media, _) =
-                                ui.allocate_exact_size(Vec2::new(drawer_w, 6.0), Sense::hover());
-                            ui.painter().rect_filled(sep_media, Rounding::ZERO, pal.bg_app);
-                        }
-
-                        // ── SECTION 4: File (Colored file badges + "Xem tất cả" like native Zalo) ──
-                        {
-                            let sec_file_id = Id::new(("drw_sec_file", d_id.as_str()));
-                            let mut sec_file_open: bool =
-                                ui.ctx().data(|d| d.get_temp(sec_file_id)).unwrap_or(true);
-                            let all_file_id = Id::new(("drw_all_file", d_id.as_str()));
-                            let mut show_all_files: bool =
-                                ui.ctx().data(|d| d.get_temp(all_file_id)).unwrap_or(false);
-
-                            egui::Frame::none()
-                                .inner_margin(Margin::symmetric(16.0, 12.0))
-                                .show(ui, |ui| {
-                                    let hdr_resp = ui
-                                        .horizontal(|ui| {
+                                        );
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            let total_count = shared_photos.len() + shared_files.len() + shared_links.len();
                                             ui.label(
-                                                RichText::new("File")
-                                                    .size(13.0)
-                                                    .color(pal.text_primary)
-                                                    .strong(),
-                                            );
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        RichText::new(if sec_file_open {
-                                                            lucide::CHEVRON_DOWN
-                                                        } else {
-                                                            lucide::CHEVRON_RIGHT
-                                                        })
-                                                        .size(13.0)
-                                                        .color(pal.text_secondary),
-                                                    );
-                                                },
-                                            );
-                                        })
-                                        .response
-                                        .interact(Sense::click());
-                                    if hdr_resp.clicked() {
-                                        sec_file_open = !sec_file_open;
-                                        ui.ctx().data_mut(|d| d.insert_temp(sec_file_id, sec_file_open));
-                                    }
-
-                                    if sec_file_open {
-                                        ui.add_space(8.0);
-                                        if shared_files.is_empty() {
-                                            ui.label(
-                                                RichText::new("Chưa có File được chia sẻ trong hội thoại này")
-                                                    .size(11.5)
+                                                RichText::new(format!("{total_count} mục"))
+                                                    .size(11.0)
                                                     .color(pal.text_muted),
                                             );
+                                        });
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    // Segmented Tab Bar (3 Tabs: Ảnh/Video, Tệp tin, Link)
+                                    let tabs = [
+                                        (format!("Ảnh ({})", shared_photos.len()), 0),
+                                        (format!("Tệp ({})", shared_files.len()), 1),
+                                        (format!("Link ({})", shared_links.len()), 2),
+                                    ];
+                                    let seg_h = 28.0_f32;
+                                    let seg_w = (drawer_w - 32.0).max(180.0);
+                                    let tab_w = (seg_w / 3.0).floor();
+
+                                    let (tab_bar_rect, _) = ui.allocate_exact_size(Vec2::new(seg_w, seg_h), Sense::hover());
+                                    ui.painter().rect_filled(tab_bar_rect, Rounding::same(6.0), pal.bg_elevated);
+                                    ui.painter().rect_stroke(tab_bar_rect, Rounding::same(6.0), Stroke::new(1.0_f32, pal.border_subtle));
+
+                                    for (idx, (label, tab_val)) in tabs.iter().enumerate() {
+                                        let t_min = Pos2::new(tab_bar_rect.min.x + idx as f32 * tab_w, tab_bar_rect.min.y);
+                                        let t_max = Pos2::new(if idx == 2 { tab_bar_rect.max.x } else { t_min.x + tab_w }, tab_bar_rect.max.y);
+                                        let t_rect = Rect::from_min_max(t_min, t_max);
+                                        let is_active = active_tab == *tab_val;
+
+                                        let resp = ui.interact(t_rect, Id::new(("tab_click", d_id.as_str(), idx)), Sense::click());
+                                        if is_active {
+                                            ui.painter().rect_filled(t_rect.shrink(2.0), Rounding::same(4.0), pal.bg_app);
+                                            ui.painter().rect_stroke(t_rect.shrink(2.0), Rounding::same(4.0), Stroke::new(1.0_f32, pal.border_focus));
+                                        }
+
+                                        let text_col = if is_active {
+                                            pal.primary
+                                        } else if resp.hovered() {
+                                            pal.text_primary
                                         } else {
-                                            let limit = if show_all_files { 30 } else { 3 };
-                                            for (_fmid, fname, furl, badge, bcol, sub_lbl, ftime) in
-                                                shared_files.iter().take(limit)
-                                            {
-                                                let row_resp = ui
-                                                    .horizontal(|ui| {
-                                                        let (icon_r, _) = ui.allocate_exact_size(
-                                                            Vec2::new(36.0, 36.0),
-                                                            Sense::hover(),
-                                                        );
-                                                        ui.painter().rect_filled(
-                                                            icon_r,
-                                                            Rounding::same(8.0),
-                                                            *bcol,
-                                                        );
-                                                        if *badge == "PLAY" {
-                                                            draw_icon_play(
-                                                                ui.painter(),
-                                                                icon_r.center(),
-                                                                13.5,
-                                                                Color32::WHITE,
-                                                            );
-                                                        } else {
-                                                            ui.painter().text(
-                                                                icon_r.center(),
-                                                                egui::Align2::CENTER_CENTER,
-                                                                *badge,
-                                                                FontId::proportional(12.5),
-                                                                Color32::WHITE,
-                                                            );
-                                                        }
-                                                        ui.add_space(8.0);
-                                                        let text_col_w =
-                                                            (drawer_w - 32.0 - 46.0).max(100.0);
-                                                        ui.allocate_ui_with_layout(
-                                                            Vec2::new(text_col_w, 36.0),
-                                                            Layout::top_down(Align::Min),
-                                                            |ui| {
-                                                                ui.spacing_mut().item_spacing.y = 2.0;
-                                                                ui.add(
-                                                                    egui::Label::new(
-                                                                        RichText::new(truncate_chars(
-                                                                            fname, 28,
-                                                                        ))
-                                                                        .size(12.2)
-                                                                        .color(pal.text_primary)
-                                                                        .strong(),
-                                                                    )
-                                                                    .truncate(),
-                                                                );
-                                                                ui.horizontal(|ui| {
-                                                                    ui.label(
-                                                                        RichText::new(sub_lbl)
-                                                                            .size(10.8)
-                                                                            .color(pal.text_muted),
-                                                                    );
-                                                                    let (clk_r, _) = ui.allocate_exact_size(
-                                                                        Vec2::new(11.0, 11.0),
-                                                                        Sense::hover(),
-                                                                    );
-                                                                    draw_icon_clock(
-                                                                        ui.painter(),
-                                                                        clk_r.center(),
-                                                                        10.5,
-                                                                        pal.text_muted,
-                                                                    );
-                                                                    ui.with_layout(
-                                                                        Layout::right_to_left(
-                                                                            Align::Center,
-                                                                        ),
-                                                                        |ui| {
-                                                                            ui.label(
-                                                                                RichText::new(ftime)
-                                                                                    .size(10.8)
-                                                                                    .color(
-                                                                                        pal.text_muted,
-                                                                                    ),
-                                                                            );
+                                            pal.text_secondary
+                                        };
+                                        ui.painter().text(
+                                            t_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            label,
+                                            FontId::proportional(11.5),
+                                            text_col,
+                                        );
+
+                                        if resp.clicked() && active_tab != *tab_val {
+                                            active_tab = *tab_val;
+                                            ui.ctx().data_mut(|d| d.insert_temp(media_tab_id, active_tab));
+                                        }
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    // Content tương ứng từng Tab
+                                    match active_tab {
+                                        0 => {
+                                            // Tab 0: Ảnh/Video (Lưới 3 cột vuông chuẩn ZDS)
+                                            if shared_photos.is_empty() {
+                                                ui.label(
+                                                    RichText::new("Chưa có Ảnh/Video nào được chia sẻ")
+                                                        .size(11.5)
+                                                        .color(pal.text_muted),
+                                                );
+                                            } else {
+                                                let limit = if show_all { 45 } else { 9 };
+                                                let gap = 6.0_f32;
+                                                let cell_sz = ((drawer_w - 32.0 - gap * 2.0) / 3.0).floor().max(48.0);
+                                                for chunk in shared_photos
+                                                    .iter()
+                                                    .take(limit)
+                                                    .collect::<Vec<_>>()
+                                                    .chunks(3)
+                                                {
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = gap;
+                                                        for (tkey, thumb_u, full_u, ptitle) in chunk {
+                                                            if !self.sticker_textures.contains_key(tkey)
+                                                                && self.loading_stickers.insert(tkey.clone())
+                                                            {
+                                                                if let Some(tx) = WORKER_TX.get() {
+                                                                    let _ = tx.send(
+                                                                        WorkerCmd::FetchStickerImage {
+                                                                            key: tkey.clone(),
+                                                                            url: thumb_u.clone(),
                                                                         },
                                                                     );
-                                                                });
-                                                            },
-                                                        );
-                                                    })
-                                                    .response
-                                                    .interact(Sense::click())
-                                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                                    .on_hover_text(format!("Tải tập tin: {fname}"));
-                                                if row_resp.clicked() && !furl.is_empty() {
-                                                    self.show_toast(format!(
-                                                        "⏳ Đang tải tập tin \"{fname}\"…"
-                                                    ));
-                                                    if let Some(tx) = WORKER_TX.get() {
-                                                        let _ = tx.send(WorkerCmd::DownloadFile {
-                                                            url: furl.clone(),
-                                                            file_name: fname.clone(),
-                                                            download_dir: self
-                                                                .settings
-                                                                .download_dir
-                                                                .clone(),
+                                                                }
+                                                            }
+                                                            let (cell_r, cell_resp) = ui
+                                                                .allocate_exact_size(
+                                                                    Vec2::splat(cell_sz),
+                                                                    Sense::click(),
+                                                                );
+                                                            ui.painter().rect_filled(
+                                                                cell_r,
+                                                                Rounding::same(6.0),
+                                                                pal.bg_elevated,
+                                                            );
+                                                            if let Some(tex) =
+                                                                self.sticker_textures.get(tkey)
+                                                            {
+                                                                ui.painter().image(
+                                                                    tex.id(),
+                                                                    cell_r,
+                                                                    Rect::from_min_max(
+                                                                        Pos2::ZERO,
+                                                                        Pos2::new(1.0, 1.0),
+                                                                    ),
+                                                                    Color32::WHITE,
+                                                                );
+                                                            } else {
+                                                                draw_icon_image(
+                                                                    ui.painter(),
+                                                                    cell_r.center(),
+                                                                    18.0,
+                                                                    pal.text_muted,
+                                                                );
+                                                            }
+                                                            ui.painter().rect_stroke(
+                                                                cell_r,
+                                                                Rounding::same(6.0),
+                                                                Stroke::new(
+                                                                    1.0_f32,
+                                                                    if cell_resp.hovered() {
+                                                                        pal.primary
+                                                                    } else {
+                                                                        pal.border_subtle
+                                                                    },
+                                                                ),
+                                                            );
+                                                            if cell_resp
+                                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                                .on_hover_text("Xem ảnh phóng to")
+                                                                .clicked()
+                                                            {
+                                                                self.image_viewer =
+                                                                    Some(ImageViewerModal {
+                                                                        tex_key: tkey.clone(),
+                                                                        hd_tex_key: self
+                                                                            .request_hd_texture(full_u),
+                                                                        full_url: full_u.clone(),
+                                                                        title: ptitle.clone(),
+                                                                        sender: d_name.clone(),
+                                                                        time: String::new(),
+                                                                        zoom: 1.0,
+                                                                        pan: Vec2::ZERO,
+                                                                    });
+                                                            }
+                                                        }
+                                                    });
+                                                    ui.add_space(gap);
+                                                }
+
+                                                if shared_photos.len() > 9 {
+                                                    ui.add_space(4.0);
+                                                    let btn_text = if show_all {
+                                                        "Thu gọn".to_string()
+                                                    } else {
+                                                        format!("Xem tất cả ({})", shared_photos.len())
+                                                    };
+                                                    let view_all_btn = egui::Button::new(
+                                                        RichText::new(btn_text)
+                                                            .size(11.5)
+                                                            .color(pal.text_primary)
+                                                            .strong(),
+                                                    )
+                                                    .fill(pal.bg_elevated)
+                                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                                    .rounding(Rounding::same(6.0))
+                                                    .min_size(Vec2::new(drawer_w - 32.0, 28.0));
+                                                    if ui
+                                                        .add(view_all_btn)
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .clicked()
+                                                    {
+                                                        show_all = !show_all;
+                                                        ui.ctx().data_mut(|d| {
+                                                            d.insert_temp(all_items_id, show_all)
                                                         });
                                                     }
                                                 }
-                                                ui.add_space(6.0);
-                                            }
-
-                                            ui.add_space(2.0);
-                                            let view_all_btn = egui::Button::new(
-                                                RichText::new(if show_all_files {
-                                                    "Thu gọn"
-                                                } else {
-                                                    "Xem tất cả"
-                                                })
-                                                .size(12.0)
-                                                .color(pal.text_primary)
-                                                .strong(),
-                                            )
-                                            .fill(pal.bg_elevated)
-                                            .stroke(Stroke::new(1.0_f32, pal.border))
-                                            .rounding(Rounding::same(6.0))
-                                            .min_size(Vec2::new(drawer_w - 32.0, 30.0));
-                                            if ui
-                                                .add(view_all_btn)
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .clicked()
-                                            {
-                                                show_all_files = !show_all_files;
-                                                ui.ctx().data_mut(|d| {
-                                                    d.insert_temp(all_file_id, show_all_files)
-                                                });
                                             }
                                         }
-                                    }
-                                });
-
-                            let (sep_f, _) =
-                                ui.allocate_exact_size(Vec2::new(drawer_w, 6.0), Sense::hover());
-                            ui.painter().rect_filled(sep_f, Rounding::ZERO, pal.bg_app);
-                        }
-
-                        // ── SECTION 5: Link (Title + blue domain + "Xem tất cả" like native Zalo) ──
-                        {
-                            let sec_link_id = Id::new(("drw_sec_link", d_id.as_str()));
-                            let mut sec_link_open: bool =
-                                ui.ctx().data(|d| d.get_temp(sec_link_id)).unwrap_or(true);
-                            let all_link_id = Id::new(("drw_all_link", d_id.as_str()));
-                            let mut show_all_links: bool =
-                                ui.ctx().data(|d| d.get_temp(all_link_id)).unwrap_or(false);
-
-                            egui::Frame::none()
-                                .inner_margin(Margin::symmetric(16.0, 12.0))
-                                .show(ui, |ui| {
-                                    let hdr_resp = ui
-                                        .horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new("Link")
-                                                    .size(13.0)
-                                                    .color(pal.text_primary)
-                                                    .strong(),
-                                            );
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        RichText::new(if sec_link_open {
-                                                            lucide::CHEVRON_DOWN
-                                                        } else {
-                                                            lucide::CHEVRON_RIGHT
-                                                        })
-                                                        .size(13.0)
-                                                        .color(pal.text_secondary),
-                                                    );
-                                                },
-                                            );
-                                        })
-                                        .response
-                                        .interact(Sense::click());
-                                    if hdr_resp.clicked() {
-                                        sec_link_open = !sec_link_open;
-                                        ui.ctx().data_mut(|d| d.insert_temp(sec_link_id, sec_link_open));
-                                    }
-
-                                    if sec_link_open {
-                                        ui.add_space(8.0);
-                                        if shared_links.is_empty() {
-                                            ui.label(
-                                                RichText::new("Chưa có Link được chia sẻ trong hội thoại này")
-                                                    .size(11.5)
-                                                    .color(pal.text_muted),
-                                            );
-                                        } else {
-                                            let limit = if show_all_links { 30 } else { 3 };
-                                            for (ltitle, lurl, ldomain, ltime) in
-                                                shared_links.iter().take(limit)
-                                            {
-                                                let row_resp = ui
-                                                    .horizontal(|ui| {
-                                                        let (icon_r, _) = ui.allocate_exact_size(
-                                                            Vec2::new(36.0, 36.0),
-                                                            Sense::hover(),
-                                                        );
-                                                        ui.painter().rect_filled(
-                                                            icon_r,
-                                                            Rounding::same(8.0),
-                                                            pal.bg_elevated,
-                                                        );
-                                                        ui.painter().rect_stroke(
-                                                            icon_r,
-                                                            Rounding::same(8.0),
-                                                            Stroke::new(1.0_f32, pal.border),
-                                                        );
-                                                        ui.painter().text(
-                                                            icon_r.center(),
-                                                            egui::Align2::CENTER_CENTER,
-                                                            "🔗",
-                                                            FontId::proportional(14.0),
-                                                            pal.primary_hover,
-                                                        );
-                                                        ui.add_space(8.0);
-                                                        let text_col_w =
-                                                            (drawer_w - 32.0 - 46.0).max(100.0);
-                                                        ui.allocate_ui_with_layout(
-                                                            Vec2::new(text_col_w, 36.0),
-                                                            Layout::top_down(Align::Min),
-                                                            |ui| {
-                                                                ui.spacing_mut().item_spacing.y = 2.0;
-                                                                ui.add(
-                                                                    egui::Label::new(
-                                                                        RichText::new(truncate_chars(
-                                                                            ltitle, 28,
-                                                                        ))
-                                                                        .size(12.2)
-                                                                        .color(pal.text_primary)
-                                                                        .strong(),
-                                                                    )
-                                                                    .truncate(),
+                                        1 => {
+                                            // Tab 1: Tệp tin (Sử dụng pal.file_badge_color)
+                                            if shared_files.is_empty() {
+                                                ui.label(
+                                                    RichText::new("Chưa có Tệp tin nào được chia sẻ")
+                                                        .size(11.5)
+                                                        .color(pal.text_muted),
+                                                );
+                                            } else {
+                                                let limit = if show_all { 30 } else { 5 };
+                                                for (_fmid, fname, furl, badge, _bcol, sub_lbl, ftime) in
+                                                    shared_files.iter().take(limit)
+                                                {
+                                                    let badge_col = pal.file_badge_color(fname);
+                                                    let row_resp = ui
+                                                        .horizontal(|ui| {
+                                                            let (icon_r, _) = ui.allocate_exact_size(
+                                                                Vec2::new(36.0, 36.0),
+                                                                Sense::hover(),
+                                                            );
+                                                            ui.painter().rect_filled(
+                                                                icon_r,
+                                                                Rounding::same(8.0),
+                                                                badge_col,
+                                                            );
+                                                            if *badge == "PLAY" {
+                                                                draw_icon_play(
+                                                                    ui.painter(),
+                                                                    icon_r.center(),
+                                                                    13.5,
+                                                                    Color32::WHITE,
                                                                 );
-                                                                ui.horizontal(|ui| {
-                                                                    ui.label(
-                                                                        RichText::new(truncate_chars(
-                                                                            ldomain, 20,
-                                                                        ))
-                                                                        .size(11.0)
-                                                                        .color(pal.primary_hover),
+                                                            } else {
+                                                                ui.painter().text(
+                                                                    icon_r.center(),
+                                                                    egui::Align2::CENTER_CENTER,
+                                                                    *badge,
+                                                                    FontId::proportional(12.5),
+                                                                    Color32::WHITE,
+                                                                );
+                                                            }
+                                                            ui.add_space(8.0);
+                                                            let text_col_w =
+                                                                (drawer_w - 32.0 - 46.0).max(100.0);
+                                                            ui.allocate_ui_with_layout(
+                                                                Vec2::new(text_col_w, 36.0),
+                                                                Layout::top_down(Align::Min),
+                                                                |ui| {
+                                                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                                                    ui.add(
+                                                                        egui::Label::new(
+                                                                            RichText::new(truncate_chars(
+                                                                                fname, 26,
+                                                                            ))
+                                                                            .size(12.2)
+                                                                            .color(pal.text_primary)
+                                                                            .strong(),
+                                                                        )
+                                                                        .truncate(),
                                                                     );
-                                                                    ui.with_layout(
-                                                                        Layout::right_to_left(
-                                                                            Align::Center,
-                                                                        ),
-                                                                        |ui| {
-                                                                            ui.label(
-                                                                                RichText::new(ltime)
-                                                                                    .size(10.8)
-                                                                                    .color(
-                                                                                        pal.text_muted,
-                                                                                    ),
-                                                                            );
-                                                                        },
-                                                                    );
-                                                                });
-                                                            },
-                                                        );
-                                                    })
-                                                    .response
-                                                    .interact(Sense::click())
-                                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                                    .on_hover_text(lurl);
-                                                if row_resp.clicked() {
-                                                    ui.ctx()
-                                                        .open_url(egui::OpenUrl::new_tab(lurl));
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(
+                                                                            RichText::new(sub_lbl)
+                                                                                .size(10.8)
+                                                                                .color(pal.text_muted),
+                                                                        );
+                                                                        let (clk_r, _) = ui.allocate_exact_size(
+                                                                            Vec2::new(11.0, 11.0),
+                                                                            Sense::hover(),
+                                                                        );
+                                                                        draw_icon_clock(
+                                                                            ui.painter(),
+                                                                            clk_r.center(),
+                                                                            10.5,
+                                                                            pal.text_muted,
+                                                                        );
+                                                                        ui.with_layout(
+                                                                            Layout::right_to_left(
+                                                                                Align::Center,
+                                                                            ),
+                                                                            |ui| {
+                                                                                ui.label(
+                                                                                    RichText::new(ftime)
+                                                                                        .size(10.8)
+                                                                                        .color(
+                                                                                            pal.text_muted,
+                                                                                        ),
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    });
+                                                                },
+                                                            );
+                                                        })
+                                                        .response
+                                                        .interact(Sense::click())
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .on_hover_text(format!("Tải tập tin: {fname}"));
+                                                    if row_resp.clicked() && !furl.is_empty() {
+                                                        self.show_toast(format!(
+                                                            "⏳ Đang tải tập tin \"{fname}\"…"
+                                                        ));
+                                                        if let Some(tx) = WORKER_TX.get() {
+                                                            let _ = tx.send(WorkerCmd::DownloadFile {
+                                                                url: furl.clone(),
+                                                                file_name: fname.clone(),
+                                                                download_dir: self
+                                                                    .settings
+                                                                    .download_dir
+                                                                    .clone(),
+                                                            });
+                                                        }
+                                                    }
+                                                    ui.add_space(6.0);
                                                 }
-                                                ui.add_space(6.0);
-                                            }
 
-                                            ui.add_space(2.0);
-                                            let view_all_btn = egui::Button::new(
-                                                RichText::new(if show_all_links {
-                                                    "Thu gọn"
-                                                } else {
-                                                    "Xem tất cả"
-                                                })
-                                                .size(12.0)
-                                                .color(pal.text_primary)
-                                                .strong(),
-                                            )
-                                            .fill(pal.bg_elevated)
-                                            .stroke(Stroke::new(1.0_f32, pal.border))
-                                            .rounding(Rounding::same(6.0))
-                                            .min_size(Vec2::new(drawer_w - 32.0, 30.0));
-                                            if ui
-                                                .add(view_all_btn)
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .clicked()
-                                            {
-                                                show_all_links = !show_all_links;
-                                                ui.ctx().data_mut(|d| {
-                                                    d.insert_temp(all_link_id, show_all_links)
-                                                });
+                                                if shared_files.len() > 5 {
+                                                    ui.add_space(2.0);
+                                                    let btn_text = if show_all {
+                                                        "Thu gọn".to_string()
+                                                    } else {
+                                                        format!("Xem tất cả ({})", shared_files.len())
+                                                    };
+                                                    let view_all_btn = egui::Button::new(
+                                                        RichText::new(btn_text)
+                                                            .size(11.5)
+                                                            .color(pal.text_primary)
+                                                            .strong(),
+                                                    )
+                                                    .fill(pal.bg_elevated)
+                                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                                    .rounding(Rounding::same(6.0))
+                                                    .min_size(Vec2::new(drawer_w - 32.0, 28.0));
+                                                    if ui
+                                                        .add(view_all_btn)
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .clicked()
+                                                    {
+                                                        show_all = !show_all;
+                                                        ui.ctx().data_mut(|d| {
+                                                            d.insert_temp(all_items_id, show_all)
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            // Tab 2: Liên kết (Link)
+                                            if shared_links.is_empty() {
+                                                ui.label(
+                                                    RichText::new("Chưa có Link nào được chia sẻ")
+                                                        .size(11.5)
+                                                        .color(pal.text_muted),
+                                                );
+                                            } else {
+                                                let limit = if show_all { 30 } else { 5 };
+                                                for (ltitle, lurl, ldomain, ltime) in
+                                                    shared_links.iter().take(limit)
+                                                {
+                                                    let row_resp = ui
+                                                        .horizontal(|ui| {
+                                                            let (icon_r, _) = ui.allocate_exact_size(
+                                                                Vec2::new(36.0, 36.0),
+                                                                Sense::hover(),
+                                                            );
+                                                            ui.painter().rect_filled(
+                                                                icon_r,
+                                                                Rounding::same(8.0),
+                                                                pal.bg_elevated,
+                                                            );
+                                                            ui.painter().rect_stroke(
+                                                                icon_r,
+                                                                Rounding::same(8.0),
+                                                                Stroke::new(1.0_f32, pal.border_subtle),
+                                                            );
+                                                            ui.painter().text(
+                                                                icon_r.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                "🔗",
+                                                                FontId::proportional(14.0),
+                                                                pal.primary_hover,
+                                                            );
+                                                            ui.add_space(8.0);
+                                                            let text_col_w =
+                                                                (drawer_w - 32.0 - 46.0).max(100.0);
+                                                            ui.allocate_ui_with_layout(
+                                                                Vec2::new(text_col_w, 36.0),
+                                                                Layout::top_down(Align::Min),
+                                                                |ui| {
+                                                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                                                    ui.add(
+                                                                        egui::Label::new(
+                                                                            RichText::new(truncate_chars(
+                                                                                ltitle, 26,
+                                                                            ))
+                                                                            .size(12.2)
+                                                                            .color(pal.text_primary)
+                                                                            .strong(),
+                                                                        )
+                                                                        .truncate(),
+                                                                    );
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.label(
+                                                                            RichText::new(truncate_chars(
+                                                                                ldomain, 20,
+                                                                            ))
+                                                                            .size(11.0)
+                                                                            .color(pal.primary),
+                                                                        );
+                                                                        ui.with_layout(
+                                                                            Layout::right_to_left(
+                                                                                Align::Center,
+                                                                            ),
+                                                                            |ui| {
+                                                                                ui.label(
+                                                                                    RichText::new(ltime)
+                                                                                        .size(10.8)
+                                                                                        .color(
+                                                                                            pal.text_muted,
+                                                                                        ),
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                    });
+                                                                },
+                                                            );
+                                                        })
+                                                        .response
+                                                        .interact(Sense::click())
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .on_hover_text(lurl);
+                                                    if row_resp.clicked() {
+                                                        ui.ctx()
+                                                            .open_url(egui::OpenUrl::new_tab(lurl));
+                                                    }
+                                                    ui.add_space(6.0);
+                                                }
+
+                                                if shared_links.len() > 5 {
+                                                    ui.add_space(2.0);
+                                                    let btn_text = if show_all {
+                                                        "Thu gọn".to_string()
+                                                    } else {
+                                                        format!("Xem tất cả ({})", shared_links.len())
+                                                    };
+                                                    let view_all_btn = egui::Button::new(
+                                                        RichText::new(btn_text)
+                                                            .size(11.5)
+                                                            .color(pal.text_primary)
+                                                            .strong(),
+                                                    )
+                                                    .fill(pal.bg_elevated)
+                                                    .stroke(Stroke::new(1.0_f32, pal.border))
+                                                    .rounding(Rounding::same(6.0))
+                                                    .min_size(Vec2::new(drawer_w - 32.0, 28.0));
+                                                    if ui
+                                                        .add(view_all_btn)
+                                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                                        .clicked()
+                                                    {
+                                                        show_all = !show_all;
+                                                        ui.ctx().data_mut(|d| {
+                                                            d.insert_temp(all_items_id, show_all)
+                                                        });
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 });
 
-                            let (sep_l, _) =
+                            let (sep_repo, _) =
                                 ui.allocate_exact_size(Vec2::new(drawer_w, 6.0), Sense::hover());
-                            ui.painter().rect_filled(sep_l, Rounding::ZERO, pal.bg_app);
+                            ui.painter().rect_filled(sep_repo, Rounding::ZERO, pal.bg_app);
                         }
-
                         // ── SECTION 6: Thiết lập bảo mật (Tin nhắn tự xóa + Ẩn trò chuyện) ──
                         {
                             let sec_sec_id = Id::new(("drw_sec_security", d_id.as_str()));
@@ -10648,5 +10599,24 @@ mod quote_navigation_tests {
         assert_ne!(filter, ThreadFilter::All);
         assert_ne!(filter, ThreadFilter::Direct);
         assert_ne!(filter, ThreadFilter::Groups);
+    }
+
+    #[test]
+    fn test_task6_media_repository_tabs() {
+        let drawer_w = 340.0_f32;
+        let seg_w = (drawer_w - 32.0).max(180.0);
+        let tab_w = (seg_w / 3.0).floor();
+        assert_eq!(seg_w, 308.0);
+        assert_eq!(tab_w, 102.0);
+
+        let gap = 6.0_f32;
+        let cell_sz = ((drawer_w - 32.0 - gap * 2.0) / 3.0).floor().max(48.0);
+        assert_eq!(cell_sz, 98.0);
+
+        let pal = crate::gui::theme::ThemePalette::dark();
+        assert_eq!(pal.file_badge_color("document.pdf"), Color32::from_rgb(235, 87, 87));
+        assert_eq!(pal.file_badge_color("sheet.xlsx"), Color32::from_rgb(39, 174, 96));
+        assert_eq!(pal.file_badge_color("video.mp4"), Color32::from_rgb(124, 58, 237));
+        assert_eq!(pal.file_badge_color("archive.zip"), Color32::from_rgb(242, 201, 76));
     }
 }

@@ -83,7 +83,7 @@ impl ZaloGuiApp {
         let screen_w = screen_rect.width();
         let is_compact_w = screen_w < 880.0;
         let is_narrow_w = screen_w < 620.0;
-        let left_rail_w = if is_narrow_w { 52.0 } else { 62.0 };
+        let left_rail_w = if is_narrow_w { 52.0 } else { 64.0 };
 
         // -------------------------------------------------------------------
         // 1. LEFT NAVIGATION RAIL (Replaces top bar & bottom bar)
@@ -101,7 +101,7 @@ impl ZaloGuiApp {
                 ui.vertical_centered(|ui| {
                     // User Avatar Button with Cutout Online Status Dot
                     let (av_rect, av_resp) =
-                        ui.allocate_exact_size(Vec2::new(40.0, 40.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::click());
                     let user_disp = if self.user_name.is_empty() {
                         "Người dùng Zalo"
                     } else {
@@ -110,7 +110,7 @@ impl ZaloGuiApp {
                     paint_user_avatar(
                         ui.painter(),
                         av_rect.center(),
-                        20.0,
+                        22.0,
                         user_disp,
                         false,
                         self.user_avatar.as_deref(),
@@ -371,6 +371,46 @@ impl ZaloGuiApp {
                         self.trigger_feed_timeline_load();
                     }
 
+                    ui.add_space(6.0);
+
+                    // Navigation Icon 5: To-Do (Giao việc & Nhắc việc)
+                    let (nav5_rect, nav5_resp) =
+                        ui.allocate_exact_size(Vec2::new(42.0, 42.0), Sense::click());
+                    if self.create_todo_modal_open {
+                        ui.painter().rect_filled(
+                            nav5_rect,
+                            Rounding::same(11.0),
+                            pal.primary.linear_multiply(0.18),
+                        );
+                        let pill = Rect::from_min_size(
+                            Pos2::new(nav5_rect.left() - 6.0, nav5_rect.center().y - 10.0),
+                            Vec2::new(3.5, 20.0),
+                        );
+                        ui.painter()
+                            .rect_filled(pill, Rounding::same(2.0), pal.primary);
+                    } else if nav5_resp.hovered() {
+                        ui.painter()
+                            .rect_filled(nav5_rect, Rounding::same(11.0), pal.bg_hover);
+                    }
+                    draw_lucide_icon(
+                        ui.painter(),
+                        nav5_rect.center(),
+                        lucide::CHECK_SQUARE,
+                        19.0,
+                        if self.create_todo_modal_open {
+                            pal.primary_hover
+                        } else {
+                            pal.text_secondary
+                        },
+                    );
+                    if nav5_resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("To-Do (Giao việc & Nhắc việc)")
+                        .clicked()
+                    {
+                        self.create_todo_modal_open = true;
+                    }
+
                     // Push bottom actions to the bottom of the Left Rail
                     let rem_h = (ui.available_height() - 100.0).max(12.0);
                     ui.add_space(rem_h);
@@ -420,8 +460,38 @@ impl ZaloGuiApp {
 
                     ui.add_space(6.0);
 
-                    // Bottom Action 2: Theme / Settings Icon
-                    // Bottom Action 2: Settings Modal Button
+                    // Bottom Action 2: Theme Toggle Button
+                    let (th_rect, th_resp) =
+                        ui.allocate_exact_size(Vec2::new(40.0, 40.0), Sense::click());
+                    if th_resp.hovered() {
+                        ui.painter()
+                            .rect_filled(th_rect, Rounding::same(10.0), pal.bg_hover);
+                    }
+                    let theme_icon = if pal.is_dark { lucide::SUN } else { lucide::MOON };
+                    let theme_tip = if pal.is_dark { "Chuyển sang giao diện Sáng" } else { "Chuyển sang giao diện Tối" };
+                    draw_lucide_icon(
+                        ui.painter(),
+                        th_rect.center(),
+                        theme_icon,
+                        17.5,
+                        if th_resp.hovered() {
+                            pal.text_primary
+                        } else {
+                            pal.text_secondary
+                        },
+                    );
+                    if th_resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(theme_tip)
+                        .clicked()
+                    {
+                        self.settings.theme_mode = if pal.is_dark { "light".into() } else { "dark".into() };
+                        self.settings.save();
+                    }
+
+                    ui.add_space(6.0);
+
+                    // Bottom Action 3: Settings Modal Button
                     let has_upd_badge = self
                         .update_info
                         .as_ref()
@@ -529,7 +599,7 @@ impl ZaloGuiApp {
         let sidebar_default_w = if is_narrow_w {
             68.0_f32
         } else {
-            300.0_f32.clamp(sidebar_min_w, sidebar_safe_max_w)
+            320.0_f32.clamp(sidebar_min_w, sidebar_safe_max_w)
         };
         egui::SidePanel::left(sidebar_id)
             .resizable(!is_narrow_w)
@@ -585,7 +655,7 @@ impl ZaloGuiApp {
                             let mut active_search_chips: Vec<String> = Vec::new();
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                let search_box_w = (avail_row_w - 38.0).max(110.0);
+                                let search_box_w = (avail_row_w - 76.0).max(90.0);
                                 let has_q = !self.search_query.is_empty();
                                 let (sbox_rect, _) = ui.allocate_exact_size(
                                     Vec2::new(search_box_w, 32.0),
@@ -782,6 +852,50 @@ impl ZaloGuiApp {
                                             self.search_query.trim().to_string();
                                     }
                                 }
+
+                                // Create Group Button (`+👥`)
+                                let (grp_rect, grp_resp) =
+                                    ui.allocate_exact_size(Vec2::new(32.0, 32.0), Sense::click());
+                                ui.painter().rect_filled(
+                                    grp_rect,
+                                    Rounding::same(8.0),
+                                    if self.create_group_modal_open {
+                                        pal.primary.linear_multiply(0.22)
+                                    } else if grp_resp.hovered() {
+                                        pal.bg_hover
+                                    } else {
+                                        pal.bg_input
+                                    },
+                                );
+                                ui.painter().rect_stroke(
+                                    grp_rect,
+                                    Rounding::same(8.0),
+                                    Stroke::new(
+                                        1.0_f32,
+                                        if self.create_group_modal_open || grp_resp.hovered() {
+                                            pal.primary
+                                        } else {
+                                            pal.border
+                                        },
+                                    ),
+                                );
+                                draw_icon_contacts(
+                                    ui.painter(),
+                                    grp_rect.center(),
+                                    16.5,
+                                    if self.create_group_modal_open || grp_resp.hovered() {
+                                        pal.primary_hover
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if grp_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Tạo nhóm trò chuyện mới")
+                                    .clicked()
+                                {
+                                    self.create_group_modal_open = true;
+                                }
                             });
                             if !active_search_chips.is_empty() {
                                 ui.add_space(4.0);
@@ -833,8 +947,15 @@ impl ZaloGuiApp {
                                 } else {
                                     "Nhóm".to_string()
                                 };
+                                let unread_total: usize = self.unread_counts.values().sum();
+                                let unread_label = if unread_total > 0 {
+                                    format!("Chưa đọc ({unread_total})")
+                                } else {
+                                    "Chưa đọc".to_string()
+                                };
                                 for (filter, label) in [
                                     (ThreadFilter::All, "Tất cả".to_string()),
+                                    (ThreadFilter::Unread, unread_label),
                                     (ThreadFilter::Direct, "Cá nhân".to_string()),
                                     (ThreadFilter::Groups, group_tab_label),
                                 ] {
@@ -910,6 +1031,35 @@ impl ZaloGuiApp {
                                             }
                                         }
                                     }
+                                }
+
+                                // "Phân loại ▾" quick folder trigger tab
+                                let (cat_rect, cat_resp) =
+                                    ui.allocate_exact_size(Vec2::new(76.0, 26.0), Sense::click());
+                                if self.folder_modal_open || cat_resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        cat_rect,
+                                        Rounding::same(6.0),
+                                        pal.bg_hover,
+                                    );
+                                }
+                                ui.painter().text(
+                                    Pos2::new(cat_rect.center().x, cat_rect.top() + 8.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "Phân loại ▾",
+                                    FontId::proportional(12.0),
+                                    if self.folder_modal_open || cat_resp.hovered() {
+                                        pal.text_primary
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if cat_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Quản lý nhãn & phân loại hội thoại")
+                                    .clicked()
+                                {
+                                    self.folder_modal_open = !self.folder_modal_open;
                                 }
 
                                 let pinned_cnt = self
@@ -1085,6 +1235,9 @@ impl ZaloGuiApp {
                             }
                             let pass_filter = match self.thread_filter {
                                 ThreadFilter::All => true,
+                                ThreadFilter::Unread => {
+                                    self.unread_counts.get(&t.id).copied().unwrap_or(0) > 0
+                                }
                                 ThreadFilter::Direct => !t.is_group,
                                 ThreadFilter::Groups => t.is_group,
                             };
@@ -10483,5 +10636,17 @@ mod quote_navigation_tests {
         let lines_multiline_h = (18.0 + (3.0 * 20.0_f32)).clamp(38.0, 120.0);
         assert_eq!(lines_1_h, 38.0);
         assert_eq!(lines_multiline_h, 78.0);
+    }
+
+    #[test]
+    fn test_task5_navigation_rail_and_sidebar_filters() {
+        let is_narrow_w = false;
+        let left_rail_w = if is_narrow_w { 52.0 } else { 64.0 };
+        assert_eq!(left_rail_w, 64.0);
+
+        let filter = ThreadFilter::Unread;
+        assert_ne!(filter, ThreadFilter::All);
+        assert_ne!(filter, ThreadFilter::Direct);
+        assert_ne!(filter, ThreadFilter::Groups);
     }
 }

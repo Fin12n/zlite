@@ -963,6 +963,9 @@ pub mod lucide {
     pub const SHARE_2: &str = "\u{e156}";
     pub const TRASH_2: &str = "\u{e18e}";
     pub const INFO: &str = "\u{e0f9}";
+    pub const CHECK_SQUARE: &str = "\u{e072}";
+    pub const CALENDAR: &str = "\u{e061}";
+    pub const BAR_CHART_2: &str = "\u{e053}";
 }
 
 pub(super) fn draw_lucide_icon(

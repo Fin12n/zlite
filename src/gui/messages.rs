@@ -2335,15 +2335,31 @@ pub(super) fn render_message_body(
             });
         return None;
     }
-    if trimmed_text.starts_with("[Khảo sát]")
+    if msg.kind == crate::message_model::MessageKind::Poll
         || trimmed_text.starts_with("[Bình chọn]")
-        || trimmed_text.starts_with("[Album]")
+        || trimmed_text.starts_with("[Khảo sát]")
+        || trimmed_text.starts_with("[Poll]")
     {
-        let title_tag = if trimmed_text.starts_with("[Album]") {
-            format!("{} Album ảnh", lucide::IMAGE)
-        } else {
-            "📊 Bình chọn nhóm".to_string()
-        };
+        render_poll_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
+        return None;
+    }
+    if msg.kind == crate::message_model::MessageKind::Todo
+        || trimmed_text.starts_with("[Giao việc]")
+        || trimmed_text.starts_with("[To-Do]")
+        || trimmed_text.starts_with("[Todo]")
+    {
+        render_todo_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
+        return None;
+    }
+    if msg.kind == crate::message_model::MessageKind::Reminder
+        || trimmed_text.starts_with("[Nhắc hẹn]")
+        || trimmed_text.starts_with("[Reminder]")
+    {
+        render_reminder_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
+        return None;
+    }
+    if trimmed_text.starts_with("[Album]") {
+        let title_tag = format!("{} Album ảnh", lucide::IMAGE);
         let rest = trimmed_text
             .split_once(']')
             .map(|(_, r)| r.trim())
@@ -2515,6 +2531,239 @@ pub(super) fn render_message_body(
     });
 
     body_action
+}
+
+pub(super) fn render_poll_card_widget(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    text_col: Color32,
+    meta_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+) {
+    let trimmed = msg.text.trim();
+    let rest = if let Some(stripped) = trimmed.strip_prefix("[Bình chọn]") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("[Khảo sát]") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("[Poll]") {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+
+    let mut question = rest;
+    let mut options: Vec<(&str, usize, f32)> = Vec::new();
+    let mut lines = rest.lines().map(str::trim).filter(|l| !l.is_empty());
+    if let Some(first) = lines.next() {
+        question = first;
+        for line in lines {
+            let opt_text = line
+                .trim_start_matches(|c: char| {
+                    c == '-' || c == '*' || c == '•' || c.is_ascii_digit() || c == '.' || c == ')'
+                })
+                .trim();
+            if !opt_text.is_empty() {
+                options.push((opt_text, 0, 0.0));
+            }
+        }
+    }
+    if options.is_empty() {
+        options.push(("Đồng ý", 1, 100.0));
+    }
+
+    egui::Frame::none()
+        .fill(pal.bg_elevated)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(14.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_max_width(max_text_width.min(320.0).max(220.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("📊").size(15.0));
+                ui.label(
+                    RichText::new("BÌNH CHỌN")
+                        .size(11.0)
+                        .color(pal.primary)
+                        .strong(),
+                );
+            });
+            ui.add_space(4.0);
+
+            ui.label(
+                RichText::new(question)
+                    .size(13.5)
+                    .color(text_col)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+
+            let card_w = (max_text_width.min(320.0) - 28.0).max(180.0);
+            for (opt_title, votes, percent) in &options {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(*opt_title).size(12.5).color(text_col));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if *votes > 0 {
+                                ui.label(
+                                    RichText::new(format!("{:.0}% ({})", percent, votes))
+                                        .size(11.0)
+                                        .color(meta_col),
+                                );
+                            }
+                        });
+                    });
+                    ui.add_space(2.0);
+                    let (prog_rect, _) = ui.allocate_exact_size(Vec2::new(card_w, 6.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(prog_rect, Rounding::same(3.0), pal.border_subtle);
+                    if *percent > 0.0 {
+                        let fill_w = (card_w * (percent / 100.0)).clamp(4.0, card_w);
+                        let fill_rect = Rect::from_min_size(prog_rect.min, Vec2::new(fill_w, 6.0));
+                        ui.painter()
+                            .rect_filled(fill_rect, Rounding::same(3.0), pal.primary);
+                    }
+                    ui.add_space(6.0);
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.vertical_centered_justified(|ui| {
+                let btn = egui::Button::new(
+                    RichText::new("Bình chọn")
+                        .size(12.0)
+                        .color(pal.primary_fg)
+                        .strong(),
+                )
+                .fill(pal.primary)
+                .rounding(Rounding::same(6.0));
+                ui.add(btn);
+            });
+        });
+}
+
+pub(super) fn render_todo_card_widget(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    text_col: Color32,
+    meta_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+) {
+    let trimmed = msg.text.trim();
+    let rest = if let Some(stripped) = trimmed.strip_prefix("[Giao việc]") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("[To-Do]") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("[Todo]") {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+
+    let title = rest.lines().next().unwrap_or(rest);
+
+    egui::Frame::none()
+        .fill(pal.bg_elevated)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(14.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_max_width(max_text_width.min(320.0).max(220.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} GIAO VIỆC", lucide::CHECK_SQUARE)).size(11.0).color(pal.label_blue).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("Đang làm")
+                            .size(10.5)
+                            .color(pal.label_blue),
+                    );
+                });
+            });
+            ui.add_space(6.0);
+
+            ui.label(
+                RichText::new(title)
+                    .size(13.5)
+                    .color(text_col)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{} Hạn chót: Hôm nay", lucide::CLOCK))
+                        .size(11.5)
+                        .color(meta_col),
+                );
+            });
+            ui.add_space(8.0);
+
+            ui.vertical_centered_justified(|ui| {
+                let btn = egui::Button::new(
+                    RichText::new("✓ Đánh dấu hoàn thành")
+                        .size(12.0)
+                        .color(pal.primary_fg)
+                        .strong(),
+                )
+                .fill(pal.primary)
+                .rounding(Rounding::same(6.0));
+                ui.add(btn);
+            });
+        });
+}
+
+pub(super) fn render_reminder_card_widget(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    text_col: Color32,
+    meta_col: Color32,
+    pal: &ThemePalette,
+    max_text_width: f32,
+) {
+    let trimmed = msg.text.trim();
+    let rest = if let Some(stripped) = trimmed.strip_prefix("[Nhắc hẹn]") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("[Reminder]") {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+
+    let title = rest.lines().next().unwrap_or(rest);
+
+    egui::Frame::none()
+        .fill(pal.bg_elevated)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(14.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_max_width(max_text_width.min(320.0).max(220.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("⏰").size(15.0));
+                ui.label(
+                    RichText::new("NHẮC HẸN")
+                        .size(11.0)
+                        .color(pal.label_yellow)
+                        .strong(),
+                );
+            });
+            ui.add_space(6.0);
+
+            ui.label(
+                RichText::new(title)
+                    .size(13.5)
+                    .color(text_col)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            ui.label(
+                RichText::new(format!("{} Thời gian nhắc hẹn: Hôm nay", lucide::CALENDAR))
+                    .size(11.5)
+                    .color(meta_col),
+            );
+        });
 }
 
 /// Classified attachment kind for the file/video/voice/doc bubble (#74 follow-up).
@@ -2691,15 +2940,37 @@ fn render_video_thumb_block(
         )
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text("Bấm để xem video");
-    let pill_r = egui::Rect::from_center_size(img_resp.rect.center(), Vec2::new(46.0, 46.0));
+    let pill_r = egui::Rect::from_center_size(img_resp.rect.center(), Vec2::new(40.0, 40.0));
     ui.painter()
-        .circle_filled(pill_r.center(), 23.0, Color32::from_black_alpha(140));
+        .circle_filled(pill_r.center(), 20.0, Color32::from_black_alpha(153));
     draw_icon_play(
         ui.painter(),
-        pill_r.center() + Vec2::new(2.0, 0.0),
-        20.0,
+        pill_r.center() + Vec2::new(1.5, 0.0),
+        18.0,
         Color32::WHITE,
     );
+
+    let dur_secs = video_duration_secs(msg);
+    if dur_secs.is_some() {
+        let dur_text = format_duration_mmss(dur_secs);
+        let chip_rect = Rect::from_min_size(
+            img_resp.rect.right_bottom() - Vec2::new(42.0, 20.0),
+            Vec2::new(36.0, 16.0),
+        );
+        ui.painter().rect_filled(
+            chip_rect,
+            Rounding::same(4.0),
+            Color32::from_black_alpha(180),
+        );
+        ui.painter().text(
+            chip_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            dur_text,
+            FontId::proportional(10.0),
+            Color32::WHITE,
+        );
+    }
+
     ui.add_space(4.0);
     ui.label(
         RichText::new(truncate_chars(title_str, 60))
@@ -2964,6 +3235,16 @@ fn render_doc_card(
     let mut action = None;
 
     // 1. Header: 40x40 Icon Badge on left + File Name & Metadata on right
+    let ext = if file_name.contains('.') {
+        file_name
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+    } else {
+        String::new()
+    };
+
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(10.0, 0.0);
         let (badge_rect, _) = ui.allocate_exact_size(Vec2::new(40.0, 40.0), Sense::hover());
@@ -2975,14 +3256,7 @@ fn render_doc_card(
         ui.painter().rect_filled(badge_rect, Rounding::same(8.0), badge_bg);
         ui.painter().rect_stroke(badge_rect, Rounding::same(8.0), Stroke::new(1.0_f32, pal.border));
 
-        let icon_col = match kind {
-            AttachmentKind::Pdf => Color32::from_rgb(235, 87, 87),
-            AttachmentKind::Word => Color32::from_rgb(45, 120, 240),
-            AttachmentKind::Excel => Color32::from_rgb(39, 174, 96),
-            AttachmentKind::PowerPoint => Color32::from_rgb(242, 153, 74),
-            AttachmentKind::Archive => Color32::from_rgb(242, 201, 76),
-            _ => pal.primary,
-        };
+        let icon_col = pal.file_badge_color(&ext);
         draw_lucide_icon(ui.painter(), badge_rect.center(), icon, 20.0, icon_col);
 
         ui.vertical(|ui| {
@@ -2999,15 +3273,6 @@ fn render_doc_card(
             )
             .on_hover_text(file_name);
 
-            let ext = if file_name.contains('.') {
-                file_name
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or_default()
-                    .to_ascii_uppercase()
-            } else {
-                String::new()
-            };
             let meta = if ext.is_empty() {
                 kind_label.to_string()
             } else {
@@ -3163,7 +3428,7 @@ fn render_doc_card(
             }
         });
     }
-    ui.add_space(4.0);
+    ui.add_space(8.0); // 14px total bottom padding
     action
 }
 
@@ -3192,6 +3457,10 @@ fn voice_duration_secs(msg: &ChatMessage) -> Option<u64> {
         // Params voice Zalo là ms (vd 1610); >3600 thì chắc chắn là ms.
         Some(if raw > 3600 { raw / 1000 } else { raw })
     })
+}
+
+pub(super) fn video_duration_secs(msg: &ChatMessage) -> Option<u64> {
+    voice_duration_secs(msg)
 }
 
 fn format_duration_mmss(secs: Option<u64>) -> String {
@@ -4445,7 +4714,7 @@ pub(super) fn render_quote_block(
     } else {
         (pal.bubble_in_text, pal.bubble_in_meta)
     };
-    let bar_col = Color32::from_rgb(102, 166, 255); // #66A6FF
+    let bar_col = pal.primary;
     let bg_col = if outgoing && pal.is_dark {
         Color32::from_rgba_unmultiplied(0, 0, 0, 42)
     } else if outgoing {
@@ -5559,5 +5828,23 @@ mod md_block_tests {
         assert!(lw > lh, "Landscape video must have width > height: ({lw}, {lh})");
         assert!(lw >= 160.0 && lw <= 280.0, "Landscape width within bounds: {lw}");
         assert!(lh <= 180.0, "Landscape height capped at 180: {lh}");
+    }
+
+    #[test]
+    fn test_task3_file_badge_and_card_widgets() {
+        let pal_light = ThemePalette::light();
+        assert_eq!(pal_light.file_badge_color("pdf"), Color32::from_rgb(235, 87, 87));
+        assert_eq!(pal_light.file_badge_color("docx"), Color32::from_rgb(45, 120, 240));
+        assert_eq!(pal_light.file_badge_color("xlsx"), Color32::from_rgb(39, 174, 96));
+        assert_eq!(pal_light.file_badge_color("pptx"), Color32::from_rgb(242, 153, 74));
+        assert_eq!(pal_light.file_badge_color("zip"), Color32::from_rgb(242, 201, 76));
+
+        // Test video duration extraction helper
+        let mut msg_video = ChatMessage::default();
+        msg_video.history_source = Some(serde_json::json!({
+            "duration": 105
+        }));
+        assert_eq!(video_duration_secs(&msg_video), Some(105));
+        assert_eq!(format_duration_mmss(video_duration_secs(&msg_video)), "01:45");
     }
 }

@@ -2229,6 +2229,103 @@ impl ZaloGuiApp {
                                                     ui.checkbox(&mut self.settings.friend_src_group, "Nhóm chung");
                                                     ui.checkbox(&mut self.settings.friend_src_card, "Danh thiếp Zalo");
                                                 });
+                                            ui.add_space(14.0);
+                                            ui.label(RichText::new("Khóa ứng dụng (Mã PIN bảo mật)").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(8.0))
+                                                .inner_margin(Margin::symmetric(14.0, 10.0))
+                                                .show(ui, |ui| {
+                                                    let has_pin = self.settings.app_lock_pin_hash.is_some();
+                                                    ui.horizontal(|ui| {
+                                                        ui.vertical(|ui| {
+                                                            ui.label(
+                                                                RichText::new("Mã PIN bảo vệ ứng dụng")
+                                                                    .color(pal.text_primary)
+                                                                    .size(13.2)
+                                                                    .strong(),
+                                                            );
+                                                            let status_str = if has_pin {
+                                                                "Đã kích hoạt — Ứng dụng yêu cầu nhập PIN khi mở lại hoặc khóa nhanh (Ctrl+L)"
+                                                            } else {
+                                                                "Chưa thiết lập — Thiết lập mã PIN để bảo vệ tin nhắn cá nhân"
+                                                            };
+                                                            ui.label(
+                                                                RichText::new(status_str)
+                                                                    .color(if has_pin { pal.label_green } else { pal.text_secondary })
+                                                                    .size(11.8),
+                                                            );
+                                                        });
+                                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                            let btn_txt = if has_pin { "Đổi mã PIN" } else { "Thiết lập PIN" };
+                                                            if ui.button(RichText::new(btn_txt).size(12.5).strong()).clicked() {
+                                                                self.app_lock_new_pin.clear();
+                                                                self.app_lock_confirm_pin.clear();
+                                                                self.app_lock_error = None;
+                                                                self.app_lock_setup_modal_open = true;
+                                                            }
+                                                            if has_pin {
+                                                                if ui.button(RichText::new("Gỡ PIN").color(pal.danger).size(12.5)).clicked() {
+                                                                    self.settings.app_lock_pin_hash = None;
+                                                                    self.settings.save();
+                                                                }
+                                                            }
+                                                        });
+                                                    });
+
+                                                    if has_pin {
+                                                        ui.add_space(8.0);
+                                                        ui.separator();
+                                                        ui.add_space(8.0);
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new("Tự động khóa khi không dùng").color(pal.text_primary).size(13.0));
+                                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                                let current_label = match self.settings.app_lock_timeout_secs {
+                                                                    0 => "Không tự động khóa",
+                                                                    60 => "1 phút",
+                                                                    300 => "5 phút",
+                                                                    900 => "15 phút",
+                                                                    1800 => "30 phút",
+                                                                    _ => "Tùy chỉnh",
+                                                                };
+                                                                egui::ComboBox::from_id_salt("app_lock_timeout_combo")
+                                                                    .selected_text(current_label)
+                                                                    .width(160.0)
+                                                                    .show_ui(ui, |ui| {
+                                                                        if ui.selectable_label(self.settings.app_lock_timeout_secs == 0, "Không tự động khóa").clicked() {
+                                                                            self.settings.app_lock_timeout_secs = 0;
+                                                                            self.settings.save();
+                                                                        }
+                                                                        if ui.selectable_label(self.settings.app_lock_timeout_secs == 60, "1 phút").clicked() {
+                                                                            self.settings.app_lock_timeout_secs = 60;
+                                                                            self.settings.save();
+                                                                        }
+                                                                        if ui.selectable_label(self.settings.app_lock_timeout_secs == 300, "5 phút").clicked() {
+                                                                            self.settings.app_lock_timeout_secs = 300;
+                                                                            self.settings.save();
+                                                                        }
+                                                                        if ui.selectable_label(self.settings.app_lock_timeout_secs == 900, "15 phút").clicked() {
+                                                                            self.settings.app_lock_timeout_secs = 900;
+                                                                            self.settings.save();
+                                                                        }
+                                                                        if ui.selectable_label(self.settings.app_lock_timeout_secs == 1800, "30 phút").clicked() {
+                                                                            self.settings.app_lock_timeout_secs = 1800;
+                                                                            self.settings.save();
+                                                                        }
+                                                                    });
+                                                            });
+                                                        });
+                                                        ui.add_space(6.0);
+                                                        if ui.button(RichText::new("🔒 Khóa ngay ứng dụng (Ctrl+L)").size(12.5).color(pal.primary_hover)).clicked() {
+                                                            self.is_app_locked = true;
+                                                            self.app_lock_input.clear();
+                                                            self.app_lock_error = None;
+                                                            self.settings_modal_open = false;
+                                                        }
+                                                    }
+                                                });
                                         }
                                         SettingsTab::Sync => {
                                             ui.label(RichText::new("📲 Đồng bộ tin nhắn từ điện thoại (1-1 & Nhóm)").color(pal.text_primary).size(13.5).strong());
@@ -2367,6 +2464,46 @@ impl ZaloGuiApp {
                                                         ui.add_space(4.0);
                                                         if ui.button(RichText::new("…hoặc chọn cả thư mục dữ liệu Zalo để nhập").size(12.5)).clicked() {
                                                             pick_migrate_dir = true;
+                                                        }
+                                                    });
+                                                });
+                                            ui.add_space(16.0);
+                                            ui.label(RichText::new("🧹 Dọn dẹp bộ nhớ đệm (Media Cache & Temp)").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(10.0))
+                                                .inner_margin(Margin::same(14.0))
+                                                .show(ui, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        let stickers_dir = std::path::Path::new("stickers_cache");
+                                                        let media_dir = std::path::Path::new("media_cache");
+                                                        let cache_dir = std::path::Path::new("cache");
+
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(RichText::new("Dung lượng bộ nhớ tạm hiện tại:").color(pal.text_primary).size(13.0));
+                                                            let formatted = crate::app_lock::format_bytes(self.cache_size_bytes);
+                                                            ui.label(RichText::new(formatted).color(pal.primary_hover).size(13.2).strong());
+                                                        });
+                                                        ui.add_space(4.0);
+                                                        ui.label(RichText::new("Bao gồm: video cache xem trước, file âm thanh tạm, nhãn dán sticker tải về, và ảnh thu nhỏ tạm thời.").color(pal.text_secondary).size(12.0));
+                                                        ui.add_space(10.0);
+
+                                                        ui.horizontal(|ui| {
+                                                            if ui.button(RichText::new("🔍 Quét dung lượng").size(12.5)).clicked() {
+                                                                self.cache_size_bytes = crate::app_lock::calculate_cache_size(&[stickers_dir, media_dir, cache_dir]);
+                                                            }
+                                                            if ui.button(RichText::new("Xóa bộ nhớ đệm ngay").color(pal.danger).size(12.5).strong()).clicked() {
+                                                                let (freed, count) = crate::app_lock::purge_media_cache(&[stickers_dir, media_dir, cache_dir]);
+                                                                self.cache_size_bytes = crate::app_lock::calculate_cache_size(&[stickers_dir, media_dir, cache_dir]);
+                                                                self.cache_cleaner_status = Some(format!("Đã dọn dẹp thành công {} ({} tệp tin)", crate::app_lock::format_bytes(freed), count));
+                                                            }
+                                                        });
+
+                                                        if let Some(ref status) = self.cache_cleaner_status {
+                                                            ui.add_space(6.0);
+                                                            ui.label(RichText::new(status).color(pal.label_green).size(12.2).strong());
                                                         }
                                                     });
                                                 });
@@ -11381,6 +11518,133 @@ fn extract_markdown_links_inline(s: &str) -> String {
     out
 }
 
+impl ZaloGuiApp {
+    pub(super) fn render_app_lock_setup_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.app_lock_setup_modal_open {
+            return;
+        }
+
+        let max_w = (ctx.screen_rect().width() - 32.0).clamp(280.0, 380.0);
+        let mut close_modal = false;
+
+        egui::Window::new("Thiết lập mã PIN bảo mật")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .fixed_size(Vec2::new(max_w, 0.0))
+            .frame(
+                egui::Frame::none()
+                    .fill(pal.bg_elevated)
+                    .rounding(Rounding::same(14.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .shadow(egui::epaint::Shadow {
+                        offset: Vec2::new(0.0, 10.0),
+                        blur: 32.0,
+                        spread: 4.0,
+                        color: Color32::from_black_alpha(80),
+                    })
+                    .inner_margin(Margin::same(20.0)),
+            )
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("🔐 Cài đặt mã PIN khóa ứng dụng")
+                                .size(15.5)
+                                .strong()
+                                .color(pal.text_primary),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (cr, c_resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+                            if c_resp.hovered() {
+                                ui.painter().rect_filled(cr, Rounding::same(6.0), pal.bg_hover);
+                            }
+                            ui.painter().text(
+                                cr.center(),
+                                egui::Align2::CENTER_CENTER,
+                                lucide::X,
+                                egui::FontId::proportional(14.0),
+                                pal.text_secondary,
+                            );
+                            if c_resp.clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Nhập mã PIN từ 4 đến 12 chữ số để bảo vệ tin nhắn và quyền riêng tư khi rời máy tính.")
+                            .size(12.0)
+                            .color(pal.text_secondary),
+                    );
+
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("Mã PIN mới:").size(12.5).color(pal.text_primary));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.app_lock_new_pin)
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Xác nhận mã PIN:").size(12.5).color(pal.text_primary));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.app_lock_confirm_pin)
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    );
+
+                    if let Some(ref err) = self.app_lock_error {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(err).color(pal.danger).size(12.0).strong());
+                    }
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Hủy").size(13.0)).clicked() {
+                            close_modal = true;
+                        }
+
+                        let save_btn = egui::Button::new(
+                            RichText::new("Lưu mã PIN")
+                                .size(13.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(pal.primary_hover)
+                        .rounding(Rounding::same(7.0));
+                        if ui.add(save_btn).clicked() {
+                            let p1 = self.app_lock_new_pin.trim();
+                            let p2 = self.app_lock_confirm_pin.trim();
+
+                            if p1.len() < 4 || p1.len() > 12 {
+                                self.app_lock_error = Some("Mã PIN phải từ 4 đến 12 ký tự.".into());
+                            } else if p1 != p2 {
+                                self.app_lock_error = Some("Mã PIN xác nhận không khớp.".into());
+                            } else {
+                                self.settings.app_lock_pin_hash = Some(crate::app_lock::hash_app_pin(p1));
+                                if self.settings.app_lock_timeout_secs == 0 {
+                                    self.settings.app_lock_timeout_secs = 300; // default 5 minutes
+                                }
+                                self.settings.save();
+                                self.app_lock_error = None;
+                                close_modal = true;
+                            }
+                        }
+                    });
+                });
+            });
+
+        if close_modal {
+            self.app_lock_setup_modal_open = false;
+            self.app_lock_new_pin.clear();
+            self.app_lock_confirm_pin.clear();
+            self.app_lock_error = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11474,5 +11738,26 @@ mod tests {
         assert!(!todo_title.trim().is_empty());
         let body_todo = format!("[Giao việc] {todo_title} (Hạn: {todo_deadline})");
         assert_eq!(body_todo, "[Giao việc] Nộp báo cáo tuần (Hạn: 17:00 Thứ 6)");
+    }
+
+    #[test]
+    fn test_task6_app_lock_modal_and_settings_persistence() {
+        let pin = "998877";
+        let hash = crate::app_lock::hash_app_pin(pin);
+        assert!(crate::app_lock::verify_app_pin(pin, &hash));
+        assert!(!crate::app_lock::verify_app_pin("123456", &hash));
+
+        let mut settings = super::AppSettings::default();
+        assert!(settings.app_lock_pin_hash.is_none());
+        assert_eq!(settings.app_lock_timeout_secs, 0);
+
+        settings.app_lock_pin_hash = Some(hash.clone());
+        settings.app_lock_timeout_secs = 300;
+
+        let json = serde_json::to_string(&settings).expect("serialize settings");
+        let restored: super::AppSettings = serde_json::from_str(&json).expect("deserialize settings");
+
+        assert_eq!(restored.app_lock_pin_hash, Some(hash));
+        assert_eq!(restored.app_lock_timeout_secs, 300);
     }
 }

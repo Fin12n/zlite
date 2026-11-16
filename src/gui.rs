@@ -1249,6 +1249,11 @@ struct AppSettings {
     proxy_url: String,
     multi_profile_name: String,
     info_drawer_open: bool,
+    // 11. Khóa ứng dụng (App Lock PIN) (#106)
+    #[serde(default)]
+    pub(crate) app_lock_pin_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) app_lock_timeout_secs: u64,
 }
 
 impl Default for AppSettings {
@@ -1323,6 +1328,8 @@ impl Default for AppSettings {
             proxy_url: String::new(),
             multi_profile_name: "acc2".into(),
             info_drawer_open: false,
+            app_lock_pin_hash: None,
+            app_lock_timeout_secs: 0,
         }
     }
 }
@@ -1689,6 +1696,16 @@ pub struct ZaloGuiApp {
     win_restore_rect: Option<WinRect>,
     #[cfg(target_os = "windows")]
     win_resize_drag: Option<WinResizeDrag>,
+    // App Lock & Media Cache Management (#106)
+    pub(crate) is_app_locked: bool,
+    pub(crate) app_lock_input: String,
+    pub(crate) app_lock_error: Option<String>,
+    pub(crate) app_lock_setup_modal_open: bool,
+    pub(crate) app_lock_new_pin: String,
+    pub(crate) app_lock_confirm_pin: String,
+    pub(crate) last_user_interaction_at: std::time::Instant,
+    pub(crate) cache_size_bytes: u64,
+    pub(crate) cache_cleaner_status: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2041,6 +2058,15 @@ impl ZaloGuiApp {
             win_restore_rect: None,
             #[cfg(target_os = "windows")]
             win_resize_drag: None,
+            is_app_locked: false,
+            app_lock_input: String::new(),
+            app_lock_error: None,
+            app_lock_setup_modal_open: false,
+            app_lock_new_pin: String::new(),
+            app_lock_confirm_pin: String::new(),
+            last_user_interaction_at: std::time::Instant::now(),
+            cache_size_bytes: 0,
+            cache_cleaner_status: None,
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();
@@ -4651,6 +4677,36 @@ impl eframe::App for ZaloGuiApp {
 
         self.handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);
+
+        // Track user interaction for idle timeout & app lock
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.any_click() || i.pointer.delta() != egui::Vec2::ZERO) {
+            self.last_user_interaction_at = std::time::Instant::now();
+        }
+
+        // Shortcut Ctrl+L / Cmd+L to lock app immediately (#106)
+        if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::L)) {
+            if self.settings.app_lock_pin_hash.is_some() {
+                self.is_app_locked = true;
+                self.app_lock_input.clear();
+                self.app_lock_error = None;
+            }
+        }
+
+        // Automatic idle lock timeout
+        if !self.is_app_locked && self.settings.app_lock_pin_hash.is_some() && self.settings.app_lock_timeout_secs > 0 {
+            if self.last_user_interaction_at.elapsed().as_secs() >= self.settings.app_lock_timeout_secs {
+                self.is_app_locked = true;
+                self.app_lock_input.clear();
+                self.app_lock_error = None;
+            }
+        }
+
+        // If app is locked, render full lock screen and prevent accessing underlying chat data
+        if self.is_app_locked {
+            self.render_app_lock_screen(ctx, &pal);
+            return;
+        }
+
         // Dev Inspector Panel
         if self.dev_mode && self.dev_panel_open {
             egui::TopBottomPanel::bottom("dev_inspector")
@@ -5608,6 +5664,113 @@ impl ZaloGuiApp {
         let text = msg.into();
         self.status_msg = text.clone();
         self.toast_notice = Some((text, std::time::Instant::now()));
+    }
+
+    fn render_app_lock_screen(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(pal.bg_chat_canvas))
+            .show(ctx, |ui| {
+                let avail_size = ui.available_size();
+                let center_rect = Rect::from_center_size(
+                    Pos2::new(avail_size.x * 0.5, avail_size.y * 0.5),
+                    Vec2::new(360.0, 360.0),
+                );
+                ui.allocate_ui_at_rect(center_rect, |ui| {
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .rounding(Rounding::same(16.0))
+                        .shadow(egui::epaint::Shadow {
+                            offset: Vec2::new(0.0, 10.0),
+                            blur: 32.0,
+                            spread: 4.0,
+                            color: Color32::from_black_alpha(80),
+                        })
+                        .inner_margin(Margin::same(28.0))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    icon_rect.center(),
+                                    28.0,
+                                    pal.primary_hover.linear_multiply(0.15),
+                                );
+                                ui.painter().text(
+                                    icon_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    crate::gui::theme::lucide::LOCK,
+                                    egui::FontId::proportional(26.0),
+                                    pal.primary_hover,
+                                );
+
+                                ui.add_space(14.0);
+                                ui.label(
+                                    RichText::new("ZLite Đang Khóa")
+                                        .color(pal.text_primary)
+                                        .size(18.5)
+                                        .strong(),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new("Nhập mã PIN bảo mật để mở khóa ứng dụng")
+                                        .color(pal.text_secondary)
+                                        .size(12.5),
+                                );
+
+                                ui.add_space(20.0);
+                                let mut submit_unlock = false;
+                                let edit = egui::TextEdit::singleline(&mut self.app_lock_input)
+                                    .password(true)
+                                    .font(egui::TextStyle::Heading)
+                                    .desired_width(220.0)
+                                    .horizontal_align(Align::Center);
+                                let resp = ui.add(edit);
+                                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                    submit_unlock = true;
+                                }
+                                if !resp.has_focus() && self.app_lock_error.is_none() {
+                                    resp.request_focus();
+                                }
+
+                                if let Some(ref err) = self.app_lock_error {
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new(err).color(pal.danger).size(12.0).strong());
+                                }
+
+                                ui.add_space(20.0);
+                                let btn = egui::Button::new(
+                                    RichText::new("Mở khóa ứng dụng")
+                                        .size(14.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(pal.primary_hover)
+                                .rounding(Rounding::same(8.0))
+                                .min_size(Vec2::new(220.0, 38.0));
+                                if ui.add(btn).clicked() {
+                                    submit_unlock = true;
+                                }
+
+                                if submit_unlock {
+                                    let ok = if let Some(ref expected_hash) = self.settings.app_lock_pin_hash {
+                                        crate::app_lock::verify_app_pin(&self.app_lock_input, expected_hash)
+                                    } else {
+                                        true
+                                    };
+                                    if ok {
+                                        self.is_app_locked = false;
+                                        self.app_lock_input.clear();
+                                        self.app_lock_error = None;
+                                        self.last_user_interaction_at = std::time::Instant::now();
+                                    } else {
+                                        self.app_lock_error = Some("Mã PIN không đúng. Vui lòng thử lại!".into());
+                                        self.app_lock_input.clear();
+                                    }
+                                }
+                            });
+                        });
+                });
+            });
     }
 }
 

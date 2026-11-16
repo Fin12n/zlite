@@ -48,6 +48,8 @@ pub mod thread_script;
 
 /// Native notification authorization without delivery.
 pub mod native_notifications;
+/// Application Lock PIN security and Media Cache Management (#106).
+pub mod app_lock;
 
 #[cfg(any(windows, test))]
 mod clipboard_dib;

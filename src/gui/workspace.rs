@@ -8855,6 +8855,7 @@ impl ZaloGuiApp {
         self.render_add_member_modal(ctx, pal);
         self.render_create_poll_modal(ctx, pal);
         self.render_create_todo_modal(ctx, pal);
+        self.render_app_lock_setup_modal(ctx, pal);
 
         if let Some((del_idx, del_tid, del_name, del_is_group, del_last_id)) =
             self.pending_delete_thread.clone()

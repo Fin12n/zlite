@@ -94,7 +94,7 @@
 | :--- | :--- | :---: | :--- | :--- |
 | 7.1 | Cuộc gọi thoại 1-1 (VoIP Call) | [x] Hoàn thành | `src/call.rs`, `call_probe.rs` | RTP audio, signaling, P2P & Relay. |
 | 7.2 | Nhật ký cuộc gọi (Call History Logs) | [x] Hoàn thành | `src/voip_log.rs` | Phân tích RTCP, NAL units, call status. |
-| 7.3 | Cuộc gọi Video nhóm (Zavi Conference) | [ ] Chưa có | `src/call.rs` | Cần WebRTC video decode chuyên sâu. |
+| 7.3 | Cuộc gọi Video nhóm (Zavi Conference) | [x] Hoàn thành | `src/zavi.rs`, `src/gui/modals.rs`, `src/gui/workspace.rs` | Hỗ trợ tạo/tham gia phòng họp Zavi 9 số, mật khẩu 6 số, link zavi.me, lưới responsive video tiles, điều khiển mic/cam/screen share, gửi thẻ mời vào Zalo chat. |
 
 ---
 

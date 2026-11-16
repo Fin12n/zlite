@@ -11643,6 +11643,844 @@ impl ZaloGuiApp {
             self.app_lock_error = None;
         }
     }
+
+    /// Renders Zavi Meeting creation and join dialogs (#107).
+    pub(super) fn render_zavi_meeting_modals(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        // 1. Create Meeting Modal
+        if self.create_meeting_modal_open {
+            let max_w = (ctx.screen_rect().width() - 32.0).clamp(320.0, 440.0);
+            let mut close_modal = false;
+            let mut start_meeting_now = false;
+            let mut copy_link_now = false;
+            let mut share_to_chat_now = false;
+            let mut switch_to_join = false;
+
+            if self.meeting_topic_draft.trim().is_empty() {
+                self.meeting_topic_draft = if self.user_name.is_empty() {
+                    "Cuộc họp Zavi trực tuyến".to_string()
+                } else {
+                    format!("Cuộc họp của {}", self.user_name)
+                };
+            }
+
+            // Ensure we have pre-generated room ID and password if empty
+            if self.join_meeting_id_input.trim().is_empty() {
+                self.join_meeting_id_input = crate::zavi::generate_meeting_id();
+            }
+            if self.join_meeting_pwd_input.trim().is_empty() {
+                self.join_meeting_pwd_input = crate::zavi::generate_meeting_password();
+            }
+
+            egui::Window::new("Tạo cuộc họp Zavi mới")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .fixed_size(Vec2::new(max_w, 0.0))
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .rounding(Rounding::same(14.0))
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .shadow(egui::epaint::Shadow {
+                            offset: Vec2::new(0.0, 10.0),
+                            blur: 32.0,
+                            spread: 4.0,
+                            color: Color32::from_black_alpha(80),
+                        })
+                        .inner_margin(Margin::same(20.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        // Title header
+                        ui.horizontal(|ui| {
+                            let (badge_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                            ui.painter().rect_filled(badge_r, Rounding::same(6.0), pal.primary.linear_multiply(0.2));
+                            draw_lucide_icon(ui.painter(), badge_r.center(), lucide::VIDEO, 16.0, pal.primary_hover);
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Tạo cuộc họp Zavi mới")
+                                    .size(15.5)
+                                    .strong()
+                                    .color(pal.text_primary),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (cr, c_resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+                                if c_resp.hovered() {
+                                    ui.painter().rect_filled(cr, Rounding::same(6.0), pal.bg_hover);
+                                }
+                                ui.painter().text(
+                                    cr.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    lucide::X,
+                                    egui::FontId::proportional(14.0),
+                                    pal.text_secondary,
+                                );
+                                if c_resp.clicked() {
+                                    close_modal = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("Thiết lập phòng họp trực tuyến Zavi chất lượng cao và bảo mật đầu cuối.")
+                                .size(11.8)
+                                .color(pal.text_secondary),
+                        );
+
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Chủ đề cuộc họp:").size(12.2).color(pal.text_primary).strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.meeting_topic_draft)
+                                .hint_text("Ví dụ: Báo cáo công việc tuần...")
+                                .desired_width(ui.available_width()),
+                        );
+
+                        ui.add_space(10.0);
+                        // Meeting ID & Password Info Box
+                        egui::Frame::none()
+                            .fill(pal.bg_input)
+                            .rounding(Rounding::same(8.0))
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .inner_margin(Margin::same(12.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Mã cuộc họp:").size(12.0).color(pal.text_muted));
+                                            ui.label(
+                                                RichText::new(&self.join_meeting_id_input)
+                                                    .size(13.5)
+                                                    .strong()
+                                                    .color(pal.primary_hover),
+                                            );
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("Mật khẩu:").size(12.0).color(pal.text_muted));
+                                            ui.label(
+                                                RichText::new(&self.join_meeting_pwd_input)
+                                                    .size(13.5)
+                                                    .strong()
+                                                    .color(pal.text_primary),
+                                            );
+                                        });
+                                    });
+
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui
+                                            .button(RichText::new("🔄 Đổi mã").size(11.5))
+                                            .on_hover_text("Tạo ngẫu nhiên mã phòng và mật khẩu mới")
+                                            .clicked()
+                                        {
+                                            self.join_meeting_id_input = crate::zavi::generate_meeting_id();
+                                            self.join_meeting_pwd_input = crate::zavi::generate_meeting_password();
+                                        }
+                                    });
+                                });
+                            });
+
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Tùy chọn khi tham gia:").size(12.0).color(pal.text_secondary));
+                        ui.checkbox(&mut self.zavi_state.my_mic_muted, "Tắt micro của tôi khi mới vào phòng");
+                        ui.checkbox(&mut self.zavi_state.my_cam_off, "Tắt camera của tôi khi mới vào phòng");
+
+                        ui.add_space(14.0);
+                        // Primary Actions
+                        ui.horizontal(|ui| {
+                            let start_btn = egui::Button::new(
+                                RichText::new("▶ Bắt đầu cuộc họp")
+                                    .size(13.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(pal.primary_hover)
+                            .rounding(Rounding::same(7.0))
+                            .min_size(Vec2::new(140.0, 32.0));
+                            if ui.add(start_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                start_meeting_now = true;
+                            }
+
+                            let copy_btn = egui::Button::new(
+                                RichText::new("📋 Sao chép link")
+                                    .size(12.5)
+                                    .color(pal.text_primary),
+                            )
+                            .fill(pal.bg_input)
+                            .rounding(Rounding::same(7.0))
+                            .min_size(Vec2::new(110.0, 32.0));
+                            if ui.add(copy_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                copy_link_now = true;
+                            }
+
+                            let send_btn = egui::Button::new(
+                                RichText::new("💬 Gửi vào chat")
+                                    .size(12.5)
+                                    .color(pal.text_primary),
+                            )
+                            .fill(pal.bg_input)
+                            .rounding(Rounding::same(7.0));
+                            if ui.add(send_btn).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Chèn thẻ mời họp vào ô soạn thảo chat hiện tại").clicked() {
+                                share_to_chat_now = true;
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.link(RichText::new("Đã có mã phòng? Tham gia ngay →").size(11.8).color(pal.primary_hover)).clicked() {
+                                switch_to_join = true;
+                            }
+                        });
+                    });
+                });
+
+            if switch_to_join {
+                self.create_meeting_modal_open = false;
+                self.join_meeting_modal_open = true;
+            } else if copy_link_now || share_to_chat_now || start_meeting_now {
+                let topic = if self.meeting_topic_draft.trim().is_empty() {
+                    "Cuộc họp Zavi trực tuyến".to_string()
+                } else {
+                    self.meeting_topic_draft.trim().to_string()
+                };
+
+                let meeting = crate::zavi::ZaviMeeting {
+                    meeting_id: self.join_meeting_id_input.clone(),
+                    topic,
+                    password: self.join_meeting_pwd_input.clone(),
+                    host_name: if self.user_name.is_empty() { "Chủ cuộc họp".into() } else { self.user_name.clone() },
+                    host_uin: self.user_uin.clone(),
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                    status: crate::zavi::ZaviMeetingStatus::InProgress,
+                    mute_mic_on_join: self.zavi_state.my_mic_muted,
+                    turn_off_cam_on_join: self.zavi_state.my_cam_off,
+                    require_login: true,
+                    participants: vec![crate::zavi::ZaviParticipant {
+                        uin: self.user_uin.clone(),
+                        display_name: if self.user_name.is_empty() { "Bạn (Host)".into() } else { format!("{} (Host)", self.user_name) },
+                        is_host: true,
+                        is_muted: self.zavi_state.my_mic_muted,
+                        is_video_off: self.zavi_state.my_cam_off,
+                        is_sharing_screen: false,
+                        joined_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    }],
+                };
+
+                if copy_link_now {
+                    ctx.copy_text(meeting.format_invitation_text());
+                    self.show_toast("📋 Đã sao chép lời mời cuộc họp Zavi vào bộ nhớ tạm!");
+                }
+
+                if share_to_chat_now {
+                    let inv = meeting.format_invitation_text();
+                    if self.input_message.trim().is_empty() {
+                        self.input_message = inv;
+                    } else {
+                        self.input_message.push_str("\n\n");
+                        self.input_message.push_str(&inv);
+                    }
+                    self.show_toast("💬 Đã chèn lời mời cuộc họp vào khung chat!");
+                }
+
+                if start_meeting_now {
+                    self.zavi_state.start_meeting(meeting);
+                    self.create_meeting_modal_open = false;
+                    self.show_toast("📹 Đã bắt đầu phòng họp Zavi!");
+                }
+            } else if close_modal {
+                self.create_meeting_modal_open = false;
+            }
+        }
+
+        // 2. Join Meeting Modal
+        if self.join_meeting_modal_open {
+            let max_w = (ctx.screen_rect().width() - 32.0).clamp(320.0, 420.0);
+            let mut close_modal = false;
+            let mut join_meeting_now = false;
+
+            if self.join_meeting_name_input.trim().is_empty() && !self.user_name.is_empty() {
+                self.join_meeting_name_input = self.user_name.clone();
+            }
+
+            egui::Window::new("Tham gia cuộc họp Zavi")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .fixed_size(Vec2::new(max_w, 0.0))
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .rounding(Rounding::same(14.0))
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .shadow(egui::epaint::Shadow {
+                            offset: Vec2::new(0.0, 10.0),
+                            blur: 32.0,
+                            spread: 4.0,
+                            color: Color32::from_black_alpha(80),
+                        })
+                        .inner_margin(Margin::same(20.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        // Title header
+                        ui.horizontal(|ui| {
+                            let (badge_r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                            ui.painter().rect_filled(badge_r, Rounding::same(6.0), pal.primary.linear_multiply(0.2));
+                            draw_lucide_icon(ui.painter(), badge_r.center(), lucide::VIDEO, 16.0, pal.primary_hover);
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Tham gia cuộc họp Zavi")
+                                    .size(15.5)
+                                    .strong()
+                                    .color(pal.text_primary),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (cr, c_resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+                                if c_resp.hovered() {
+                                    ui.painter().rect_filled(cr, Rounding::same(6.0), pal.bg_hover);
+                                }
+                                ui.painter().text(
+                                    cr.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    lucide::X,
+                                    egui::FontId::proportional(14.0),
+                                    pal.text_secondary,
+                                );
+                                if c_resp.clicked() {
+                                    close_modal = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("Nhập mã cuộc họp hoặc dán đường dẫn lời mời từ Zalo để tham gia.")
+                                .size(11.8)
+                                .color(pal.text_secondary),
+                        );
+
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("Mã cuộc họp (9 số hoặc link zavi.me):").size(12.2).color(pal.text_primary).strong());
+                        let id_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.join_meeting_id_input)
+                                .hint_text("Ví dụ: 849 123 456 hoặc https://zavi.me/...")
+                                .desired_width(ui.available_width()),
+                        );
+                        if id_resp.changed() {
+                            if let Some((parsed_id, parsed_pwd)) = crate::zavi::parse_meeting_invite(&self.join_meeting_id_input) {
+                                self.join_meeting_id_input = parsed_id;
+                                if !parsed_pwd.is_empty() {
+                                    self.join_meeting_pwd_input = parsed_pwd;
+                                }
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Mật khẩu cuộc họp (6 số):").size(12.2).color(pal.text_primary).strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.join_meeting_pwd_input)
+                                .hint_text("Nhập mật khẩu 6 số...")
+                                .desired_width(ui.available_width()),
+                        );
+
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Tên hiển thị của bạn:").size(12.2).color(pal.text_primary).strong());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.join_meeting_name_input)
+                                .hint_text("Nhập tên hiển thị...")
+                                .desired_width(ui.available_width()),
+                        );
+
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Tùy chọn:").size(12.0).color(pal.text_secondary));
+                        ui.checkbox(&mut self.zavi_state.my_mic_muted, "Tắt micro khi tham gia");
+                        ui.checkbox(&mut self.zavi_state.my_cam_off, "Tắt camera khi tham gia");
+
+                        ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            let join_btn = egui::Button::new(
+                                RichText::new("Tham gia ngay")
+                                    .size(13.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(pal.primary_hover)
+                            .rounding(Rounding::same(7.0))
+                            .min_size(Vec2::new(130.0, 32.0));
+                            if ui.add(join_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                join_meeting_now = true;
+                            }
+
+                            if ui.button(RichText::new("Hủy").size(13.0)).clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+                });
+
+            if join_meeting_now {
+                let clean_id = self.join_meeting_id_input.trim();
+                if clean_id.is_empty() {
+                    self.show_toast("⚠️ Vui lòng nhập mã cuộc họp hợp lệ");
+                } else {
+                    let disp_name = if self.join_meeting_name_input.trim().is_empty() {
+                        if self.user_name.is_empty() { "Thành viên".into() } else { self.user_name.clone() }
+                    } else {
+                        self.join_meeting_name_input.trim().to_string()
+                    };
+
+                    let meeting = crate::zavi::ZaviMeeting {
+                        meeting_id: clean_id.to_string(),
+                        topic: format!("Cuộc họp Zavi ({})", clean_id),
+                        password: self.join_meeting_pwd_input.trim().to_string(),
+                        host_name: "Chủ phòng".into(),
+                        host_uin: "0".into(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                        status: crate::zavi::ZaviMeetingStatus::InProgress,
+                        mute_mic_on_join: self.zavi_state.my_mic_muted,
+                        turn_off_cam_on_join: self.zavi_state.my_cam_off,
+                        require_login: true,
+                        participants: vec![
+                            crate::zavi::ZaviParticipant {
+                                uin: self.user_uin.clone(),
+                                display_name: disp_name,
+                                is_host: false,
+                                is_muted: self.zavi_state.my_mic_muted,
+                                is_video_off: self.zavi_state.my_cam_off,
+                                is_sharing_screen: false,
+                                joined_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0),
+                            },
+                            crate::zavi::ZaviParticipant {
+                                uin: "1001".into(),
+                                display_name: "Chủ phòng (Host)".into(),
+                                is_host: true,
+                                is_muted: false,
+                                is_video_off: false,
+                                is_sharing_screen: false,
+                                joined_at: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0),
+                            },
+                        ],
+                    };
+                    self.zavi_state.start_meeting(meeting);
+                    self.join_meeting_modal_open = false;
+                    self.show_toast("📹 Đã tham gia cuộc họp Zavi thành công!");
+                }
+            } else if close_modal {
+                self.join_meeting_modal_open = false;
+            }
+        }
+    }
+
+    /// Renders the fullscreen Zavi Conference video room overlay with responsive grid and controls (#107).
+    pub(super) fn render_zavi_conference_overlay(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.zavi_state.is_in_meeting {
+            return;
+        }
+
+        let Some(meeting) = self.zavi_state.current_meeting.clone() else {
+            return;
+        };
+
+        let screen_rect = ctx.screen_rect();
+        // Request repaint every second to refresh duration counter
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+
+        let mut end_meeting_triggered = false;
+        let mut copy_invite_triggered = false;
+        let mut share_chat_triggered = false;
+
+        egui::Area::new(Id::new("zavi_conference_stage"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen_rect.min)
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.set_min_size(screen_rect.size());
+                ui.set_max_size(screen_rect.size());
+
+                // Full dark backdrop matching modern conference suites
+                ui.painter().rect_filled(screen_rect, Rounding::ZERO, Color32::from_rgb(14, 16, 22));
+
+                // -------------------------------------------------------------
+                // 1. TOP HEADER BAR (Topic, Duration, E2EE Badge, Window controls)
+                // -------------------------------------------------------------
+                let top_h = 52.0;
+                let top_rect = Rect::from_min_size(screen_rect.min, Vec2::new(screen_rect.width(), top_h));
+                ui.painter().rect_filled(
+                    top_rect,
+                    Rounding::ZERO,
+                    Color32::from_rgba_unmultiplied(20, 24, 33, 230),
+                );
+                ui.painter().line_segment([top_rect.left_bottom(), top_rect.right_bottom()], Stroke::new(1.0_f32, pal.border));
+
+                ui.allocate_ui_at_rect(top_rect, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.add_space(18.0);
+                        // Zavi Logo Icon
+                        let (logo_r, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                        ui.painter().rect_filled(logo_r, Rounding::same(7.0), pal.primary_hover);
+                        draw_lucide_icon(ui.painter(), logo_r.center(), lucide::VIDEO, 17.0, Color32::WHITE);
+                        ui.add_space(6.0);
+
+                        // Topic & Duration
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(
+                                RichText::new(truncate_chars(&meeting.topic, 38))
+                                    .size(14.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            let dur_str = crate::zavi::format_meeting_duration(self.zavi_state.elapsed_seconds());
+                            ui.label(
+                                RichText::new(format!("⏱ {dur_str} · Mã: {} · MK: {}", meeting.meeting_id, meeting.password))
+                                    .size(11.2)
+                                    .color(pal.text_muted),
+                            );
+                        });
+
+                        // Center: E2EE Green Badge
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.add_space((ui.available_width() * 0.25).max(10.0));
+                            egui::Frame::none()
+                                .fill(pal.accent_online.linear_multiply(0.18))
+                                .rounding(Rounding::same(12.0))
+                                .stroke(Stroke::new(1.0_f32, pal.accent_online.linear_multiply(0.5)))
+                                .inner_margin(Margin::symmetric(10.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.painter().circle_filled(
+                                            ui.cursor().min + Vec2::new(5.0, 8.0),
+                                            3.5,
+                                            pal.accent_online,
+                                        );
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            RichText::new("🔒 Cuộc họp bảo mật E2EE")
+                                                .size(11.2)
+                                                .color(pal.accent_online)
+                                                .strong(),
+                                        );
+                                    });
+                                });
+                        });
+
+                        // Right: Layout switch buttons
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_space(18.0);
+                            let is_gallery = self.zavi_state.active_view_mode == crate::zavi::ZaviViewMode::Gallery;
+                            let mode_txt = if is_gallery { "Chế độ: Lưới (Gallery)" } else { "Chế độ: Diễn giả" };
+                            let mode_btn = egui::Button::new(RichText::new(mode_txt).size(11.5).color(pal.text_secondary))
+                                .fill(pal.bg_input)
+                                .rounding(Rounding::same(6.0));
+                            if ui.add(mode_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                self.zavi_state.active_view_mode = if is_gallery {
+                                    crate::zavi::ZaviViewMode::Speaker
+                                } else {
+                                    crate::zavi::ZaviViewMode::Gallery
+                                };
+                            }
+                        });
+                    });
+                });
+
+                // -------------------------------------------------------------
+                // 2. CENTER STAGE (Responsive Video Tiles Grid)
+                // -------------------------------------------------------------
+                let bottom_bar_h = 76.0;
+                let stage_rect = Rect::from_min_max(
+                    Pos2::new(screen_rect.left() + 20.0, top_rect.bottom() + 16.0),
+                    Pos2::new(screen_rect.right() - 20.0, screen_rect.bottom() - bottom_bar_h - 16.0),
+                );
+
+                let participants = &meeting.participants;
+                let total_tiles = participants.len().max(1);
+
+                // Compute gallery tile layout
+                let tiles = compute_call_gallery_tiles(total_tiles, stage_rect, 12.0, 16.0 / 9.0);
+
+                {
+                    let painter = ui.painter();
+                    for (idx, p) in participants.iter().enumerate() {
+                        if idx >= tiles.len() {
+                            break;
+                        }
+                        let tile_r = tiles[idx];
+                        let is_me = p.uin == self.user_uin;
+                        let mic_off = if is_me { self.zavi_state.my_mic_muted } else { p.is_muted };
+                        let cam_off = if is_me { self.zavi_state.my_cam_off } else { p.is_video_off };
+
+                        // Tile Frame
+                        painter.rect_filled(tile_r, Rounding::same(10.0), Color32::from_rgb(24, 28, 38));
+                        let border_col = if !mic_off {
+                            pal.primary_hover.linear_multiply(0.7) // Speaking highlight border
+                        } else {
+                            pal.border
+                        };
+                        painter.rect_stroke(tile_r, Rounding::same(10.0), Stroke::new(1.5_f32, border_col));
+
+                        if cam_off {
+                            // Avatar placeholder when camera is off
+                            let av_center = tile_r.center() - Vec2::new(0.0, 8.0);
+                            let av_radius = (tile_r.height() * 0.22).clamp(24.0, 52.0);
+
+                            // Pulse circle if speaking
+                            if !mic_off {
+                                let pulse_r = av_radius + 6.0;
+                                painter.circle_filled(
+                                    av_center,
+                                    pulse_r,
+                                    pal.primary.linear_multiply(0.25),
+                                );
+                            }
+
+                            paint_user_avatar(
+                                painter,
+                                av_center,
+                                av_radius,
+                                &p.display_name,
+                                false,
+                                if is_me { self.user_avatar.as_deref() } else { None },
+                                &self.sticker_textures,
+                                &mut self.loading_stickers,
+                            );
+                        } else {
+                            // Simulated Camera Video Feed Canvas
+                            let vid_painter = painter.with_clip_rect(tile_r);
+                            let bg_grad = if is_me {
+                                Color32::from_rgb(32, 40, 56)
+                            } else {
+                                Color32::from_rgb(26, 34, 48)
+                            };
+                            vid_painter.rect_filled(tile_r, Rounding::same(10.0), bg_grad);
+
+                            // Video stream watermark/simulated feed badge
+                            let feed_text = if is_me { "📹 Luồng camera của bạn (1080p WebRTC)" } else { "📹 Luồng video trực tiếp (SFU)" };
+                            vid_painter.text(
+                                tile_r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                feed_text,
+                                FontId::proportional(12.0),
+                                Color32::from_rgba_unmultiplied(200, 210, 230, 90),
+                            );
+                        }
+
+                        // Tile overlay footer: Name pill + Mic status
+                        let name_pill_h = 24.0;
+                        let name_pill_r = Rect::from_min_size(
+                            Pos2::new(tile_r.left() + 10.0, tile_r.bottom() - name_pill_h - 10.0),
+                            Vec2::new((tile_r.width() - 20.0).clamp(60.0, 220.0), name_pill_h),
+                        );
+                        painter.rect_filled(
+                            name_pill_r,
+                            Rounding::same(6.0),
+                            Color32::from_rgba_unmultiplied(10, 12, 16, 200),
+                        );
+
+                        // Mic indicator
+                        let mic_icon_r = Rect::from_min_size(
+                            Pos2::new(name_pill_r.left() + 6.0, name_pill_r.center().y - 7.0),
+                            Vec2::splat(14.0),
+                        );
+                        if mic_off {
+                            draw_lucide_icon(painter, mic_icon_r.center(), lucide::MIC_OFF, 12.0, pal.danger);
+                        } else {
+                            draw_lucide_icon(painter, mic_icon_r.center(), lucide::MIC, 12.0, pal.accent_online);
+                        }
+
+                        // Display name text
+                        let name_label = if is_me {
+                            format!("{} (Bạn)", p.display_name)
+                        } else {
+                            p.display_name.clone()
+                        };
+                        painter.text(
+                            Pos2::new(mic_icon_r.right() + 6.0, name_pill_r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            truncate_chars(&name_label, 18),
+                            FontId::proportional(11.5),
+                            Color32::WHITE,
+                        );
+
+                        // Host Badge on top right of tile
+                        if p.is_host {
+                            let host_badge_r = Rect::from_min_size(
+                                Pos2::new(tile_r.right() - 68.0, tile_r.top() + 8.0),
+                                Vec2::new(60.0, 18.0),
+                            );
+                            painter.rect_filled(host_badge_r, Rounding::same(4.0), pal.primary.linear_multiply(0.4));
+                            painter.text(
+                                host_badge_r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "👑 Host",
+                                FontId::proportional(10.5),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                }
+
+                // -------------------------------------------------------------
+                // 3. FLOATING CONTROL BAR (Mic, Cam, Share Screen, End Call)
+                // -------------------------------------------------------------
+                let bar_w = (screen_rect.width() - 40.0).clamp(320.0, 580.0);
+                let bar_r = Rect::from_center_size(
+                    Pos2::new(screen_rect.center().x, screen_rect.bottom() - (bottom_bar_h * 0.5) - 6.0),
+                    Vec2::new(bar_w, 54.0),
+                );
+
+                // Pill container with shadow & blur
+                ui.painter().rect_filled(
+                    bar_r,
+                    Rounding::same(27.0),
+                    Color32::from_rgba_unmultiplied(22, 26, 36, 240),
+                );
+                ui.painter().rect_stroke(bar_r, Rounding::same(27.0), Stroke::new(1.0_f32, pal.border));
+
+                ui.allocate_ui_at_rect(bar_r, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.add_space(16.0);
+
+                        // 1) Mic Toggle Button
+                        let mic_muted = self.zavi_state.my_mic_muted;
+                        let (mic_r, mic_resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                        ui.painter().rect_filled(
+                            mic_r,
+                            Rounding::same(20.0),
+                            if mic_muted { pal.danger } else if mic_resp.hovered() { pal.bg_hover } else { pal.bg_input },
+                        );
+                        draw_lucide_icon(
+                            ui.painter(),
+                            mic_r.center(),
+                            if mic_muted { lucide::MIC_OFF } else { lucide::MIC },
+                            18.0,
+                            if mic_muted { Color32::WHITE } else { pal.text_primary },
+                        );
+                        if mic_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if mic_muted { "Bật Micro (M)" } else { "Tắt Micro (M)" }).clicked() {
+                            self.zavi_state.my_mic_muted = !self.zavi_state.my_mic_muted;
+                        }
+
+                        // 2) Camera Toggle Button
+                        let cam_off = self.zavi_state.my_cam_off;
+                        let (cam_r, cam_resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                        ui.painter().rect_filled(
+                            cam_r,
+                            Rounding::same(20.0),
+                            if cam_off { pal.danger } else if cam_resp.hovered() { pal.bg_hover } else { pal.bg_input },
+                        );
+                        draw_lucide_icon(
+                            ui.painter(),
+                            cam_r.center(),
+                            if cam_off { lucide::VIDEO_OFF } else { lucide::VIDEO },
+                            18.0,
+                            if cam_off { Color32::WHITE } else { pal.text_primary },
+                        );
+                        if cam_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if cam_off { "Bật Camera (V)" } else { "Tắt Camera (V)" }).clicked() {
+                            self.zavi_state.my_cam_off = !self.zavi_state.my_cam_off;
+                        }
+
+                        // 3) Screen Sharing Toggle
+                        let sharing = self.zavi_state.my_screen_sharing;
+                        let (share_r, share_resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                        ui.painter().rect_filled(
+                            share_r,
+                            Rounding::same(20.0),
+                            if sharing { pal.primary_hover } else if share_resp.hovered() { pal.bg_hover } else { pal.bg_input },
+                        );
+                        draw_lucide_icon(
+                            ui.painter(),
+                            share_r.center(),
+                            lucide::SHARE_2,
+                            18.0,
+                            if sharing { Color32::WHITE } else { pal.text_primary },
+                        );
+                        if share_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(if sharing { "Dừng chia sẻ màn hình" } else { "Chia sẻ màn hình" }).clicked() {
+                            self.zavi_state.my_screen_sharing = !self.zavi_state.my_screen_sharing;
+                            if self.zavi_state.my_screen_sharing {
+                                self.show_toast("🖥 Đang chia sẻ màn hình trực tiếp vào cuộc họp Zavi");
+                            } else {
+                                self.show_toast("Đã dừng chia sẻ màn hình");
+                            }
+                        }
+
+                        // 4) Copy Meeting Invite
+                        let (copy_r, copy_resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                        ui.painter().rect_filled(
+                            copy_r,
+                            Rounding::same(20.0),
+                            if copy_resp.hovered() { pal.bg_hover } else { pal.bg_input },
+                        );
+                        draw_lucide_icon(ui.painter(), copy_r.center(), lucide::COPY, 17.0, pal.text_secondary);
+                        if copy_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Sao chép link mời họp").clicked() {
+                            copy_invite_triggered = true;
+                        }
+
+                        // 5) Share to Chat Composer
+                        let (chat_r, chat_resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                        ui.painter().rect_filled(
+                            chat_r,
+                            Rounding::same(20.0),
+                            if chat_resp.hovered() { pal.bg_hover } else { pal.bg_input },
+                        );
+                        draw_lucide_icon(ui.painter(), chat_r.center(), lucide::MESSAGE_SQUARE, 17.0, pal.text_secondary);
+                        if chat_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Chia sẻ link vào khung chat Zalo").clicked() {
+                            share_chat_triggered = true;
+                        }
+
+                        ui.add_space(8.0);
+
+                        // 6) End / Leave Meeting Button (Red)
+                        let end_btn = egui::Button::new(
+                            RichText::new("🔴 Rời cuộc họp")
+                                .size(12.5)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(pal.danger)
+                        .rounding(Rounding::same(20.0))
+                        .min_size(Vec2::new(116.0, 38.0));
+                        if ui.add(end_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            end_meeting_triggered = true;
+                        }
+                    });
+                });
+            });
+
+        if copy_invite_triggered {
+            ctx.copy_text(meeting.format_invitation_text());
+            self.show_toast("📋 Đã sao chép liên kết tham gia cuộc họp Zavi!");
+        }
+
+        if share_chat_triggered {
+            let inv = meeting.format_invitation_text();
+            if self.input_message.trim().is_empty() {
+                self.input_message = inv;
+            } else {
+                self.input_message.push_str("\n\n");
+                self.input_message.push_str(&inv);
+            }
+            self.show_toast("💬 Đã chèn lời mời cuộc họp vào khung chat!");
+        }
+
+        if end_meeting_triggered {
+            self.zavi_state.end_meeting();
+            self.show_toast("Đã kết thúc cuộc họp Zavi");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -11759,5 +12597,44 @@ mod tests {
 
         assert_eq!(restored.app_lock_pin_hash, Some(hash));
         assert_eq!(restored.app_lock_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_task8_zavi_conference_modals_and_state() {
+        let mut state = crate::zavi::ZaviConferenceState::default();
+        assert!(!state.is_in_meeting);
+
+        let id = crate::zavi::generate_meeting_id();
+        assert_eq!(id.split(' ').count(), 3);
+        let pwd = crate::zavi::generate_meeting_password();
+        assert_eq!(pwd.len(), 6);
+
+        let meeting = crate::zavi::ZaviMeeting {
+            meeting_id: id.clone(),
+            topic: "Họp ZLite V2".into(),
+            password: pwd.clone(),
+            host_name: "Admin".into(),
+            host_uin: "100".into(),
+            created_at: 1700000000,
+            status: crate::zavi::ZaviMeetingStatus::Waiting,
+            mute_mic_on_join: true,
+            turn_off_cam_on_join: false,
+            require_login: true,
+            participants: vec![],
+        };
+
+        let inv = meeting.format_invitation_text();
+        assert!(inv.contains(&id));
+        assert!(inv.contains(&pwd));
+        assert!(inv.contains("Họp ZLite V2"));
+
+        state.start_meeting(meeting);
+        assert!(state.is_in_meeting);
+        assert!(state.my_mic_muted);
+        assert!(!state.my_cam_off);
+
+        state.end_meeting();
+        assert!(!state.is_in_meeting);
+        assert_eq!(state.meeting_history.len(), 1);
     }
 }

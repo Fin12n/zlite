@@ -50,6 +50,8 @@ pub mod thread_script;
 pub mod native_notifications;
 /// Application Lock PIN security and Media Cache Management (#106).
 pub mod app_lock;
+/// Zavi Conference (Group Video Calling & Meeting) (#107).
+pub mod zavi;
 
 #[cfg(any(windows, test))]
 mod clipboard_dib;

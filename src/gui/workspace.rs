@@ -411,6 +411,63 @@ impl ZaloGuiApp {
                         self.create_todo_modal_open = true;
                     }
 
+                    ui.add_space(6.0);
+
+                    // Navigation Icon 6: Cuộc họp Zavi (Họp trực tuyến & Hội nghị video nhóm) (#107)
+                    let is_zavi_nav = self.create_meeting_modal_open
+                        || self.join_meeting_modal_open
+                        || self.zavi_state.is_in_meeting;
+                    let (nav6_rect, nav6_resp) =
+                        ui.allocate_exact_size(Vec2::new(42.0, 42.0), Sense::click());
+                    if is_zavi_nav {
+                        ui.painter().rect_filled(
+                            nav6_rect,
+                            Rounding::same(11.0),
+                            pal.primary.linear_multiply(0.18),
+                        );
+                        let pill = Rect::from_min_size(
+                            Pos2::new(nav6_rect.left() - 6.0, nav6_rect.center().y - 10.0),
+                            Vec2::new(3.5, 20.0),
+                        );
+                        ui.painter()
+                            .rect_filled(pill, Rounding::same(2.0), pal.primary);
+                    } else if nav6_resp.hovered() {
+                        ui.painter()
+                            .rect_filled(nav6_rect, Rounding::same(11.0), pal.bg_hover);
+                    }
+                    draw_lucide_icon(
+                        ui.painter(),
+                        nav6_rect.center(),
+                        lucide::VIDEO,
+                        19.0,
+                        if is_zavi_nav {
+                            pal.primary_hover
+                        } else {
+                            pal.text_secondary
+                        },
+                    );
+                    if self.zavi_state.is_in_meeting {
+                        // Green pulsing status indicator when active in conference
+                        ui.painter().circle_filled(
+                            Pos2::new(nav6_rect.right() - 8.0, nav6_rect.top() + 8.0),
+                            4.0,
+                            pal.accent_online,
+                        );
+                    }
+                    if nav6_resp
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(if self.zavi_state.is_in_meeting {
+                            "Cuộc họp Zavi đang diễn ra (Bấm để xem phòng họp)"
+                        } else {
+                            "Cuộc họp Zavi (Hội nghị video & Họp trực tuyến)"
+                        })
+                        .clicked()
+                    {
+                        if !self.zavi_state.is_in_meeting {
+                            self.create_meeting_modal_open = true;
+                        }
+                    }
+
                     // Push bottom actions to the bottom of the Left Rail
                     let rem_h = (ui.available_height() - 100.0).max(12.0);
                     ui.add_space(rem_h);
@@ -566,6 +623,8 @@ impl ZaloGuiApp {
             self.render_video_player_modal(ctx, pal);
             self.render_doc_viewer_modal(ctx, pal);
             self.render_phone_lookup_modal(ctx, pal);
+            self.render_zavi_meeting_modals(ctx, pal);
+            self.render_zavi_conference_overlay(ctx, pal);
             return;
         }
         if self.feed_modal_open {
@@ -582,6 +641,8 @@ impl ZaloGuiApp {
             self.render_doc_viewer_modal(ctx, pal);
             self.render_phone_lookup_modal(ctx, pal);
             self.render_settings_modal(ctx, pal);
+            self.render_zavi_meeting_modals(ctx, pal);
+            self.render_zavi_conference_overlay(ctx, pal);
             return;
         }
         // -------------------------------------------------------------------
@@ -5612,12 +5673,17 @@ impl ZaloGuiApp {
                                     if vid_resp
                                         .on_hover_cursor(CursorIcon::PointingHand)
                                         .on_hover_text(if is_group {
-                                            "Họp nhóm Zavi (Video)"
+                                            "Họp nhóm Zavi (Tạo phòng họp video nhóm)"
                                         } else {
                                             "Gọi Video"
                                         })
                                         .clicked()
                                     {
+                                        if is_group {
+                                            self.meeting_topic_draft = thread_name.clone();
+                                            self.create_meeting_modal_open = true;
+                                            return;
+                                        }
                                         let ff_ok = crate::media::is_ffmpeg_available();
                                         let (_, cams) = crate::media::list_media_devices(false);
                                         let can_cam = ff_ok && !cams.is_empty();
@@ -8856,6 +8922,8 @@ impl ZaloGuiApp {
         self.render_create_poll_modal(ctx, pal);
         self.render_create_todo_modal(ctx, pal);
         self.render_app_lock_setup_modal(ctx, pal);
+        self.render_zavi_meeting_modals(ctx, pal);
+        self.render_zavi_conference_overlay(ctx, pal);
 
         if let Some((del_idx, del_tid, del_name, del_is_group, del_last_id)) =
             self.pending_delete_thread.clone()

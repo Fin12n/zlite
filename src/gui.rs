@@ -1706,6 +1706,14 @@ pub struct ZaloGuiApp {
     pub(crate) last_user_interaction_at: std::time::Instant,
     pub(crate) cache_size_bytes: u64,
     pub(crate) cache_cleaner_status: Option<String>,
+    // Zavi Conference (#107)
+    pub(crate) zavi_state: crate::zavi::ZaviConferenceState,
+    pub(crate) create_meeting_modal_open: bool,
+    pub(crate) join_meeting_modal_open: bool,
+    pub(crate) meeting_topic_draft: String,
+    pub(crate) join_meeting_id_input: String,
+    pub(crate) join_meeting_pwd_input: String,
+    pub(crate) join_meeting_name_input: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2067,6 +2075,13 @@ impl ZaloGuiApp {
             last_user_interaction_at: std::time::Instant::now(),
             cache_size_bytes: 0,
             cache_cleaner_status: None,
+            zavi_state: crate::zavi::ZaviConferenceState::default(),
+            create_meeting_modal_open: false,
+            join_meeting_modal_open: false,
+            meeting_topic_draft: String::new(),
+            join_meeting_id_input: String::new(),
+            join_meeting_pwd_input: String::new(),
+            join_meeting_name_input: String::new(),
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();

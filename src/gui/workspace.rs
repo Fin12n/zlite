@@ -8768,6 +8768,23 @@ impl ZaloGuiApp {
                             pal,
                         );
                     }
+
+                    let trimmed_lead = self.input_message.trim_start();
+                    if mention_candidates.is_empty() && trimmed_lead.starts_with('/') && !trimmed_lead.contains(' ') {
+                        let qm_list = default_quick_messages();
+                        let qm_matches = find_matching_quick_messages(&qm_list, trimmed_lead);
+                        if !qm_matches.is_empty() {
+                            if let Some(expanded) = self.render_quick_message_popover(
+                                ctx,
+                                composer_frame.response.rect,
+                                &qm_matches,
+                                0,
+                                pal,
+                            ) {
+                                self.input_message = expanded;
+                            }
+                        }
+                    }
                     if let Some(ref link_meta) = composer_link_preview {
                         if mention_candidates.is_empty()
                             && contextual_stickers.is_empty()
@@ -9841,6 +9858,54 @@ fn play_voice_attachment(url: &str, file_name: &str, msg_id: &str, download_dir:
 }
 
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickMessage {
+    pub shortcut: String,
+    pub title: String,
+    pub text: String,
+}
+
+pub fn default_quick_messages() -> Vec<QuickMessage> {
+    vec![
+        QuickMessage {
+            shortcut: "/chao".to_string(),
+            title: "Lời chào mẫu".to_string(),
+            text: "Xin chào bạn, tôi có thể hỗ trợ gì cho bạn hôm nay?".to_string(),
+        },
+        QuickMessage {
+            shortcut: "/stk".to_string(),
+            title: "Thông tin thanh toán".to_string(),
+            text: "Số tài khoản: 19036888888888 - Ngân hàng Techcombank - Tên: ZLITE USER".to_string(),
+        },
+        QuickMessage {
+            shortcut: "/camon".to_string(),
+            title: "Cảm ơn".to_string(),
+            text: "Cảm ơn bạn rất nhiều! Chúc bạn một ngày làm việc hiệu quả và vui vẻ.".to_string(),
+        },
+        QuickMessage {
+            shortcut: "/diachi".to_string(),
+            title: "Địa chỉ văn phòng".to_string(),
+            text: "Địa chỉ: Tòa nhà Bitexco, Số 2 Hải Triều, Bến Nghé, Quận 1, TP. Hồ Chí Minh.".to_string(),
+        },
+    ]
+}
+
+pub fn find_matching_quick_messages<'a>(
+    list: &'a [QuickMessage],
+    query: &str,
+) -> Vec<&'a QuickMessage> {
+    if !query.starts_with('/') {
+        return Vec::new();
+    }
+    let q = query.trim_start_matches('/').to_lowercase();
+    list.iter()
+        .filter(|qm| {
+            let s = qm.shortcut.trim_start_matches('/').to_lowercase();
+            s.starts_with(&q) || qm.title.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MentionCandidate {
     #[allow(dead_code)]
@@ -10104,6 +10169,100 @@ impl ZaloGuiApp {
                                 .size(10.5)
                                 .color(pal.text_muted),
                         );
+                    });
+            });
+
+        chosen
+    }
+
+    pub(super) fn render_quick_message_popover(
+        &mut self,
+        ctx: &egui::Context,
+        composer_rect: Rect,
+        matches: &[&QuickMessage],
+        selected_idx: usize,
+        pal: &ThemePalette,
+    ) -> Option<String> {
+        if matches.is_empty() {
+            return None;
+        }
+
+        let max_visible = 5;
+        let item_h = 32.0_f32;
+        let header_h = 24.0_f32;
+        let visible_items = matches.len().min(max_visible);
+        let content_h = (visible_items as f32 * item_h) + header_h + 16.0;
+        let popover_w = 340.0_f32;
+        let pos = Pos2::new(
+            composer_rect.left() + 8.0,
+            (composer_rect.top() - content_h - 4.0).max(48.0),
+        );
+
+        let mut chosen = None;
+
+        egui::Area::new(Id::new("zalo_composer_quick_message_popover"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(if pal.is_dark {
+                        Color32::from_rgb(33, 37, 43)
+                    } else {
+                        Color32::WHITE
+                    })
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(10.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: Vec2::new(0.0, -4.0),
+                        blur: 16.0,
+                        spread: 0.0,
+                        color: Color32::from_black_alpha(if pal.is_dark { 120 } else { 35 }),
+                    })
+                    .inner_margin(Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.set_width(popover_w);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("⚡ TIN NHẮN NHANH (Phím tắt /)")
+                                    .size(11.0)
+                                    .color(pal.primary)
+                                    .strong(),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+
+                        for (i, qm) in matches.iter().take(max_visible).enumerate() {
+                            let is_sel = i == selected_idx;
+                            let bg = if is_sel {
+                                pal.bg_hover
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            let resp = egui::Frame::none()
+                                .fill(bg)
+                                .rounding(Rounding::same(6.0))
+                                .inner_margin(Margin::symmetric(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&qm.shortcut)
+                                                .size(12.5)
+                                                .color(pal.primary)
+                                                .strong(),
+                                        );
+                                        ui.label(
+                                            RichText::new(&qm.title)
+                                                .size(12.5)
+                                                .color(pal.text_primary),
+                                        );
+                                    });
+                                });
+                            if resp.response.interact(Sense::click()).clicked() {
+                                chosen = Some(qm.text.clone());
+                            }
+                        }
                     });
             });
 
@@ -10663,5 +10822,26 @@ mod quote_navigation_tests {
         assert_eq!(pal.file_badge_color("sheet.xlsx"), Color32::from_rgb(39, 174, 96));
         assert_eq!(pal.file_badge_color("video.mp4"), Color32::from_rgb(124, 58, 237));
         assert_eq!(pal.file_badge_color("archive.zip"), Color32::from_rgb(242, 201, 76));
+    }
+
+    #[test]
+    fn test_task5_quick_message_matching_and_expansion() {
+        let qm_list = default_quick_messages();
+        let matches_ch = find_matching_quick_messages(&qm_list, "/ch");
+        assert_eq!(matches_ch.len(), 2); // /chao and /diachi (contains 'ch')
+        assert_eq!(matches_ch[0].shortcut, "/chao");
+
+        let matches_chao = find_matching_quick_messages(&qm_list, "/chao");
+        assert_eq!(matches_chao.len(), 1);
+        assert_eq!(matches_chao[0].shortcut, "/chao");
+        assert!(matches_chao[0].text.contains("Xin chào"));
+
+        let matches_stk = find_matching_quick_messages(&qm_list, "/stk");
+        assert_eq!(matches_stk.len(), 1);
+        assert_eq!(matches_stk[0].shortcut, "/stk");
+        assert!(matches_stk[0].text.contains("Số tài khoản"));
+
+        let no_matches = find_matching_quick_messages(&qm_list, "khong_co_slash");
+        assert!(no_matches.is_empty());
     }
 }

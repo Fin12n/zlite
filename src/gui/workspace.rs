@@ -7187,6 +7187,15 @@ impl ZaloGuiApp {
                                     }
                                 }
                                 BubbleAction::DeleteForMe => {
+                                    if let Some(t) = self.threads.get_mut(self.selected_thread_index) {
+                                        if idx < t.messages.len() {
+                                            t.messages.remove(idx);
+                                            if let Some(last) = t.messages.last() {
+                                                t.preview = last.text.clone();
+                                            }
+                                        }
+                                    }
+                                    self.persist_threads_async();
                                     if let Some(tx) = WORKER_TX.get() {
                                         let _ = tx.send(WorkerCmd::DeleteForMe {
                                             to_id: thread_id.clone(),

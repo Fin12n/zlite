@@ -2901,6 +2901,15 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                 };
                                 match res {
                                     Ok(resp) if resp_error_code(&resp).is_none() => {
+                                        let (tid, mid) = (to_id.clone(), msg.id.clone());
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            if let Ok(mut store) =
+                                                crate::store::MessageStore::open("zalo_history.db")
+                                            {
+                                                let _ = store.undo_message(&tid, &mid);
+                                            }
+                                        })
+                                        .await;
                                         let _ = gui_tx_clone.send(GuiEvent::MessageRecalled {
                                             thread_id: to_id,
                                             msg_id: msg.id.clone(),

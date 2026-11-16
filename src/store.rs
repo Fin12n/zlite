@@ -1198,6 +1198,26 @@ impl MessageStore {
         Ok(())
     }
 
+    /// Delete a single message by thread_id and msg_id for current user.
+    pub fn delete_message_for_me(&mut self, thread_id: &str, msg_id: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "DELETE FROM messages WHERE thread_id = ?1 AND msg_id = ?2",
+            params![thread_id, msg_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Recall / undo a message in local SQLite store, preserving row as chat.undo.
+    pub fn undo_message(&mut self, thread_id: &str, msg_id: &str) -> Result<bool> {
+        let rows = self.conn.execute(
+            "UPDATE messages 
+             SET text = '[Tin nhắn đã thu hồi]', msg_type = 'chat.undo'
+             WHERE thread_id = ?1 AND msg_id = ?2",
+            params![thread_id, msg_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Delete an entire conversation and all its messages from local SQLite store (#24).
     pub fn delete_thread(&mut self, thread_id: &str) -> Result<()> {
         if thread_id.is_empty() {
@@ -1892,6 +1912,12 @@ impl MessageStore {
                     final_kind = crate::message_model::MessageKind::Photo;
                 } else if sm.msg_type == "chat.sticker" {
                     final_kind = crate::message_model::MessageKind::Sticker;
+                } else if sm.msg_type == "chat.undo"
+                    || sm.msg_type == "undo"
+                    || final_text.starts_with("[Tin nhắn đã thu hồi]")
+                    || final_text.starts_with("[Đã thu hồi]")
+                {
+                    final_kind = crate::message_model::MessageKind::Recall;
                 }
                 let cm = ChatMessage {
                     id: sm.msg_id,
@@ -3892,5 +3918,54 @@ mod tests {
         assert_eq!(threads[0].messages[0].kind, crate::message_model::MessageKind::Poll);
         assert_eq!(threads[0].messages[1].kind, crate::message_model::MessageKind::Todo);
         assert_eq!(threads[0].messages[2].kind, crate::message_model::MessageKind::Reminder);
+    }
+
+    #[test]
+    fn test_task1_delete_and_undo_message() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread_id = "test_thread_undo";
+        let msg_id = "msg_1001";
+
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: msg_id.into(),
+                thread_id: thread_id.into(),
+                sender_id: "u1".into(),
+                sender_name: "UserA".into(),
+                text: "Tin nhắn cần thu hồi".into(),
+                msg_type: "chat.text".into(),
+                ts: 100,
+                is_outgoing: true,
+                raw_json: String::new(),
+            })
+            .unwrap();
+
+        // Undo message
+        let undone = store.undo_message(thread_id, msg_id).unwrap();
+        assert!(undone);
+
+        let mut threads = vec![Thread {
+            id: thread_id.into(),
+            name: "Test".into(),
+            is_group: false,
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads, 10).unwrap();
+        assert_eq!(threads[0].messages.len(), 1);
+        assert_eq!(threads[0].messages[0].kind, crate::message_model::MessageKind::Recall);
+        assert_eq!(threads[0].messages[0].text, "[Tin nhắn đã thu hồi]");
+
+        // Delete for me
+        let deleted = store.delete_message_for_me(thread_id, msg_id).unwrap();
+        assert!(deleted);
+
+        let mut threads_after = vec![Thread {
+            id: thread_id.into(),
+            name: "Test".into(),
+            is_group: false,
+            ..Default::default()
+        }];
+        store.hydrate_threads(&mut threads_after, 10).unwrap();
+        assert_eq!(threads_after[0].messages.len(), 0);
     }
 }

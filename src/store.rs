@@ -3968,4 +3968,24 @@ mod tests {
         store.hydrate_threads(&mut threads_after, 10).unwrap();
         assert_eq!(threads_after[0].messages.len(), 0);
     }
+
+    #[test]
+    fn test_task4_reminder_due_scan() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let now = 1700000000;
+        store
+            .add_reminder("thread_rem", "msg_1", now + 10, "Nhắc họp sprint", now)
+            .unwrap();
+
+        // Not yet due
+        assert!(store.claim_due_reminders(now + 5).is_empty());
+
+        // Now due
+        let due = store.claim_due_reminders(now + 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text_preview, "Nhắc họp sprint");
+
+        // Claimed and removed atomically
+        assert!(store.claim_due_reminders(now + 20).is_empty());
+    }
 }

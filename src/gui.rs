@@ -3962,8 +3962,19 @@ impl ZaloGuiApp {
                     if items.is_empty() {
                         return;
                     }
-                    if self.settings.enable_notifications && self.settings.play_notification_sound {
-                        crate::media::play_notification_chime();
+                    if self.settings.enable_notifications {
+                        let first = &items[0];
+                        let preview: String = first.text_preview.chars().take(80).collect();
+                        let extra = if items.len() > 1 {
+                            format!(" (+{} nhắc khác)", items.len() - 1)
+                        } else {
+                            String::new()
+                        };
+                        let notify_body = format!("{preview}{extra}");
+                        crate::os_notify::notify("⏰ ZLite - Nhắc Hẹn", &notify_body);
+                        if self.settings.play_notification_sound {
+                            crate::media::play_notification_chime();
+                        }
                     }
                     for r in &items {
                         if !self.reminder_due_pending.iter().any(|p| {

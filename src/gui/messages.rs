@@ -2340,16 +2340,14 @@ pub(super) fn render_message_body(
         || trimmed_text.starts_with("[Khảo sát]")
         || trimmed_text.starts_with("[Poll]")
     {
-        render_poll_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
-        return None;
+        return render_poll_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
     }
     if msg.kind == crate::message_model::MessageKind::Todo
         || trimmed_text.starts_with("[Giao việc]")
         || trimmed_text.starts_with("[To-Do]")
         || trimmed_text.starts_with("[Todo]")
     {
-        render_todo_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
-        return None;
+        return render_todo_card_widget(ui, msg, text_col, meta_col, pal, max_text_width);
     }
     if msg.kind == crate::message_model::MessageKind::Reminder
         || trimmed_text.starts_with("[Nhắc hẹn]")
@@ -2540,7 +2538,8 @@ pub(super) fn render_poll_card_widget(
     meta_col: Color32,
     pal: &ThemePalette,
     max_text_width: f32,
-) {
+) -> Option<BubbleAction> {
+    let mut action: Option<BubbleAction> = None;
     let trimmed = msg.text.trim();
     let rest = if let Some(stripped) = trimmed.strip_prefix("[Bình chọn]") {
         stripped.trim()
@@ -2599,10 +2598,19 @@ pub(super) fn render_poll_card_widget(
             ui.add_space(8.0);
 
             let card_w = (max_text_width.min(320.0) - 28.0).max(180.0);
-            for (opt_title, votes, percent) in &options {
+            for (idx, (opt_title, votes, percent)) in options.iter().enumerate() {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(*opt_title).size(12.5).color(text_col));
+                        let opt_btn = ui.add(
+                            egui::Button::new(RichText::new(*opt_title).size(12.5).color(text_col))
+                                .frame(false)
+                        );
+                        if opt_btn.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            action = Some(BubbleAction::VotePollOption {
+                                msg_id: msg.id.clone(),
+                                option_idx: idx,
+                            });
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if *votes > 0 {
                                 ui.label(
@@ -2637,9 +2645,15 @@ pub(super) fn render_poll_card_widget(
                 )
                 .fill(pal.primary)
                 .rounding(Rounding::same(6.0));
-                ui.add(btn);
+                if ui.add(btn).clicked() {
+                    action = Some(BubbleAction::VotePollOption {
+                        msg_id: msg.id.clone(),
+                        option_idx: 0,
+                    });
+                }
             });
         });
+    action
 }
 
 pub(super) fn render_todo_card_widget(
@@ -2649,7 +2663,8 @@ pub(super) fn render_todo_card_widget(
     meta_col: Color32,
     pal: &ThemePalette,
     max_text_width: f32,
-) {
+) -> Option<BubbleAction> {
+    let mut action: Option<BubbleAction> = None;
     let trimmed = msg.text.trim();
     let rest = if let Some(stripped) = trimmed.strip_prefix("[Giao việc]") {
         stripped.trim()
@@ -2661,6 +2676,7 @@ pub(super) fn render_todo_card_widget(
         trimmed
     };
 
+    let is_done = msg.text.contains("[Đã xong]") || msg.text.contains("[Hoàn thành]");
     let title = rest.lines().next().unwrap_or(rest);
 
     egui::Frame::none()
@@ -2673,10 +2689,13 @@ pub(super) fn render_todo_card_widget(
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{} GIAO VIỆC", lucide::CHECK_SQUARE)).size(11.0).color(pal.label_blue).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let status_badge_str = if is_done { "Đã xong" } else { "Đang làm" };
+                    let status_badge_col = if is_done { pal.label_green } else { pal.label_blue };
                     ui.label(
-                        RichText::new("Đang làm")
+                        RichText::new(status_badge_str)
                             .size(10.5)
-                            .color(pal.label_blue),
+                            .color(status_badge_col)
+                            .strong(),
                     );
                 });
             });
@@ -2700,17 +2719,28 @@ pub(super) fn render_todo_card_widget(
             ui.add_space(8.0);
 
             ui.vertical_centered_justified(|ui| {
+                let btn_text = if is_done {
+                    "✓ Đã hoàn thành (Bấm để mở lại)"
+                } else {
+                    "✓ Đánh dấu hoàn thành"
+                };
+                let btn_col = if is_done { pal.label_green } else { pal.primary };
                 let btn = egui::Button::new(
-                    RichText::new("✓ Đánh dấu hoàn thành")
+                    RichText::new(btn_text)
                         .size(12.0)
                         .color(pal.primary_fg)
                         .strong(),
                 )
-                .fill(pal.primary)
+                .fill(btn_col)
                 .rounding(Rounding::same(6.0));
-                ui.add(btn);
+                if ui.add(btn).clicked() {
+                    action = Some(BubbleAction::ToggleTodoStatus {
+                        msg_id: msg.id.clone(),
+                    });
+                }
             });
         });
+    action
 }
 
 pub(super) fn render_reminder_card_widget(
@@ -2764,6 +2794,57 @@ pub(super) fn render_reminder_card_widget(
                     .color(meta_col),
             );
         });
+}
+
+pub(crate) fn toggle_message_reaction(msg: &mut ChatMessage, emoji: &str) -> bool {
+    if let Some(pos) = msg.reactions.iter().position(|e| e == emoji) {
+        msg.reactions.remove(pos);
+        false
+    } else {
+        msg.reactions.push(emoji.to_string());
+        true
+    }
+}
+
+pub(crate) fn apply_poll_vote(msg: &mut ChatMessage, option_idx: usize) -> bool {
+    let mut lines: Vec<String> = msg.text.lines().map(|s| s.to_string()).collect();
+    if lines.len() > 1 {
+        let target_idx = option_idx + 1;
+        if target_idx < lines.len() {
+            let line = &mut lines[target_idx];
+            if let Some(pos) = line.rfind(" (") {
+                if let Some(end) = line.rfind(')') {
+                    if pos < end {
+                        let inner = &line[pos + 2..end];
+                        let count: u32 = inner.trim_start_matches('+').parse().unwrap_or(0);
+                        *line = format!("{} (+{})", &line[..pos].trim_end(), count + 1);
+                        msg.text = lines.join("\n");
+                        return true;
+                    }
+                }
+            }
+            line.push_str(" (+1)");
+            msg.text = lines.join("\n");
+            return true;
+        }
+    } else {
+        msg.text.push_str("\n- Đồng ý (+1)");
+        return true;
+    }
+    false
+}
+
+pub(crate) fn toggle_todo_status(msg: &mut ChatMessage) -> bool {
+    if msg.text.contains("[Đã xong]") || msg.text.contains("[Hoàn thành]") {
+        msg.text = msg.text.replace("[Đã xong]", "[Đang làm]").replace("[Hoàn thành]", "[Đang làm]");
+        false
+    } else if msg.text.contains("[Đang làm]") {
+        msg.text = msg.text.replace("[Đang làm]", "[Đã xong]");
+        true
+    } else {
+        msg.text = format!("[Đã xong] {}", msg.text);
+        true
+    }
 }
 
 /// Classified attachment kind for the file/video/voice/doc bubble (#74 follow-up).
@@ -4258,6 +4339,13 @@ pub(super) enum BubbleAction {
     RemindMessage,
     DeleteForMe,
     RecallForEveryone,
+    VotePollOption {
+        msg_id: String,
+        option_idx: usize,
+    },
+    ToggleTodoStatus {
+        msg_id: String,
+    },
     CallAgain {
         is_video: bool,
     },
@@ -5846,5 +5934,41 @@ mod md_block_tests {
         }));
         assert_eq!(video_duration_secs(&msg_video), Some(105));
         assert_eq!(format_duration_mmss(video_duration_secs(&msg_video)), "01:45");
+    }
+
+    #[test]
+    fn test_task2_toggle_reaction_on_chat_message() {
+        let mut msg = ChatMessage::default();
+        assert!(toggle_message_reaction(&mut msg, "❤️"));
+        assert_eq!(msg.reactions, vec!["❤️".to_string()]);
+        assert!(!toggle_message_reaction(&mut msg, "❤️"));
+        assert!(msg.reactions.is_empty());
+    }
+
+    #[test]
+    fn test_task3_poll_and_todo_interaction() {
+        // Poll voting test
+        let mut msg_poll = ChatMessage {
+            id: "poll_1".to_string(),
+            text: "[Bình chọn] Trưa nay ăn gì?\n- Cơm tấm\n- Phở bò".to_string(),
+            kind: crate::message_model::MessageKind::Poll,
+            ..Default::default()
+        };
+        assert!(apply_poll_vote(&mut msg_poll, 0));
+        assert!(msg_poll.text.contains("- Cơm tấm (+1)"));
+        assert!(apply_poll_vote(&mut msg_poll, 0));
+        assert!(msg_poll.text.contains("- Cơm tấm (+2)"));
+
+        // To-Do toggle test
+        let mut msg_todo = ChatMessage {
+            id: "todo_1".to_string(),
+            text: "[Giao việc] Chuẩn bị slide báo cáo".to_string(),
+            kind: crate::message_model::MessageKind::Todo,
+            ..Default::default()
+        };
+        assert!(toggle_todo_status(&mut msg_todo));
+        assert!(msg_todo.text.contains("[Đã xong]"));
+        assert!(!toggle_todo_status(&mut msg_todo));
+        assert!(msg_todo.text.contains("[Đang làm]"));
     }
 }

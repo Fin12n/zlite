@@ -7037,10 +7037,15 @@ impl ZaloGuiApp {
                                     self.reactions_tab = None;
                                 }
                                 BubbleAction::React(r) => {
-                                    // The count is never edited locally: the server echoes our own
-                                    // reaction back as a `chat.reaction` event, which is the only
-                                    // thing that updates the ledger (deduplicated by event id).
-                                    self.status_msg = format!("Đã gửi cảm xúc {r}");
+                                    if let Some(real) = self
+                                        .threads
+                                        .get_mut(self.selected_thread_index)
+                                        .and_then(|t| t.messages.get_mut(idx))
+                                    {
+                                        crate::gui::messages::toggle_message_reaction(real, r);
+                                    }
+                                    self.persist_threads_async();
+                                    self.status_msg = format!("Đã bày tỏ cảm xúc {r}");
                                     if let Some(tx) = WORKER_TX.get() {
                                         let _ = tx.send(WorkerCmd::React {
                                             to_id: thread_id.clone(),
@@ -7226,6 +7231,33 @@ impl ZaloGuiApp {
                                             msg: m,
                                         });
                                     }
+                                }
+                                BubbleAction::VotePollOption { msg_id, option_idx } => {
+                                    if let Some(real) = self
+                                        .threads
+                                        .get_mut(self.selected_thread_index)
+                                        .and_then(|t| t.messages.iter_mut().find(|m| m.id == msg_id))
+                                    {
+                                        crate::gui::messages::apply_poll_vote(real, option_idx);
+                                    }
+                                    self.persist_threads_async();
+                                    self.status_msg = "Đã ghi nhận bình chọn của bạn".into();
+                                }
+                                BubbleAction::ToggleTodoStatus { msg_id } => {
+                                    let mut is_done = false;
+                                    if let Some(real) = self
+                                        .threads
+                                        .get_mut(self.selected_thread_index)
+                                        .and_then(|t| t.messages.iter_mut().find(|m| m.id == msg_id))
+                                    {
+                                        is_done = crate::gui::messages::toggle_todo_status(real);
+                                    }
+                                    self.persist_threads_async();
+                                    self.status_msg = if is_done {
+                                        "Đã đánh dấu hoàn thành công việc".into()
+                                    } else {
+                                        "Đã chuyển công việc về trạng thái đang làm".into()
+                                    };
                                 }
                                 BubbleAction::OpenImagePopup {
                                     tex_key,

@@ -11644,6 +11644,181 @@ impl ZaloGuiApp {
         }
     }
 
+    /// Renders Hidden Chat PIN setup / unlock modal (#STT 1.7).
+    pub(super) fn render_hidden_chat_pin_modal(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
+        if !self.hidden_chat_pin_modal_open {
+            return;
+        }
+
+        let max_w = (ctx.screen_rect().width() - 32.0).clamp(320.0, 420.0);
+        let mut close_modal = false;
+        let is_setup = self.settings.hidden_chat_pin_hash.is_none();
+
+        egui::Window::new(if is_setup { "Cài đặt mã PIN trò chuyện ẩn" } else { "Mở khóa trò chuyện ẩn" })
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(max_w)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(pal.bg_elevated)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(12.0))
+                    .inner_margin(Margin::same(20.0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(max_w);
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new(if is_setup { "🔒" } else { "🔑" }).size(36.0));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(if is_setup {
+                            "Thiết lập mã PIN cho cuộc trò chuyện ẩn"
+                        } else {
+                            "Nhập mã PIN để mở khóa các cuộc trò chuyện ẩn"
+                        })
+                        .color(pal.text_primary)
+                        .size(15.0)
+                        .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(if is_setup {
+                            "Mã PIN từ 4 đến 8 số giúp bảo vệ riêng tư. Có thể mở khóa nhanh bằng cách gõ mã PIN vào ô Tìm kiếm."
+                        } else {
+                            "Các cuộc trò chuyện ẩn sẽ xuất hiện sau khi mở khóa."
+                        })
+                        .color(pal.text_secondary)
+                        .size(12.0),
+                    );
+                    ui.add_space(16.0);
+
+                    if is_setup {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Mã PIN mới:").color(pal.text_primary).size(13.0));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.hidden_chat_pin_input)
+                                        .password(true)
+                                        .desired_width(180.0)
+                                        .horizontal_align(Align::Center),
+                                );
+                            });
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Xác nhận mã PIN:").color(pal.text_primary).size(13.0));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.hidden_chat_pin_confirm)
+                                        .password(true)
+                                        .desired_width(180.0)
+                                        .horizontal_align(Align::Center),
+                                );
+                            });
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Mã PIN:").color(pal.text_primary).size(13.0));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.hidden_chat_pin_input)
+                                        .password(true)
+                                        .desired_width(180.0)
+                                        .horizontal_align(Align::Center),
+                                );
+                                if !resp.has_focus() && self.hidden_chat_pin_error.is_none() {
+                                    resp.request_focus();
+                                }
+                            });
+                        });
+                    }
+
+                    if let Some(ref err) = self.hidden_chat_pin_error {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(err).color(pal.danger).size(12.0).strong());
+                    }
+
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Hủy").size(13.0)).clicked() {
+                            close_modal = true;
+                        }
+
+                        if !is_setup {
+                            if ui.button(RichText::new("Gỡ mã PIN").color(pal.danger).size(13.0)).clicked() {
+                                let p = self.hidden_chat_pin_input.trim();
+                                if let Some(ref expected) = self.settings.hidden_chat_pin_hash {
+                                    if crate::app_lock::verify_hidden_chat_pin(p, expected) {
+                                        self.settings.hidden_chat_pin_hash = None;
+                                        self.settings.save();
+                                        self.show_toast("Đã xóa mã PIN trò chuyện ẩn");
+                                        close_modal = true;
+                                    } else {
+                                        self.hidden_chat_pin_error = Some("Vui lòng nhập đúng mã PIN hiện tại để gỡ.".into());
+                                    }
+                                }
+                            }
+                        }
+
+                        let submit_btn = egui::Button::new(
+                            RichText::new(if is_setup { "Lưu mã PIN" } else { "Mở khóa" })
+                                .color(Color32::WHITE)
+                                .size(13.0)
+                                .strong(),
+                        )
+                        .fill(pal.primary)
+                        .rounding(Rounding::same(6.0));
+
+                        if ui.add(submit_btn).clicked() {
+                            let p1 = self.hidden_chat_pin_input.trim();
+                            if is_setup {
+                                let p2 = self.hidden_chat_pin_confirm.trim();
+                                if p1.len() < 4 || p1.len() > 12 {
+                                    self.hidden_chat_pin_error = Some("Mã PIN phải từ 4 đến 12 ký tự.".into());
+                                } else if p1 != p2 {
+                                    self.hidden_chat_pin_error = Some("Mã PIN xác nhận không khớp.".into());
+                                } else {
+                                    let hash = crate::app_lock::hash_hidden_chat_pin(p1);
+                                    self.settings.hidden_chat_pin_hash = Some(hash);
+                                    if let Some(target_tid) = self.hidden_chat_target_thread_id.take() {
+                                        self.settings.hidden_threads.insert(target_tid.clone());
+                                        if let Some(th) = self.threads.iter_mut().find(|t| t.id == target_tid) {
+                                            th.presentation.hidden = true;
+                                        }
+                                        self.show_toast("🙈 Đã ẩn cuộc trò chuyện thành công");
+                                    }
+                                    self.settings.save();
+                                    self.hidden_chats_unlocked = true;
+                                    self.hidden_chat_pin_error = None;
+                                    close_modal = true;
+                                }
+                            } else {
+                                if let Some(ref expected) = self.settings.hidden_chat_pin_hash {
+                                    if crate::app_lock::verify_hidden_chat_pin(p1, expected) {
+                                        self.hidden_chats_unlocked = true;
+                                        self.hidden_chat_pin_error = None;
+                                        self.show_toast("🔓 Đã mở khóa cuộc trò chuyện ẩn");
+                                        close_modal = true;
+                                    } else {
+                                        self.hidden_chat_pin_error = Some("Mã PIN không đúng. Vui lòng thử lại!".into());
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+
+        if close_modal {
+            self.hidden_chat_pin_modal_open = false;
+            self.hidden_chat_pin_input.clear();
+            self.hidden_chat_pin_confirm.clear();
+            self.hidden_chat_pin_error = None;
+            self.hidden_chat_target_thread_id = None;
+        }
+    }
+
     /// Renders Zavi Meeting creation and join dialogs (#107).
     pub(super) fn render_zavi_meeting_modals(&mut self, ctx: &egui::Context, pal: &ThemePalette) {
         // 1. Create Meeting Modal
@@ -12479,6 +12654,185 @@ impl ZaloGuiApp {
         if end_meeting_triggered {
             self.zavi_state.end_meeting();
             self.show_toast("Đã kết thúc cuộc họp Zavi");
+        }
+    }
+
+    /// Renders Product Catalog & Price Quote Card dialog (#STT 6.3).
+    pub(super) fn render_catalog_modal(
+        &mut self,
+        ctx: &egui::Context,
+        pal: &ThemePalette,
+        thread_id: &str,
+        is_group: bool,
+    ) {
+        if !self.catalog_modal_open {
+            return;
+        }
+
+        let max_w = (ctx.screen_rect().width() - 32.0).clamp(340.0, 520.0);
+        let mut close_modal = false;
+        let mut send_quote_text: Option<String> = None;
+        let mut delete_idx: Option<usize> = None;
+
+        egui::Window::new("📦 Danh mục sản phẩm & Báo giá")
+            .collapsible(false)
+            .resizable(true)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .default_width(max_w)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(pal.bg_elevated)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .rounding(Rounding::same(12.0))
+                    .inner_margin(Margin::same(16.0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(max_w);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Quản lý danh mục & Gửi thẻ báo giá").color(pal.text_secondary).size(12.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("✕ Đóng").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // 1. Catalog Items List
+                ui.label(RichText::new("Danh sách sản phẩm hiện có:").color(pal.text_primary).strong().size(13.0));
+                ui.add_space(4.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.catalog_items.is_empty() {
+                            ui.label(RichText::new("Chưa có sản phẩm nào trong danh mục.").color(pal.text_muted).size(12.0));
+                        } else {
+                            for (idx, item) in self.catalog_items.iter().enumerate() {
+                                egui::Frame::none()
+                                    .fill(pal.bg_input)
+                                    .stroke(Stroke::new(1.0_f32, pal.border_subtle))
+                                    .rounding(Rounding::same(8.0))
+                                    .inner_margin(Margin::symmetric(10.0, 8.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new(&item.name).color(pal.text_primary).strong().size(13.0));
+                                                    if !item.sku.is_empty() {
+                                                        ui.label(RichText::new(format!("SKU: {}", item.sku)).color(pal.text_muted).size(11.0));
+                                                    }
+                                                });
+                                                ui.label(
+                                                    RichText::new(crate::catalog::format_currency_vnd(item.price))
+                                                        .color(pal.primary_hover)
+                                                        .strong()
+                                                        .size(13.5),
+                                                );
+                                                if !item.description.is_empty() {
+                                                    ui.label(RichText::new(&item.description).color(pal.text_secondary).size(11.0));
+                                                }
+                                            });
+
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                let send_btn = egui::Button::new(
+                                                    RichText::new("Gửi báo giá").color(Color32::WHITE).strong().size(11.5),
+                                                )
+                                                .fill(pal.primary)
+                                                .rounding(Rounding::same(4.0));
+
+                                                if ui.add(send_btn).clicked() {
+                                                    send_quote_text = Some(item.to_quote_message());
+                                                }
+
+                                                if ui.button(RichText::new("Xóa").color(pal.danger).size(11.0)).clicked() {
+                                                    delete_idx = Some(idx);
+                                                }
+                                            });
+                                        });
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        }
+                    });
+
+                if let Some(idx) = delete_idx {
+                    if idx < self.catalog_items.len() {
+                        self.catalog_items.remove(idx);
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // 2. Add New Product Form
+                ui.label(RichText::new("Thêm sản phẩm mới:").color(pal.text_primary).strong().size(13.0));
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Tên:").color(pal.text_primary).size(12.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.catalog_new_name).desired_width(180.0));
+                    ui.label(RichText::new("Giá (₫):").color(pal.text_primary).size(12.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.catalog_new_price).desired_width(100.0));
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("SKU:").color(pal.text_primary).size(12.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.catalog_new_sku).desired_width(120.0));
+                    ui.label(RichText::new("Mô tả:").color(pal.text_primary).size(12.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.catalog_new_desc).desired_width(160.0));
+                });
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let add_btn = egui::Button::new(
+                        RichText::new("+ Thêm vào danh mục").color(Color32::WHITE).strong().size(12.0),
+                    )
+                    .fill(pal.primary)
+                    .rounding(Rounding::same(4.0));
+
+                    if ui.add(add_btn).clicked() {
+                        let name = self.catalog_new_name.trim();
+                        if !name.is_empty() {
+                            let price_digits: String = self.catalog_new_price.chars().filter(|c| c.is_ascii_digit()).collect();
+                            let price = price_digits.parse::<u64>().unwrap_or(0);
+                            let item = crate::catalog::ProductItem::new(
+                                name,
+                                price,
+                                self.catalog_new_sku.trim(),
+                                self.catalog_new_desc.trim(),
+                                "",
+                            );
+                            self.catalog_items.push(item);
+                            self.catalog_new_name.clear();
+                            self.catalog_new_price.clear();
+                            self.catalog_new_sku.clear();
+                            self.catalog_new_desc.clear();
+                            self.show_toast("Đã thêm sản phẩm mới vào danh mục");
+                        }
+                    }
+                });
+            });
+
+        if let Some(quote_msg) = send_quote_text {
+            if let Some(tx) = WORKER_TX.get() {
+                let _ = tx.send(WorkerCmd::SendMessage {
+                    to_id: thread_id.to_string(),
+                    is_group,
+                    text: quote_msg,
+                });
+            }
+            self.show_toast("Đã gửi thẻ báo giá sản phẩm vào trò chuyện!");
+            close_modal = true;
+        }
+
+        if close_modal {
+            self.catalog_modal_open = false;
         }
     }
 }

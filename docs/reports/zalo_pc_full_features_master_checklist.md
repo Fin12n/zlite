@@ -17,7 +17,7 @@
 | 1.4 | Khóa ứng dụng bằng mã PIN (App Lock) | [-] Một phần | `src/gui/modals.rs` | Đã có modal nhập PIN, cần logic hash PIN, timeout tự khóa. |
 | 1.5 | Mã hóa đầu cuối (E2EE Signal Protocol) | [x] Hoàn thành | `src/e2ee.rs`, `crypto.rs` | Trao đổi khóa Curve25519/Ed25519, mã hóa phiên. |
 | 1.6 | Tin nhắn tự xóa (TTL / Ephemeral) | [-] Một phần | `src/store.rs` | Đã có cờ `vanish`, cần background job xóa tin quá hạn. |
-| 1.7 | Ẩn cuộc trò chuyện bằng mã PIN (Hidden) | [ ] Chưa có | `src/store.rs` | Cần cờ hidden và yêu cầu PIN để hiển thị. |
+| 1.7 | Ẩn cuộc trò chuyện bằng mã PIN (Hidden) | [x] Hoàn thành | `src/app_lock.rs`, `workspace.rs`, `modals.rs` | Khóa/mở khóa qua search bar hoặc nút 🔒, modal PIN 4-8 số. |
 
 ---
 
@@ -76,7 +76,7 @@
 | 5.2 | Xem ảnh phóng to & Xoay ảnh | [x] Hoàn thành | `src/gui/modals.rs` | Image viewer với zoom, pan, tải về. |
 | 5.3 | Phát video in-app kèm điều khiển | [x] Hoàn thành | `src/gui/modals.rs` | Modal player, tải cache ngầm, mở player ngoài. |
 | 5.4 | Dọn dẹp dung lượng bộ nhớ đệm (Cache) | [-] Một phần | `src/gui/workspace.rs` | Cần tính toán kích thước thư mục cache và nút dọn dẹp. |
-| 5.5 | Tải tệp hàng loạt (Bulk Download) | [ ] Chưa có | `src/chat.rs` | Lưu nhiều file về thư mục Downloads. |
+| 5.5 | Tải tệp hàng loạt (Bulk Download) | [x] Hoàn thành | `src/gui/workspace.rs` | Checkbox chọn nhiều tệp và 1-click tải tất cả về Downloads. |
 
 ---
 
@@ -85,7 +85,7 @@
 | :--- | :--- | :---: | :--- | :--- |
 | 6.1 | Nhãn phân loại hội thoại (Chat Labels) | [x] Hoàn thành | `src/gui/workspace.rs` | Gắn thẻ màu, bộ lọc `Phân loại ▾`. |
 | 6.2 | Trả lời tự động (Auto-Reply Engine) | [x] Hoàn thành | `src/api_mcp.rs` | Khớp từ khóa, phạm vi phản hồi, rule engine. |
-| 6.3 | Danh mục sản phẩm & Báo giá | [ ] Chưa có | `src/chat.rs` | Tính năng Zalo OA / Business Catalog. |
+| 6.3 | Danh mục sản phẩm & Báo giá | [x] Hoàn thành | `src/catalog.rs`, `workspace.rs`, `messages.rs` | Quản lý danh mục sản phẩm, gửi và hiển thị thẻ báo giá VND. |
 
 ---
 

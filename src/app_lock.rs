@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const PIN_SALT_PREFIX: &[u8] = b"zlite_app_lock_salt_v1:";
+const HIDDEN_CHAT_PIN_SALT_PREFIX: &[u8] = b"zlite_hidden_chat_pin_v1:";
 
 /// Hashes an application PIN using SHA-256 with a domain-separated salt.
 pub fn hash_app_pin(pin: &str) -> String {
@@ -22,6 +23,23 @@ pub fn verify_app_pin(pin: &str, stored_hash: &str) -> bool {
         return false;
     }
     let candidate = hash_app_pin(pin);
+    candidate.eq_ignore_ascii_case(stored_hash.trim())
+}
+
+/// Hashes a Hidden Chat PIN using SHA-256 with a domain-separated salt.
+pub fn hash_hidden_chat_pin(pin: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(HIDDEN_CHAT_PIN_SALT_PREFIX);
+    hasher.update(pin.trim().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Verifies whether the provided PIN matches the stored Hidden Chat PIN hash.
+pub fn verify_hidden_chat_pin(pin: &str, stored_hash: &str) -> bool {
+    if stored_hash.is_empty() || pin.trim().is_empty() {
+        return false;
+    }
+    let candidate = hash_hidden_chat_pin(pin);
     candidate.eq_ignore_ascii_case(stored_hash.trim())
 }
 
@@ -150,6 +168,14 @@ mod tests {
         assert!(!verify_app_pin("12345", &hash));
         assert!(!verify_app_pin("", &hash));
         assert!(!verify_app_pin("123456", ""));
+
+        // Test hidden chat PIN
+        let pin2 = "9876";
+        let h_hash = hash_hidden_chat_pin(pin2);
+        assert_ne!(h_hash, hash_app_pin(pin2)); // domain separation
+        assert!(verify_hidden_chat_pin("9876", &h_hash));
+        assert!(verify_hidden_chat_pin(" 9876 ", &h_hash));
+        assert!(!verify_hidden_chat_pin("1234", &h_hash));
     }
 
     #[test]

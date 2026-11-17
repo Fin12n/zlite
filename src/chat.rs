@@ -1375,6 +1375,14 @@ pub fn merge_thread_into(
     target.presentation.muted = target.presentation.muted || incoming.presentation.muted;
     target.presentation.hidden = target.presentation.hidden || incoming.presentation.hidden;
 
+    target.unread.merge_metadata(&incoming.unread);
+    if let Some(ref seen) = incoming.unread.last_seen_id {
+        target.unread.advance_seen(seen);
+    }
+    if incoming.unread.last_seen_id.is_some() && target.unread.last_seen_id.is_none() {
+        target.unread.last_seen_id = incoming.unread.last_seen_id.clone();
+    }
+
     // Repeated text and timestamps are not identities. Keep ambiguous keys instead of
     // choosing the first candidate, especially when multiple pending sends collide.
     let mut identities = MessageIdentityIndex::default();
@@ -7039,6 +7047,11 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                 }
             }
         }
+    }
+
+    crate::unread::merge_read_points(threads, resp);
+    if data_node != resp {
+        crate::unread::merge_read_points(threads, data_node);
     }
 }
 

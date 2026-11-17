@@ -1254,6 +1254,9 @@ struct AppSettings {
     pub(crate) app_lock_pin_hash: Option<String>,
     #[serde(default)]
     pub(crate) app_lock_timeout_secs: u64,
+    // 12. Ẩn trò chuyện bằng mã PIN (#STT 1.7)
+    #[serde(default)]
+    pub(crate) hidden_chat_pin_hash: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -1330,6 +1333,7 @@ impl Default for AppSettings {
             info_drawer_open: false,
             app_lock_pin_hash: None,
             app_lock_timeout_secs: 0,
+            hidden_chat_pin_hash: None,
         }
     }
 }
@@ -1714,6 +1718,23 @@ pub struct ZaloGuiApp {
     pub(crate) join_meeting_id_input: String,
     pub(crate) join_meeting_pwd_input: String,
     pub(crate) join_meeting_name_input: String,
+    // Hidden Chat PIN (#STT 1.7)
+    pub(crate) hidden_chats_unlocked: bool,
+    pub(crate) hidden_chat_pin_modal_open: bool,
+    pub(crate) hidden_chat_pin_input: String,
+    pub(crate) hidden_chat_pin_confirm: String,
+    pub(crate) hidden_chat_pin_error: Option<String>,
+    pub(crate) hidden_chat_target_thread_id: Option<String>,
+    // Bulk Download (#STT 5.5)
+    pub(crate) bulk_download_mode: bool,
+    pub(crate) selected_bulk_files: HashSet<String>,
+    // Product Catalog & Price Quote Cards (#STT 6.3)
+    pub(crate) catalog_modal_open: bool,
+    pub(crate) catalog_items: Vec<crate::catalog::ProductItem>,
+    pub(crate) catalog_new_name: String,
+    pub(crate) catalog_new_price: String,
+    pub(crate) catalog_new_sku: String,
+    pub(crate) catalog_new_desc: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2082,6 +2103,20 @@ impl ZaloGuiApp {
             join_meeting_id_input: String::new(),
             join_meeting_pwd_input: String::new(),
             join_meeting_name_input: String::new(),
+            hidden_chats_unlocked: false,
+            hidden_chat_pin_modal_open: false,
+            hidden_chat_pin_input: String::new(),
+            hidden_chat_pin_confirm: String::new(),
+            hidden_chat_pin_error: None,
+            hidden_chat_target_thread_id: None,
+            bulk_download_mode: false,
+            selected_bulk_files: HashSet::new(),
+            catalog_modal_open: false,
+            catalog_items: crate::catalog::default_sample_catalog(),
+            catalog_new_name: String::new(),
+            catalog_new_price: String::new(),
+            catalog_new_sku: String::new(),
+            catalog_new_desc: String::new(),
         };
         let mut app = app;
         let _ = app.reload_custom_sticker_packs();
@@ -2680,7 +2715,15 @@ impl ZaloGuiApp {
                                     .collect();
                                 crate::chat::merge_thread_into(existing, nt, true);
                                 let added = existing.messages.len().saturating_sub(old_len);
-                                if added > 0 {
+                                if old_len == 0 {
+                                    // Initial thread load from storage or server snapshot:
+                                    // Respect server/authoritative unread state directly instead of counting all history messages.
+                                    if existing.unread.count() > 0 {
+                                        self.unread_counts.insert(existing.id.clone(), existing.unread.count());
+                                    } else {
+                                        self.unread_counts.remove(&existing.id);
+                                    }
+                                } else if added > 0 {
                                     let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
                                     let inc_cnt = existing
                                         .messages
@@ -2692,11 +2735,11 @@ impl ZaloGuiApp {
                                                 return false;
                                             }
                                             if seen.is_empty() {
-                                                return true;
+                                                return false;
                                             }
                                             matches!(
                                                 crate::unread::compare_ids(&m.id, seen),
-                                                Some(std::cmp::Ordering::Greater) | None
+                                                Some(std::cmp::Ordering::Greater)
                                             )
                                         })
                                         .count();
@@ -2835,11 +2878,17 @@ impl ZaloGuiApp {
                                         self.chat_render_window.1 += added;
                                     }
                                 }
+                                if existing.unread.fresh && existing.unread.count() == 0 {
+                                    self.unread_counts.remove(&existing.id);
+                                }
                             } else if let Some(existing) = self.threads.iter_mut().find(|t| {
                                 !update_ids.contains(&t.id)
                                     && crate::chat::threads_represent_same_contact(t, &nt)
                             }) {
                                 crate::chat::merge_thread_into(existing, nt, true);
+                                if existing.unread.fresh && existing.unread.count() == 0 {
+                                    self.unread_counts.remove(&existing.id);
+                                }
                             } else if !nt.id.is_empty() && nt.id != "0" {
                                 // Brand-new thread chưa có read-point (#1445): đây là lần
                                 // đầu thấy thread (history load hoặc poll đầu), KHÔNG

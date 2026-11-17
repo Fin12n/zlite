@@ -183,18 +183,62 @@ fn string(value: &Value, key: &str) -> Option<String> {
     })
 }
 
+fn pick_value_str(v: &Value, keys: &[&str]) -> Option<String> {
+    for k in keys {
+        if let Some(val) = v.get(k) {
+            if let Some(s) = val.as_str() {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            } else if let Some(n) = val.as_u64() {
+                if n > 0 {
+                    return Some(n.to_string());
+                }
+            } else if let Some(n) = val.as_i64() {
+                if n > 0 {
+                    return Some(n.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Original desktop consumer ignores subchat cursors (`type=2`, `sct=1/2/3`).
+/// Merges read points from both clearUnreads lists and conversation arrays (sync from mobile).
 pub fn merge_read_points(threads: &mut [Thread], data: &Value) {
-    let entries = data
+    let mut decoded = None;
+    let payload = unwrap_mute_payload(data, &mut decoded);
+
+    // 1. Scan clearUnreads, clearUnreadInfo, statusMap.clearUnreads
+    let mut entries: Vec<&Value> = Vec::new();
+    if let Some(arr) = payload
         .get("clearUnreads")
-        .or_else(|| data.get("clearUnreadInfo"))
-        .or_else(|| data.get("statusMap").and_then(|v| v.get("clearUnreads")))
-        .and_then(Value::as_array);
-    for entry in entries.into_iter().flatten() {
+        .or_else(|| payload.get("clearUnreadInfo"))
+        .or_else(|| payload.get("statusMap").and_then(|v| v.get("clearUnreads")))
+        .and_then(Value::as_array)
+    {
+        entries.extend(arr);
+    }
+    if let Some(sub_data) = payload.get("data") {
+        if let Some(arr) = sub_data
+            .get("clearUnreads")
+            .or_else(|| sub_data.get("clearUnreadInfo"))
+            .or_else(|| sub_data.get("statusMap").and_then(|v| v.get("clearUnreads")))
+            .and_then(Value::as_array)
+        {
+            entries.extend(arr);
+        }
+    }
+
+    for entry in entries {
         if entry.get("type").and_then(Value::as_i64) == Some(2) && entry.get("sct").is_some() {
             continue;
         }
-        let (Some(id), Some(point)) = (string(entry, "idTo"), string(entry, "lastMsgId")) else {
+        let (Some(id), Some(point)) = (
+            pick_value_str(entry, &["idTo", "threadId", "userId", "convId", "id", "peerId"]),
+            pick_value_str(entry, &["lastMsgId", "lastSeenMsgId", "lastReadMsgId", "seenMsgId", "last_msg_id"]),
+        ) else {
             continue;
         };
         if numeric_id(&point).is_none_or(|id| id == "0") || id.is_empty() || id == "0" {
@@ -202,8 +246,9 @@ pub fn merge_read_points(threads: &mut [Thread], data: &Value) {
         }
         let group = entry
             .get("isGroup")
-            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64() == Some(1));
-        let tid = if group {
+            .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64() == Some(1))
+            || id.starts_with('g');
+        let tid = if group && !id.starts_with('g') {
             format!("g{}", id.trim_start_matches('g'))
         } else {
             id
@@ -216,6 +261,63 @@ pub fn merge_read_points(threads: &mut [Thread], data: &Value) {
         }) {
             thread.unread.advance_seen(&point);
             thread.unread.fresh = true;
+        }
+    }
+
+    // 2. Scan conversations / threads arrays for mobile-synced unreadCount == 0
+    let conv_lists = [
+        payload.get("conversations"),
+        payload.get("threads"),
+        payload.get("convs"),
+        payload.get("data").and_then(|d| d.get("conversations")),
+    ];
+    for list_val in conv_lists.into_iter().flatten() {
+        if let Some(arr) = list_val.as_array() {
+            for conv in arr {
+                let Some(id) = pick_value_str(conv, &["id", "threadId", "userId", "convId", "idTo"]) else {
+                    continue;
+                };
+                let unread_count = conv.get("unreadCount")
+                    .or_else(|| conv.get("totalUnread"))
+                    .or_else(|| conv.get("unreads"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(-1);
+
+                let point = pick_value_str(conv, &["lastSeenMsgId", "lastReadMsgId", "seenMsgId", "lastMsgId"])
+                    .or_else(|| conv.get("lastMsg").and_then(|m| pick_value_str(m, &["msgId", "id"])));
+
+                if let Some(point) = point {
+                    if numeric_id(&point).is_none_or(|id| id == "0") {
+                        continue;
+                    }
+                    let group = conv
+                        .get("isGroup")
+                        .is_some_and(|v| v.as_bool() == Some(true) || v.as_i64() == Some(1))
+                        || id.starts_with('g');
+                    let tid = if group && !id.starts_with('g') {
+                        format!("g{}", id.trim_start_matches('g'))
+                    } else {
+                        id
+                    };
+                    if let Some(thread) = threads.iter_mut().find(|t| {
+                        t.id == tid
+                            || (group
+                                && t.is_group
+                                && t.id.trim_start_matches('g') == tid.trim_start_matches('g'))
+                    }) {
+                        if unread_count == 0 {
+                            thread.unread.advance_seen(&point);
+                            thread.unread.unread_ids.clear();
+                            thread.unread.fresh = true;
+                        } else if unread_count > 0 {
+                            if let Some(last_seen) = pick_value_str(conv, &["lastSeenMsgId", "lastReadMsgId"]) {
+                                thread.unread.advance_seen(&last_seen);
+                                thread.unread.fresh = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -485,6 +587,40 @@ mod tests {
         assert_eq!(state.count(), 1);
         state.read_visible(&[message("11", false)]);
         assert!(!state.has_badge());
+    }
+    #[test]
+    fn unread_sync_from_mobile_conversations_advances_seen() {
+        let mut threads = vec![Thread {
+            presentation: Default::default(),
+            unread: Default::default(),
+            id: "user123".into(),
+            name: "Test User".into(),
+            preview: "".into(),
+            time: "".into(),
+            avatar: None,
+            is_group: false,
+            messages: vec![message("50", false), message("51", false)],
+            vanish: None,
+        }];
+        let msgs = threads[0].messages.clone();
+        threads[0].unread.observe(&msgs);
+
+        // Payload like get_last_msgs with conversations having unreadCount = 0 and lastMsgId = 51
+        let payload = serde_json::json!({
+            "data": {
+                "conversations": [
+                    {
+                        "id": "user123",
+                        "unreadCount": 0,
+                        "lastMsgId": "51"
+                    }
+                ]
+            }
+        });
+        merge_read_points(&mut threads, &payload);
+        assert_eq!(threads[0].unread.last_seen_id.as_deref(), Some("51"));
+        assert_eq!(threads[0].unread.count(), 0);
+        assert!(!threads[0].unread.has_badge());
     }
 }
 

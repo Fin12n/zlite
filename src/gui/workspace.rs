@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 /// Computes the vertical height reserved for the central chat message ScrollArea
 /// so the composer toolbar and optional sticker picker remain visible on compact windows (e.g. 480x360).
@@ -625,6 +625,14 @@ impl ZaloGuiApp {
             self.render_phone_lookup_modal(ctx, pal);
             self.render_zavi_meeting_modals(ctx, pal);
             self.render_zavi_conference_overlay(ctx, pal);
+            self.render_hidden_chat_pin_modal(ctx, pal);
+
+        let (cur_tid, cur_is_grp) = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| (t.id.clone(), t.is_group))
+            .unwrap_or_default();
+        self.render_catalog_modal(ctx, pal, &cur_tid, cur_is_grp);
             return;
         }
         if self.feed_modal_open {
@@ -643,6 +651,14 @@ impl ZaloGuiApp {
             self.render_settings_modal(ctx, pal);
             self.render_zavi_meeting_modals(ctx, pal);
             self.render_zavi_conference_overlay(ctx, pal);
+            self.render_hidden_chat_pin_modal(ctx, pal);
+
+        let (cur_tid, cur_is_grp) = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| (t.id.clone(), t.is_group))
+            .unwrap_or_default();
+        self.render_catalog_modal(ctx, pal, &cur_tid, cur_is_grp);
             return;
         }
         // -------------------------------------------------------------------
@@ -956,6 +972,63 @@ impl ZaloGuiApp {
                                     .clicked()
                                 {
                                     self.create_group_modal_open = true;
+                                }
+
+                                // Hidden Chat Lock/Unlock Trigger Button (#STT 1.7)
+                                let (lock_rect, lock_resp) =
+                                    ui.allocate_exact_size(Vec2::new(32.0, 32.0), Sense::click());
+                                let is_unlocked = self.hidden_chats_unlocked;
+                                ui.painter().rect_filled(
+                                    lock_rect,
+                                    Rounding::same(8.0),
+                                    if is_unlocked {
+                                        pal.primary.linear_multiply(0.22)
+                                    } else if lock_resp.hovered() {
+                                        pal.bg_hover
+                                    } else {
+                                        pal.bg_input
+                                    },
+                                );
+                                ui.painter().rect_stroke(
+                                    lock_rect,
+                                    Rounding::same(8.0),
+                                    Stroke::new(
+                                        1.0_f32,
+                                        if is_unlocked {
+                                            pal.primary
+                                        } else if lock_resp.hovered() {
+                                            pal.primary
+                                        } else {
+                                            pal.border
+                                        },
+                                    ),
+                                );
+                                ui.painter().text(
+                                    lock_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    if is_unlocked { "🔓" } else { "🔒" },
+                                    FontId::proportional(14.0),
+                                    if is_unlocked { pal.primary_hover } else { pal.text_secondary },
+                                );
+                                let tip = if is_unlocked {
+                                    "Đang mở cuộc trò chuyện ẩn (Bấm để khóa lại)"
+                                } else {
+                                    "Mở / Cài đặt cuộc trò chuyện ẩn bằng mã PIN"
+                                };
+                                if lock_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    if is_unlocked {
+                                        self.hidden_chats_unlocked = false;
+                                        self.show_toast("🔒 Đã khóa lại cuộc trò chuyện ẩn");
+                                    } else {
+                                        self.hidden_chat_pin_modal_open = true;
+                                        self.hidden_chat_pin_input.clear();
+                                        self.hidden_chat_pin_confirm.clear();
+                                        self.hidden_chat_pin_error = None;
+                                    }
                                 }
                             });
                             if !active_search_chips.is_empty() {
@@ -1285,13 +1358,58 @@ impl ZaloGuiApp {
                         });
                 }
 
+                // Hidden Chat PIN matching via Search Bar (#STT 1.7)
+                let raw_search = self.search_query.trim();
+                if let Some(ref pin_hash) = self.settings.hidden_chat_pin_hash {
+                    if !raw_search.is_empty() && crate::app_lock::verify_hidden_chat_pin(raw_search, pin_hash) {
+                        if !self.hidden_chats_unlocked {
+                            self.hidden_chats_unlocked = true;
+                            self.show_toast("🔓 Đã mở khóa cuộc trò chuyện ẩn");
+                        }
+                    }
+                }
+
+                if self.hidden_chats_unlocked {
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .stroke(Stroke::new(1.0_f32, pal.primary))
+                        .rounding(Rounding::same(6.0))
+                        .inner_margin(Margin::symmetric(10.0, 6.0))
+                        .outer_margin(Margin::symmetric(8.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("🔓 Đang mở trò chuyện ẩn")
+                                        .size(11.5)
+                                        .color(pal.primary_hover)
+                                        .strong(),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let lock_btn = egui::Button::new(
+                                        RichText::new("🔒 Khóa lại")
+                                            .size(11.0)
+                                            .color(Color32::WHITE)
+                                            .strong(),
+                                    )
+                                    .fill(pal.danger)
+                                    .rounding(Rounding::same(4.0));
+                                    if ui.add(lock_btn).clicked() {
+                                        self.hidden_chats_unlocked = false;
+                                        self.show_toast("🔒 Đã khóa lại cuộc trò chuyện ẩn");
+                                    }
+                                });
+                            });
+                        });
+                }
+
                 let search_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut filtered_indices: Vec<usize> = self
                         .threads
                         .iter()
                         .enumerate()
                         .filter(|(idx, t)| {
-                            if query.is_empty() && self.settings.hidden_threads.contains(&t.id) {
+                            let is_thread_hidden = self.settings.hidden_threads.contains(&t.id) || t.presentation.hidden;
+                            if is_thread_hidden && !self.hidden_chats_unlocked {
                                 return false;
                             }
                             let pass_filter = match self.thread_filter {
@@ -1304,7 +1422,7 @@ impl ZaloGuiApp {
                             };
                             // Chat Folders (WaveA3): folder active lọc thêm theo rule.
                             let pass_folder = self.thread_passes_active_folder(t);
-                            let not_hidden = !t.presentation.hidden || !query.is_empty();
+                            let not_hidden = !is_thread_hidden || self.hidden_chats_unlocked;
                             // Like official Zalo: hide contacts that have never had any messages unless
                             // actively searching, explicitly enabled in settings, or currently selected.
                             let has_messages = !t.messages.is_empty()
@@ -1611,7 +1729,12 @@ impl ZaloGuiApp {
                                 };
                                 let avail_name_w = (row_rect.right() - name_x - reserved_right).max(35.0);
                                 let max_name_chars = ((avail_name_w / 7.2) as usize).clamp(8, 45);
-                                let display_name = truncate_chars(&t.name, max_name_chars);
+                                let display_name_raw = truncate_chars(&t.name, max_name_chars);
+                                let display_name = if is_hidden {
+                                    format!("🔒 {display_name_raw}")
+                                } else {
+                                    display_name_raw.to_string()
+                                };
                                 ui.painter().text(
                                     Pos2::new(name_x, row_rect.top() + 12.0),
                                     egui::Align2::LEFT_TOP,
@@ -2517,25 +2640,45 @@ impl ZaloGuiApp {
                         }
                         ThreadCtxAction::ToggleHide(tid, is_group, hide) => {
                             if hide {
-                                self.settings.hidden_threads.insert(tid.clone());
-                                self.show_toast(
-                                    "🙈 Đã ẩn trò chuyện (gõ tên vào ô Tìm kiếm để mở lại)",
-                                );
+                                if self.settings.hidden_chat_pin_hash.is_none() {
+                                    self.hidden_chat_pin_modal_open = true;
+                                    self.hidden_chat_target_thread_id = Some(tid.clone());
+                                    self.hidden_chat_pin_input.clear();
+                                    self.hidden_chat_pin_confirm.clear();
+                                    self.hidden_chat_pin_error = None;
+                                } else {
+                                    self.settings.hidden_threads.insert(tid.clone());
+                                    if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
+                                        th.presentation.hidden = true;
+                                    }
+                                    self.settings.save();
+                                    self.persist_threads_async();
+                                    self.show_toast(
+                                        "🙈 Đã ẩn trò chuyện (nhập mã PIN vào ô Tìm kiếm hoặc bấm icon 🔒 để mở lại)",
+                                    );
+                                    if let Some(tx) = WORKER_TX.get() {
+                                        let _ = tx.send(WorkerCmd::HideThread {
+                                            thread_id: tid,
+                                            is_group,
+                                            hide: true,
+                                        });
+                                    }
+                                }
                             } else {
                                 self.settings.hidden_threads.remove(&tid);
+                                if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
+                                    th.presentation.hidden = false;
+                                }
+                                self.settings.save();
+                                self.persist_threads_async();
                                 self.show_toast("Đã bỏ ẩn trò chuyện");
-                            }
-                            if let Some(th) = self.threads.iter_mut().find(|t| t.id == tid) {
-                                th.presentation.hidden = hide;
-                            }
-                            self.settings.save();
-                            self.persist_threads_async();
-                            if let Some(tx) = WORKER_TX.get() {
-                                let _ = tx.send(WorkerCmd::HideThread {
-                                    thread_id: tid,
-                                    is_group,
-                                    hide,
-                                });
+                                if let Some(tx) = WORKER_TX.get() {
+                                    let _ = tx.send(WorkerCmd::HideThread {
+                                        thread_id: tid,
+                                        is_group,
+                                        hide: false,
+                                    });
+                                }
                             }
                         }
                         ThreadCtxAction::OpenSchedule(idx) => {
@@ -4536,7 +4679,7 @@ impl ZaloGuiApp {
                                             }
                                         }
                                         1 => {
-                                            // Tab 1: Tệp tin (Sử dụng pal.file_badge_color)
+                                            // Tab 1: Tệp tin (Sử dụng pal.file_badge_color & Bulk Download #STT 5.5)
                                             if shared_files.is_empty() {
                                                 ui.label(
                                                     RichText::new("Chưa có Tệp tin nào được chia sẻ")
@@ -4544,6 +4687,101 @@ impl ZaloGuiApp {
                                                         .color(pal.text_muted),
                                                 );
                                             } else {
+                                                // Bulk Download Toolbar (#STT 5.5)
+                                                ui.horizontal(|ui| {
+                                                    let mode_btn = ui.add(
+                                                        egui::Button::new(
+                                                            RichText::new(if self.bulk_download_mode { "✕ Hủy chọn" } else { "📥 Tải hàng loạt" })
+                                                                .size(11.0)
+                                                                .color(if self.bulk_download_mode { pal.danger } else { pal.primary }),
+                                                        )
+                                                        .fill(Color32::TRANSPARENT)
+                                                        .stroke(Stroke::new(1.0_f32, if self.bulk_download_mode { pal.danger } else { pal.primary }))
+                                                        .rounding(Rounding::same(4.0)),
+                                                    );
+                                                    if mode_btn.clicked() {
+                                                        self.bulk_download_mode = !self.bulk_download_mode;
+                                                        if !self.bulk_download_mode {
+                                                            self.selected_bulk_files.clear();
+                                                        }
+                                                    }
+
+                                                    if self.bulk_download_mode {
+                                                        let all_selected = !shared_files.is_empty()
+                                                            && shared_files.iter().all(|(_, _, u, ..)| self.selected_bulk_files.contains(u));
+                                                        let select_all_btn = ui.button(
+                                                            RichText::new(if all_selected { "Bỏ chọn" } else { "Chọn hết" }).size(11.0),
+                                                        );
+                                                        if select_all_btn.clicked() {
+                                                            if all_selected {
+                                                                self.selected_bulk_files.clear();
+                                                            } else {
+                                                                for (_, _, u, ..) in &shared_files {
+                                                                    if !u.is_empty() {
+                                                                        self.selected_bulk_files.insert(u.clone());
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        let sel_count = self.selected_bulk_files.len();
+                                                        if sel_count > 0 {
+                                                            let dl_sel_btn = ui.add(
+                                                                egui::Button::new(
+                                                                    RichText::new(format!("Tải ({sel_count})"))
+                                                                        .size(11.0)
+                                                                        .color(Color32::WHITE)
+                                                                        .strong(),
+                                                                )
+                                                                .fill(pal.primary)
+                                                                .rounding(Rounding::same(4.0)),
+                                                            );
+                                                            if dl_sel_btn.clicked() {
+                                                                let target_dir = self.settings.download_dir.clone();
+                                                                let mut dispatched = 0;
+                                                                for (_, fname, furl, ..) in &shared_files {
+                                                                    if self.selected_bulk_files.contains(furl) && !furl.is_empty() {
+                                                                        if let Some(tx) = WORKER_TX.get() {
+                                                                            let _ = tx.send(WorkerCmd::DownloadFile {
+                                                                                url: furl.clone(),
+                                                                                file_name: fname.clone(),
+                                                                                download_dir: target_dir.clone(),
+                                                                            });
+                                                                            dispatched += 1;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                self.show_toast(format!("🚀 Đang tải hàng loạt {dispatched} tệp về máy…"));
+                                                                self.bulk_download_mode = false;
+                                                                self.selected_bulk_files.clear();
+                                                            }
+                                                        }
+                                                    } else {
+                                                        let dl_all_btn = ui.add(
+                                                            egui::Button::new(RichText::new("Tải tất cả").size(11.0).color(pal.text_secondary))
+                                                                .fill(Color32::TRANSPARENT),
+                                                        ).on_hover_text("Tải toàn bộ tệp tin trong hội thoại về thư mục Downloads");
+                                                        if dl_all_btn.clicked() {
+                                                            let target_dir = self.settings.download_dir.clone();
+                                                            let mut dispatched = 0;
+                                                            for (_, fname, furl, ..) in &shared_files {
+                                                                if !furl.is_empty() {
+                                                                    if let Some(tx) = WORKER_TX.get() {
+                                                                        let _ = tx.send(WorkerCmd::DownloadFile {
+                                                                            url: furl.clone(),
+                                                                            file_name: fname.clone(),
+                                                                            download_dir: target_dir.clone(),
+                                                                        });
+                                                                        dispatched += 1;
+                                                                    }
+                                                                }
+                                                            }
+                                                            self.show_toast(format!("🚀 Đang tải tất cả {dispatched} tệp về máy…"));
+                                                        }
+                                                    }
+                                                });
+                                                ui.add_space(4.0);
+
                                                 let limit = if show_all { 30 } else { 5 };
                                                 for (_fmid, fname, furl, badge, _bcol, sub_lbl, ftime) in
                                                     shared_files.iter().take(limit)
@@ -4551,6 +4789,16 @@ impl ZaloGuiApp {
                                                     let badge_col = pal.file_badge_color(fname);
                                                     let row_resp = ui
                                                         .horizontal(|ui| {
+                                                            if self.bulk_download_mode {
+                                                                let mut is_checked = self.selected_bulk_files.contains(furl);
+                                                                if ui.checkbox(&mut is_checked, "").changed() {
+                                                                    if is_checked {
+                                                                        self.selected_bulk_files.insert(furl.clone());
+                                                                    } else {
+                                                                        self.selected_bulk_files.remove(furl);
+                                                                    }
+                                                                }
+                                                            }
                                                             let (icon_r, _) = ui.allocate_exact_size(
                                                                 Vec2::new(36.0, 36.0),
                                                                 Sense::hover(),
@@ -8290,6 +8538,37 @@ impl ZaloGuiApp {
                                     self.schedule_modal_open = !self.schedule_modal_open;
                                 }
 
+                                // Product Catalog & Price Quote Button (`lucide::STORE`) (#STT 6.3)
+                                let (cat_rect, cat_resp) = ui.allocate_exact_size(
+                                    Vec2::new(30.0, 28.0),
+                                    Sense::click(),
+                                );
+                                if self.catalog_modal_open || cat_resp.hovered() {
+                                    ui.painter().rect_filled(
+                                        cat_rect,
+                                        Rounding::same(6.0),
+                                        pal.bg_hover,
+                                    );
+                                }
+                                draw_lucide_icon(
+                                    ui.painter(),
+                                    cat_rect.center(),
+                                    lucide::STORE,
+                                    16.5,
+                                    if self.catalog_modal_open || cat_resp.hovered() {
+                                        pal.primary_hover
+                                    } else {
+                                        pal.text_secondary
+                                    },
+                                );
+                                if cat_resp
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("Danh mục sản phẩm & Báo giá nhanh")
+                                    .clicked()
+                                {
+                                    self.catalog_modal_open = true;
+                                }
+
                                 // 9) Rich Text Formatting Bar Toggle (`PAINTBRUSH`)
                                 let (fmt_rect, fmt_resp) = ui.allocate_exact_size(
                                     Vec2::new(30.0, 28.0),
@@ -8924,6 +9203,14 @@ impl ZaloGuiApp {
         self.render_app_lock_setup_modal(ctx, pal);
         self.render_zavi_meeting_modals(ctx, pal);
         self.render_zavi_conference_overlay(ctx, pal);
+        self.render_hidden_chat_pin_modal(ctx, pal);
+
+        let (cur_tid, cur_is_grp) = self
+            .threads
+            .get(self.selected_thread_index)
+            .map(|t| (t.id.clone(), t.is_group))
+            .unwrap_or_default();
+        self.render_catalog_modal(ctx, pal, &cur_tid, cur_is_grp);
 
         if let Some((del_idx, del_tid, del_name, del_is_group, del_last_id)) =
             self.pending_delete_thread.clone()

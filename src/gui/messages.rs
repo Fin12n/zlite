@@ -1977,6 +1977,89 @@ impl Default for MdOptions {
     }
 }
 
+fn render_product_card_widget(
+    ui: &mut egui::Ui,
+    prod: &crate::catalog::ProductItem,
+    pal: &ThemePalette,
+    max_w: f32,
+    outgoing: bool,
+) -> Option<BubbleAction> {
+    let mut action = None;
+    let card_w = max_w.clamp(200.0, 360.0);
+
+    egui::Frame::none()
+        .fill(if outgoing {
+            pal.primary.linear_multiply(0.12)
+        } else {
+            pal.bg_input
+        })
+        .stroke(Stroke::new(1.0_f32, if outgoing { pal.primary } else { pal.border }))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::symmetric(12.0, 10.0))
+        .show(ui, |ui| {
+            ui.set_max_width(card_w);
+            ui.vertical(|ui| {
+                // Header badge
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("📦 BÁO GIÁ SẢN PHẨM").size(10.5).color(pal.primary_hover).strong());
+                    if !prod.sku.is_empty() {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(format!("SKU: {}", prod.sku)).size(10.5).color(pal.text_muted));
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+
+                // Product Name
+                ui.label(
+                    RichText::new(&prod.name)
+                        .size(13.8)
+                        .color(if outgoing { pal.bubble_out_text } else { pal.text_primary })
+                        .strong(),
+                );
+                ui.add_space(3.0);
+
+                // Price VND
+                ui.label(
+                    RichText::new(crate::catalog::format_currency_vnd(prod.price))
+                        .size(15.5)
+                        .color(pal.danger)
+                        .strong(),
+                );
+
+                if !prod.description.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(&prod.description)
+                            .size(11.5)
+                            .color(if outgoing { pal.bubble_out_meta } else { pal.text_secondary }),
+                    );
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Inquiry / Order Button
+                let btn = egui::Button::new(
+                    RichText::new("💬 Hỏi báo giá / Đặt hàng")
+                        .size(11.5)
+                        .color(Color32::WHITE)
+                        .strong(),
+                )
+                .fill(pal.primary)
+                .rounding(Rounding::same(6.0))
+                .min_size(Vec2::new(card_w - 24.0, 26.0));
+
+                if ui.add(btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    action = Some(BubbleAction::Reply);
+                }
+            });
+        });
+
+    action
+}
+
 pub(super) fn render_message_body(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
@@ -2051,6 +2134,11 @@ pub(super) fn render_message_body(
                 );
             });
         ui.add_space(4.0);
+    }
+
+    // Product Catalog & Price Quote Card (#STT 6.3)
+    if let Some(product) = crate::catalog::ProductItem::from_message_text(trimmed_text, msg.link_thumb.as_deref().or(msg.link_url.as_deref())) {
+        return render_product_card_widget(ui, &product, pal, max_text_width, outgoing);
     }
 
     let sender_label = if msg.is_outgoing {
@@ -4111,13 +4199,32 @@ pub(super) fn render_chat_bubble(
                                 } else {
                                     status_str
                                 };
-                                ui.label(
-                                    RichText::new(status_str).size(11.0).color(status_col),
-                                )
-                                .on_hover_text(if msg.edited {
-                                    "Tin này đã được sửa (thu hồi + gửi lại). Mở menu chuột phải → Xem lịch sử sửa."
-                                } else {
-                                    ""
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                                    ui.label(
+                                        RichText::new(status_str).size(11.0).color(status_col),
+                                    )
+                                    .on_hover_text(if msg.edited {
+                                        "Tin này đã được sửa (thu hồi + gửi lại). Mở menu chuột phải → Xem lịch sử sửa."
+                                    } else {
+                                        ""
+                                    });
+                                    let react_btn = ui.add(
+                                        egui::Button::new(
+                                            RichText::new(lucide::SMILE)
+                                                .size(11.0)
+                                                .color(pal.bubble_out_meta.linear_multiply(0.8)),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Bày tỏ cảm xúc");
+                                    if react_btn.clicked() {
+                                        let hover_id = Id::new("active_hover_reaction_bubble");
+                                        let msg_key = format!("{}_{}", msg.id, msg.ts);
+                                        ui.ctx().data_mut(|d| d.insert_temp(hover_id, msg_key));
+                                        ui.ctx().request_repaint();
+                                    }
                                 });
                             }
                             if !vanished {
@@ -4135,7 +4242,17 @@ pub(super) fn render_chat_bubble(
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
                 }
+                let hover_action = render_hover_reaction_bar(
+                    ui,
+                    fr.response.rect,
+                    msg,
+                    idx,
+                    true,
+                    pal,
+                    emoji_textures,
+                );
                 reaction_action
+                    .or(hover_action)
                     .or(quote_action)
                     .or(card_action)
                     .or_else(|| {
@@ -4274,11 +4391,30 @@ pub(super) fn render_chat_bubble(
                                 } else {
                                     msg.time.clone()
                                 };
-                                ui.label(
-                                    RichText::new(ts)
-                                        .color(pal.bubble_in_meta)
-                                        .size(11.0),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+                                    ui.label(
+                                        RichText::new(ts)
+                                            .color(pal.bubble_in_meta)
+                                            .size(11.0),
+                                    );
+                                    let react_btn = ui.add(
+                                        egui::Button::new(
+                                            RichText::new(lucide::SMILE)
+                                                .size(11.0)
+                                                .color(pal.bubble_in_meta.linear_multiply(0.8)),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Bày tỏ cảm xúc");
+                                    if react_btn.clicked() {
+                                        let hover_id = Id::new("active_hover_reaction_bubble");
+                                        let msg_key = format!("{}_{}", msg.id, msg.ts);
+                                        ui.ctx().data_mut(|d| d.insert_temp(hover_id, msg_key));
+                                        ui.ctx().request_repaint();
+                                    }
+                                });
                             }
                             if !vanished {
                                 if let Some(badge) = vanish_badge_label(vanish_remain) {
@@ -4295,7 +4431,17 @@ pub(super) fn render_chat_bubble(
                 if fr.response.double_clicked() {
                     return Some(BubbleAction::Reply);
                 }
+                let hover_action = render_hover_reaction_bar(
+                    ui,
+                    fr.response.rect,
+                    msg,
+                    idx,
+                    false,
+                    pal,
+                    emoji_textures,
+                );
                 reaction_action
+                    .or(hover_action)
                     .or(quote_action)
                     .or(card_action)
                     .or_else(|| {
@@ -4855,7 +5001,6 @@ pub(super) fn render_quote_block(
     clicked.then(|| BubbleAction::JumpToQuoted(reference.unwrap_or_default()))
 }
 
-#[allow(dead_code)]
 pub(super) fn render_hover_reaction_bar(
     ui: &mut egui::Ui,
     bubble_rect: Rect,

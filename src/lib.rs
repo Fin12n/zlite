@@ -52,6 +52,8 @@ pub mod native_notifications;
 pub mod app_lock;
 /// Zavi Conference (Group Video Calling & Meeting) (#107).
 pub mod zavi;
+/// Product Catalog and Price Quote Cards (#STT 6.3).
+pub mod catalog;
 
 #[cfg(any(windows, test))]
 mod clipboard_dib;
